@@ -1,20 +1,30 @@
 // First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
 const Player = {
   x: 0, y: 0, angle: 0.6,
+  pitch: 0, // vertical look, in character rows of horizon offset
   keys: {},
 
   init() {
     const [sx, sy] = World.findSpawn();
     this.x = sx; this.y = sy;
 
-    addEventListener('keydown', e => { this.keys[e.code] = true; });
+    addEventListener('keydown', e => {
+      this.keys[e.code] = true;
+      if (e.code === 'KeyN') CFG.DAY = !CFG.DAY;
+      if (e.code === 'KeyF') {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen();
+      }
+    });
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => canvas.requestPointerLock());
     addEventListener('mousemove', e => {
-      if (document.pointerLockElement === canvas)
+      if (document.pointerLockElement === canvas) {
         this.angle += e.movementX * 0.0022;
+        this.pitch = clamp(this.pitch + e.movementY * 0.06, -CFG.ROWS * 0.42, CFG.ROWS * 0.42);
+      }
     });
   },
 

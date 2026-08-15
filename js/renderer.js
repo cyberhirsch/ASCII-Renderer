@@ -22,24 +22,14 @@ const Renderer = {
     [255, 225, 120],  // 7 yellow (lane marks)
     [255, 255, 255],  // 8 white
     [255, 110, 110],  // 9 red
+    [150, 195, 255],  // 10 sky blue
   ],
 
   init() {
     const canvas = document.getElementById('screen');
     this.ctx = canvas.getContext('2d');
-    this.ctx.font = `bold ${CFG.FONT_SIZE}px "Consolas", "Courier New", monospace`;
-    this.cw = this.ctx.measureText('M').width;
-    this.chh = CFG.FONT_SIZE + 1;
-    canvas.width = Math.ceil(CFG.COLS * this.cw);
-    canvas.height = CFG.ROWS * this.chh;
-    // canvas size reset clears state; set font again
-    this.ctx.font = `bold ${CFG.FONT_SIZE}px "Consolas", "Courier New", monospace`;
-    this.ctx.textBaseline = 'top';
-
-    const N = CFG.COLS * CFG.ROWS;
-    this.chars = new Uint16Array(N);
-    this.color = new Uint8Array(N);
-    this.depth = new Float32Array(N);
+    this.resize();
+    addEventListener('resize', () => this.resize());
 
     // palette: hue x brightness level
     this.palette = [];
@@ -52,15 +42,40 @@ const Renderer = {
     }
   },
 
+  // fullscreen: derive the character grid from the window size
+  resize() {
+    const canvas = this.ctx.canvas;
+    const font = `bold ${CFG.FONT_SIZE}px "Consolas", "Courier New", monospace`;
+    this.ctx.font = font;
+    this.cw = this.ctx.measureText('M').width;
+    this.chh = CFG.FONT_SIZE + 1;
+    CFG.COLS = Math.max(40, Math.floor(innerWidth / this.cw));
+    CFG.ROWS = Math.max(24, Math.floor(innerHeight / this.chh));
+    canvas.width = Math.ceil(CFG.COLS * this.cw);
+    canvas.height = CFG.ROWS * this.chh;
+    this.ctx.font = font; // size reset clears state
+    this.ctx.textBaseline = 'top';
+    const N = CFG.COLS * CFG.ROWS;
+    this.chars = new Uint16Array(N);
+    this.color = new Uint8Array(N);
+    this.depth = new Float32Array(N);
+  },
+
   colId(hue, brightness) {
     const l = clamp((brightness * this.PAL_LEVELS) | 0, 0, this.PAL_LEVELS - 1);
     return hue * this.PAL_LEVELS + l;
   },
 
-  // The composable brightness stage. Lighting terms (sun, AO) multiply in here.
+  // The composable brightness stage: base * lighting * distance fade.
+  // Day fades toward haze (floor 0.22) instead of black.
   shade(base, dist) {
-    const fade = Math.pow(clamp(1 - dist / CFG.MAX_DIST, 0, 1), 1.5);
-    return base * fade;
+    const t = clamp(1 - dist / CFG.MAX_DIST, 0, 1);
+    if (CFG.DAY) {
+      // aerial perspective: blend toward bright haze with distance
+      const hz = Math.pow(1 - t, 1.4);
+      return base * (1 - hz) + 0.58 * hz;
+    }
+    return base * Math.pow(t, 1.5);
   },
 
   put(col, row, ch, colorId, d) {
@@ -82,7 +97,7 @@ const Renderer = {
     this.color.fill(0);
     this.depth.fill(Infinity);
 
-    const horizon = (ROWS * 0.5) | 0;
+    const horizon = clamp((ROWS * 0.5 + Player.pitch) | 0, 4, ROWS - 5);
     const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
     const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
     const px = Player.x, py = Player.y;
@@ -142,7 +157,10 @@ const Renderer = {
             const cover = isTrunk ? (wallU > 0.35 && wallU < 0.65 ? 1 : 0)
               : hash3(mapX * 7 + c, r, 991) < 0.52 ? 1 : 0;
             if (!cover) continue;
-            const b = this.shade(isTrunk ? 0.35 : 0.5 + hash3(c, r, 5) * 0.4, d);
+            let base = isTrunk ? 0.35 : 0.5 + hash3(c, r, 5) * 0.4;
+            if (CFG.DAY) base = (isTrunk ? 0.45 : 0.75 + hash3(c, r, 5) * 0.25)
+              * Light.sunAt(mapX, mapY, wz);
+            const b = this.shade(base, d);
             const ch = isTrunk ? '|' : TREE_CH[(hash3(mapX, r, mapY) * TREE_CH.length) | 0];
             this.put(c, r, ch, this.colId(isTrunk ? 4 : 5, b), d);
           }
@@ -156,6 +174,13 @@ const Renderer = {
         const hue = World.bcol[i] % 5;
         const bs = World.bseed[i];
         const sideDim = side === 1 ? 0.75 : 1.0;
+        // face normal + the air cell in front of the face (sun/AO sample point)
+        const nX = side === 0 ? -stepX : 0, nY = side === 1 ? -stepY : 0;
+        const airX = side === 0 ? mapX - stepX : mapX;
+        const airY = side === 1 ? mapY - stepY : mapY;
+        const faceLight = CFG.DAY
+          ? 0.7 + 0.3 * Math.max(0, nX * Light.sunX + nY * Light.sunY) : 1;
+        const litP = CFG.DAY ? 0.05 : 0.30; // few lit windows in daylight
 
         for (let r = r0; r <= r1; r++) {
           const wz = (yBot - r) / (yBot - yTop) * h;
@@ -163,21 +188,31 @@ const Renderer = {
           const winY = wz | 0;                        // 1 window row per world unit
           const edge = wallU < 0.06 || wallU > 0.94;
           const topEdge = r === r0 && yTop >= 0;
-          const lit = hash3(mapX * 2 + winX, winY, bs) < 0.30;
+          const lit = hash3(mapX * 2 + winX, winY, bs) < litP;
 
-          let ch, hueU, b;
-          if (topEdge) { ch = '='; hueU = hue; b = this.shade(0.55, d) * sideDim; }
-          else if (edge) { ch = '|'; hueU = hue; b = this.shade(0.30, d) * sideDim; }
+          let ch, base;
+          if (topEdge) { ch = '='; base = CFG.DAY ? 0.85 : 0.55; }
+          else if (edge) { ch = '|'; base = CFG.DAY ? 0.50 : 0.30; }
           else if (lit) {
             ch = WALL_LIT[(hash3(mapX + winX, winY, bs ^ 3) * WALL_LIT.length) | 0];
             // subtle per-window flicker, stepped at ~3Hz so it reads as data noise
             const flick = 0.8 + 0.25 * hash3(mapX + winX, winY, ((this.time * 3) | 0) ^ bs);
-            hueU = hue; b = this.shade(0.85 * flick, d) * sideDim;
+            base = 0.85 * flick;
           } else {
             ch = WALL_DIM[(hash3(mapX + winX, winY + 7, bs) * WALL_DIM.length) | 0];
-            hueU = hue; b = this.shade(0.22, d) * sideDim;
+            base = CFG.DAY ? 0.80 : 0.22;
           }
-          this.put(c, r, ch, this.colId(hueU, b), d);
+          let b;
+          if (CFG.DAY && !lit) {
+            b = this.shade(base * faceLight * Light.sunAt(airX, airY, wz)
+              * Light.aoLerp(airX, airY, wz), d) * sideDim;
+          } else {
+            b = this.shade(base, d) * sideDim;
+          }
+          // daylight desaturates buildings to concrete gray; neon is for night.
+          // far surfaces tint toward the sky for aerial perspective.
+          const hz = CFG.DAY && d / CFG.MAX_DIST > 0.62;
+          this.put(c, r, ch, this.colId(hz ? 10 : CFG.DAY ? 6 : hue, b), d);
         }
 
         clipTop = Math.min(clipTop, Math.max(r0, 0));
@@ -200,31 +235,32 @@ const Renderer = {
         if (t === T_ROAD) {
           if (f & F_LANE) {
             ch = (f & F_ROAD_H) && !(f & F_ROAD_V) ? '-' : '|';
-            hue = 7; base = 0.6;
+            hue = 7; base = CFG.DAY ? 0.75 : 0.6;
           } else {
             ch = GROUND_RAMP[(hash3(cxi * 3, cyi * 3, 17) * GROUND_RAMP.length) | 0];
-            hue = 6; base = 0.20;
+            hue = 6; base = CFG.DAY ? 0.55 : 0.20;
           }
         } else if (t === T_WALK) {
           ch = hash3(cxi, cyi, 31) < 0.5 ? '.' : ',';
-          hue = 6; base = 0.34;
+          hue = 6; base = CFG.DAY ? 0.72 : 0.34;
         } else { // grass / plaza
           ch = hash3(cxi, cyi, 41) < 0.5 ? '"' : ',';
-          hue = 5; base = 0.25;
+          hue = 5; base = CFG.DAY ? 0.68 : 0.25;
         }
-        const b = this.shade(base, rowDist);
+        const light = CFG.DAY
+          ? Light.sunAt(cxi, cyi, 0.01) * Light.ao[wi] : 1;
+        const b = this.shade(base * light, rowDist);
         this.put(c, r, ch, this.colId(hue, b), rowDist);
       }
     }
 
-    this.renderSprites(dirX, dirY, planeX, planeY);
+    this.renderSprites(dirX, dirY, planeX, planeY, horizon);
     this.renderSky(horizon);
     this.blit();
   },
 
-  renderSprites(dirX, dirY, planeX, planeY) {
+  renderSprites(dirX, dirY, planeX, planeY, horizon) {
     const invDet = 1 / (planeX * dirY - dirX * planeY);
-    const horizon = (CFG.ROWS * 0.5) | 0;
     const all = [];
     for (const c of Entities.cars) all.push({ e: c, kind: 0 });
     for (const p of Entities.peds) all.push({ e: p, kind: 1 });
@@ -243,6 +279,7 @@ const Renderer = {
       const colsPerUnit = (CFG.COLS / 2) / (s.tz * CFG.PLANE_LEN);
       const rowsPerUnit = CFG.Y_SCALE / s.tz;
       const yBot = horizon + rowsPerUnit * CFG.EYE;
+      const gl = CFG.DAY ? Light.groundLight(s.e.x, s.e.y) : 1;
 
       if (s.kind === 0) { // car
         const wC = Math.max(1, (1.5 * colsPerUnit) | 0);
@@ -252,7 +289,7 @@ const Renderer = {
           const col = (screenC - wC / 2 + cc) | 0;
           const row = (yBot - rr) | 0;
           const topRow = rr === hR - 1 && hR > 1;
-          const b = this.shade(topRow ? 0.5 : 0.8, s.tz);
+          const b = this.shade((topRow ? 0.5 : 0.8) * gl, s.tz);
           this.put(col, row, topRow ? 'o' : '#', this.colId(hue, b), s.tz);
         }
       } else { // pedestrian
@@ -261,7 +298,7 @@ const Renderer = {
         for (let rr = 0; rr < hR; rr++) {
           const row = (yBot - rr) | 0;
           const head = rr === hR - 1 && hR > 1;
-          const b = this.shade(0.6 * s.e.shade, s.tz);
+          const b = this.shade((CFG.DAY ? 0.85 : 0.6) * s.e.shade * gl, s.tz);
           this.put(col, row, head ? 'o' : 'i', this.colId(6, b), s.tz);
         }
       }
@@ -269,7 +306,37 @@ const Renderer = {
   },
 
   renderSky(horizon) {
-    // sparse starfield with parallax on camera angle
+    if (CFG.DAY) {
+      // dithered blue gradient, sun disc at the sun azimuth, haze below horizon
+      let aDiff = CFG.SUN_AZ - Player.angle;
+      aDiff = ((aDiff + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+      const sunCol = Math.abs(aDiff) < 1.1
+        ? ((CFG.COLS / 2) * (1 + Math.tan(aDiff) / CFG.PLANE_LEN)) | 0 : -9999;
+      const sunRow = (horizon * 0.30) | 0;
+      const SKY_RAMP = '=::;;';
+      for (let r = 0; r < CFG.ROWS; r++) {
+        for (let c = 0; c < CFG.COLS; c++) {
+          const i = r * CFG.COLS + c;
+          if (this.depth[i] !== Infinity) continue;
+          if (r < horizon) {
+            const t = (horizon - r) / horizon; // 0 at horizon, 1 at top
+            const dSun = Math.hypot(c - sunCol, (r - sunRow) * 1.9);
+            if (dSun < 2.3) { this.chars[i] = 64; this.color[i] = this.colId(8, 0.95); }      // '@'
+            else if (dSun < 4.2) { this.chars[i] = 111; this.color[i] = this.colId(7, 0.8); } // 'o'
+            else {
+              const ch = SKY_RAMP[clamp((t * SKY_RAMP.length) | 0, 0, SKY_RAMP.length - 1)];
+              const dither = hash3(c, r, 555) * 0.10;
+              this.chars[i] = ch.charCodeAt(0);
+              this.color[i] = this.colId(10, 0.98 - t * 0.30 - dither);
+            }
+          } else { // below horizon, beyond MAX_DIST: ground haze
+            this.chars[i] = 44; this.color[i] = this.colId(10, 0.42);                          // ','
+          }
+        }
+      }
+      return;
+    }
+    // night: sparse starfield with parallax on camera angle
     const angOff = (Player.angle * CFG.COLS / (2 * Math.PI) * 3) | 0;
     for (let r = 0; r < horizon + 2; r++) {
       for (let c = 0; c < CFG.COLS; c++) {

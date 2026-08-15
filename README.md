@@ -5,12 +5,15 @@ engine in vanilla JavaScript + Canvas 2D — no game engine, no 3D models, no
 textures, no shaders. Ships as a single HTML file.
 
 ![](docs/screenshot.png)
+![](docs/screenshot-day.jpg)
 
 ## Run
 
 Open `dist/index.html` in a browser. That's it — the file is self-contained.
 
-**Controls:** WASD move · arrow keys turn · Shift run · click the canvas for mouse-look.
+**Controls:** WASD move · arrow keys turn · Shift run · click the canvas for
+free mouse-look (horizontal + vertical) · **N** toggles day/night · **F** fullscreen.
+The character grid sizes itself to the window.
 
 ## How it works
 
@@ -25,9 +28,16 @@ Open `dist/index.html` in a browser. That's it — the file is self-contained.
 - Tree foliage is transparent: dithered glyph coverage that doesn't advance
   the occlusion clip, so the world shows through the gaps.
 - Everything reduces to (glyph, color, depth) in a character-cell framebuffer.
-  Brightness flows through a single composable stage (`Renderer.shade`) —
-  distance fade today; sunlight and ambient occlusion multiply in later.
-  Brightness picks the glyph and palette level; bright glyphs get a bloom pass.
+  Brightness flows through a single composable stage (`Renderer.shade`):
+  base × sunlight × AO × distance term. Brightness picks the glyph and palette
+  level; bright glyphs get a bloom pass.
+- Lighting is baked at generation time (`js/light.js`): a per-cell shadow-height
+  map (march toward the sun; a point is sunlit iff above the map) gives
+  directional shadows for one array lookup per sample, and neighbor-occupancy
+  AO darkens building bases, alleys, and under-tree areas. Day mode adds a
+  dithered sky gradient with a sun disc, desaturates buildings to concrete
+  gray, and fades distance toward bright haze (aerial perspective) instead of
+  black; night keeps the neon palette, lit windows, and starfield.
 - One batched `fillText` per same-color run per row keeps the draw pass fast
   (~6.5 ms/frame at 150×68 characters).
 

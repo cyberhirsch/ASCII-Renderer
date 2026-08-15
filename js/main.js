@@ -1,6 +1,7 @@
 // Bootstrap + frame loop.
 (function () {
   World.generate(CFG.SEED);
+  Light.bake();
   Entities.init(CFG.SEED);
   Player.init();
   Renderer.init();

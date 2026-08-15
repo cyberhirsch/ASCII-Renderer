@@ -78,10 +78,11 @@ Given the above, a reasonable next milestone (subject to the creator's own prior
 - **File layout:** Develop as split JS modules; a minimal build step inlines everything into one shippable `index.html` for release.
 - **Audio:** Skipped for this milestone.
 
-## 10b. Future (confirmed interest, not this milestone)
-- **Sunlight (directional light + shadows):** grid-marched shadow rays toward a sun direction, baked to a per-cell light map at generation (re-bakeable per time-of-day step). Dynamic objects sample the baked map.
-- **Ambient occlusion:** precomputed from neighboring cell occupancy/heights — darkens building bases, corners, under foliage.
-- **Architectural requirement now:** renderer computes a single brightness value per sample through an explicit, composable stage (distance fade × light map × AO) before glyph mapping, so lighting terms bolt on without refactoring.
+## 10b. Sunlight + AO — SHIPPED (2026-08-15)
+- **Sunlight:** per-cell shadow-height map baked at generation (`js/light.js`); a point at height z is sunlit iff z ≥ shadowH. Directional face term + cast shadows, one lookup per sample.
+- **Ambient occlusion:** neighbor-occupancy bake, height-faded (contact darkening at building bases).
+- **Day mode** (default; `N` toggles night): dithered sky gradient + sun disc, buildings desaturate to concrete gray, distance fades to bright haze with far surfaces tinting sky-blue (aerial perspective). Night keeps neon/lit-windows/starfield.
+- Also shipped: fullscreen (grid sized from window, `F` key) and free mouse-look (pitch via horizon offset).
 
 ## 10a. Remaining Open Questions
 - Controls: WASD + mouse-look vs. keyboard-only turning (default assumption: WASD move, arrow keys/mouse turn).

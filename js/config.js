@@ -1,7 +1,7 @@
 // Global configuration. Plain script, shared global scope (inlined at build time).
 const CFG = {
-  COLS: 150,          // character grid width
-  ROWS: 68,           // character grid height
+  COLS: 150,          // character grid width (recomputed from window size at init)
+  ROWS: 68,           // character grid height (recomputed from window size at init)
   FONT_SIZE: 14,      // px, monospace
   PLANE_LEN: 0.85,    // camera plane half-length (horizontal FOV)
   Y_SCALE: 62,        // vertical projection factor (rows per worldunit/dist)
@@ -11,6 +11,11 @@ const CFG = {
   SEED: 20260815,
   CAR_COUNT: 42,
   PED_COUNT: 70,
+  // lighting
+  DAY: true,
+  SUN_AZ: 0.9,        // sun azimuth (rad)
+  SUN_EL: 0.9,        // sun elevation (rad) — high sun keeps streets out of shadow
+  SHADOW: 0.55,       // brightness factor inside cast shadows
 };
 
 // Cell types
