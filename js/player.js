@@ -21,12 +21,18 @@ const Player = {
 
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => canvas.requestPointerLock());
+    // browsers can fire one huge bogus movement delta when pointer lock
+    // engages or the cursor re-syncs; skip the first events and clamp the rest
+    let skipEvents = 0;
+    document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
-      if (document.pointerLockElement === canvas) {
-        this.angle += e.movementX * 0.0022;
-        // mouse up = look up = horizon drops = pitch grows. Unclamped.
-        this.pitch -= e.movementY * 0.06;
-      }
+      if (document.pointerLockElement !== canvas) return;
+      if (skipEvents > 0) { skipEvents--; return; }
+      const mx = clamp(e.movementX, -120, 120);
+      const my = clamp(e.movementY, -120, 120);
+      this.angle += mx * 0.0022;
+      // mouse up = look up = horizon drops = pitch grows. Unclamped.
+      this.pitch -= my * 0.06;
     });
   },
 
