@@ -23,7 +23,9 @@ const Player = {
     addEventListener('mousemove', e => {
       if (document.pointerLockElement === canvas) {
         this.angle += e.movementX * 0.0022;
-        this.pitch = clamp(this.pitch + e.movementY * 0.06, -CFG.ROWS * 0.42, CFG.ROWS * 0.42);
+        // mouse up = look up = horizon drops = pitch grows.
+        // range lets the horizon leave the screen entirely (straight up/down)
+        this.pitch = clamp(this.pitch - e.movementY * 0.06, -CFG.ROWS * 0.62, CFG.ROWS * 0.62);
       }
     });
   },

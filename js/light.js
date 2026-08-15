@@ -42,7 +42,7 @@ const Light = {
         if (World.type[j] === T_BLDG) occ += Math.min(World.height[j] / 6, 1);
         else if (World.type[j] === T_TREE) occ += 0.4;
       }
-      this.ao[i] = 1 - Math.min(occ * 0.09, 0.45);
+      this.ao[i] = 1 - Math.min(occ * 0.14, 0.60);
     }
   },
 

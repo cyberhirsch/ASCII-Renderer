@@ -14,8 +14,8 @@ const CFG = {
   // lighting
   DAY: true,
   SUN_AZ: 0.9,        // sun azimuth (rad)
-  SUN_EL: 0.9,        // sun elevation (rad) — high sun keeps streets out of shadow
-  SHADOW: 0.55,       // brightness factor inside cast shadows
+  SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
+  SHADOW: 0.35,       // brightness factor inside cast shadows
 };
 
 // Cell types

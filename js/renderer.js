@@ -97,7 +97,7 @@ const Renderer = {
     this.color.fill(0);
     this.depth.fill(Infinity);
 
-    const horizon = clamp((ROWS * 0.5 + Player.pitch) | 0, 4, ROWS - 5);
+    const horizon = (ROWS * 0.5 + Player.pitch) | 0; // may leave the screen: full freelook
     const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
     const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
     const px = Player.x, py = Player.y;
@@ -312,7 +312,9 @@ const Renderer = {
       aDiff = ((aDiff + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
       const sunCol = Math.abs(aDiff) < 1.1
         ? ((CFG.COLS / 2) * (1 + Math.tan(aDiff) / CFG.PLANE_LEN)) | 0 : -9999;
-      const sunRow = (horizon * 0.30) | 0;
+      // sun sits above the neutral horizon by ~half a screen: hidden at level
+      // view, revealed by a modest look-up regardless of window size
+      const sunRow = (horizon - CFG.ROWS * 0.55) | 0;
       const SKY_RAMP = '=::;;';
       for (let r = 0; r < CFG.ROWS; r++) {
         for (let c = 0; c < CFG.COLS; c++) {
@@ -321,13 +323,17 @@ const Renderer = {
           if (r < horizon) {
             const t = (horizon - r) / horizon; // 0 at horizon, 1 at top
             const dSun = Math.hypot(c - sunCol, (r - sunRow) * 1.9);
-            if (dSun < 2.3) { this.chars[i] = 64; this.color[i] = this.colId(8, 0.95); }      // '@'
-            else if (dSun < 4.2) { this.chars[i] = 111; this.color[i] = this.colId(7, 0.8); } // 'o'
+            if (dSun < 3.2) { this.chars[i] = 64; this.color[i] = this.colId(8, 0.95); }      // '@'
+            else if (dSun < 6.0) { this.chars[i] = 111; this.color[i] = this.colId(7, 0.8); } // 'o'
             else {
               const ch = SKY_RAMP[clamp((t * SKY_RAMP.length) | 0, 0, SKY_RAMP.length - 1)];
               const dither = hash3(c, r, 555) * 0.10;
+              // wide glare around the sun so it reads even when the disc
+              // itself is hidden behind a tower
+              const glow = clamp(1 - dSun / 18, 0, 1) * 0.35;
               this.chars[i] = ch.charCodeAt(0);
-              this.color[i] = this.colId(10, 0.98 - t * 0.30 - dither);
+              this.color[i] = this.colId(glow > 0.12 ? 7 : 10,
+                clamp(0.98 - t * 0.30 - dither + glow, 0, 1));
             }
           } else { // below horizon, beyond MAX_DIST: ground haze
             this.chars[i] = 44; this.color[i] = this.colId(10, 0.42);                          // ','
@@ -338,7 +344,8 @@ const Renderer = {
     }
     // night: sparse starfield with parallax on camera angle
     const angOff = (Player.angle * CFG.COLS / (2 * Math.PI) * 3) | 0;
-    for (let r = 0; r < horizon + 2; r++) {
+    const skyEnd = Math.min(horizon + 2, CFG.ROWS);
+    for (let r = 0; r < skyEnd; r++) {
       for (let c = 0; c < CFG.COLS; c++) {
         const i = r * CFG.COLS + c;
         if (this.depth[i] !== Infinity) continue;
