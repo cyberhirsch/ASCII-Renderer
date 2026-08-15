@@ -11,6 +11,7 @@ const Player = {
     addEventListener('keydown', e => {
       this.keys[e.code] = true;
       if (e.code === 'KeyN') CFG.DAY = !CFG.DAY;
+      if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
       if (e.code === 'KeyF') {
         if (document.fullscreenElement) document.exitFullscreen();
         else document.documentElement.requestFullscreen();

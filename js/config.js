@@ -7,10 +7,14 @@ const CFG = {
   Y_SCALE: 62,        // vertical projection factor (rows per worldunit/dist)
   MAX_DIST: 44,       // raycast cutoff (world cells)
   EYE: 1.55,          // camera height above ground
-  WORLD: 96,          // world grid size (cells per side)
+  WORLD: 192,         // world grid size (cells per side)
+  CITY: 96,           // city core size, centered; the rest is open ground
   SEED: 20260815,
   CAR_COUNT: 42,
   PED_COUNT: 70,
+  // rendering
+  MONO: true,         // uniform grayscale for everything (M toggles)
+  FLAT: true,         // buildings as plain shaded boxes, no windows
   // lighting
   DAY: true,
   SUN_AZ: 0.9,        // sun azimuth (rad)

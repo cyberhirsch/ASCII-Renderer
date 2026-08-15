@@ -26,15 +26,19 @@ const World = {
     this.bcol = new Uint8Array(N);
     this.bseed = new Uint8Array(N);
 
+    // City core is centered; everything outside stays open ground
+    const c0 = (W - CFG.CITY) >> 1, c1 = c0 + CFG.CITY;
+    this.cityMin = c0; this.cityMax = c1;
+
     // Road lines (3 cells wide, center cell carries lane dashes)
     this.roadX = []; this.roadY = [];
-    let p = 4 + ((rng() * 4) | 0);
-    while (p < W - 6) { this.roadX.push(p); p += 9 + ((rng() * 8) | 0); }
-    p = 4 + ((rng() * 4) | 0);
-    while (p < W - 6) { this.roadY.push(p); p += 9 + ((rng() * 8) | 0); }
+    let p = c0 + 4 + ((rng() * 4) | 0);
+    while (p < c1 - 6) { this.roadX.push(p); p += 9 + ((rng() * 8) | 0); }
+    p = c0 + 4 + ((rng() * 4) | 0);
+    while (p < c1 - 6) { this.roadY.push(p); p += 9 + ((rng() * 8) | 0); }
 
     for (const cx of this.roadX) {
-      for (let y = 0; y < W; y++) {
+      for (let y = c0; y < c1; y++) {
         for (let dx = -1; dx <= 1; dx++) {
           const i = this.idx(cx + dx, y);
           this.type[i] = T_ROAD;
@@ -44,7 +48,7 @@ const World = {
       }
     }
     for (const cy of this.roadY) {
-      for (let x = 0; x < W; x++) {
+      for (let x = c0; x < c1; x++) {
         for (let dy = -1; dy <= 1; dy++) {
           const i = this.idx(x, cy + dy);
           this.type[i] = T_ROAD;
@@ -65,10 +69,18 @@ const World = {
       if (nearRoad) this.type[this.idx(x, y)] = T_WALK;
     }
 
-    // Block interiors: buildings on a 3x3 footprint grid, some plazas with trees
+    // Block interiors: buildings on a 3x3 footprint grid, some plazas with trees.
+    // Outside the city core: open plains with scattered trees.
     for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
       const i = this.idx(x, y);
       if (this.type[i] !== T_GRASS) continue;
+      if (x < c0 || y < c0 || x >= c1 || y >= c1) {
+        if (hash3(x, y, seed ^ 0x7777) < 0.015) {
+          this.type[i] = T_TREE;
+          this.height[i] = 2 + ((hash3(x, y, seed ^ 0x78) * 2) | 0);
+        }
+        continue;
+      }
       const fx = (x / 3) | 0, fy = (y / 3) | 0;
       const hzone = hash3(fx, fy, seed);
       if (hzone < 0.16) {

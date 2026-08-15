@@ -12,8 +12,12 @@ textures, no shaders. Ships as a single HTML file.
 Open `dist/index.html` in a browser. That's it — the file is self-contained.
 
 **Controls:** WASD move · arrow keys turn · Shift run · click the canvas for
-free mouse-look (horizontal + vertical) · **N** toggles day/night · **F** fullscreen.
-The character grid sizes itself to the window.
+free mouse-look (full vertical range) · **N** day/night · **M** mono/color ·
+**F** fullscreen. The character grid sizes itself to the window.
+
+Default look: uniform grayscale, buildings as plain shaded boxes (`MONO`/`FLAT`
+in `js/config.js`), spherical white-to-blue sky gradient. The 192² world is a
+96² city core surrounded by open plains you can walk out into.
 
 ## How it works
 

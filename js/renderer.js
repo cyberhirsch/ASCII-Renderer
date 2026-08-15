@@ -40,6 +40,21 @@ const Renderer = {
         this.palette.push(`rgb(${(r * f) | 0},${(g * f) | 0},${(b * f) | 0})`);
       }
     }
+    // dedicated sky gradient row: white at horizon -> blue at zenith.
+    // written directly (not via colId) so it stays colored in mono mode.
+    this.skyBase = this.palette.length;
+    for (let l = 0; l < this.PAL_LEVELS; l++) {
+      const f = l / (this.PAL_LEVELS - 1);
+      const r = (245 + (80 - 245) * f) | 0;
+      const g = (248 + (140 - 248) * f) | 0;
+      const b = (255 + (235 - 255) * f) | 0;
+      this.palette.push(`rgb(${r},${g},${b})`);
+    }
+  },
+
+  // sky color by elevation 0 (horizon, white) .. 1 (zenith, blue)
+  skyId(t) {
+    return this.skyBase + clamp((t * this.PAL_LEVELS) | 0, 0, this.PAL_LEVELS - 1);
   },
 
   // fullscreen: derive the character grid from the window size
@@ -62,6 +77,7 @@ const Renderer = {
   },
 
   colId(hue, brightness) {
+    if (CFG.MONO) hue = 6; // uniform grayscale: brightness is the only signal
     const l = clamp((brightness * this.PAL_LEVELS) | 0, 0, this.PAL_LEVELS - 1);
     return hue * this.PAL_LEVELS + l;
   },
@@ -193,6 +209,7 @@ const Renderer = {
           let ch, base;
           if (topEdge) { ch = '='; base = CFG.DAY ? 0.85 : 0.55; }
           else if (edge) { ch = '|'; base = CFG.DAY ? 0.50 : 0.30; }
+          else if (CFG.FLAT) { ch = '#'; base = CFG.DAY ? 0.75 : 0.30; }
           else if (lit) {
             ch = WALL_LIT[(hash3(mapX + winX, winY, bs ^ 3) * WALL_LIT.length) | 0];
             // subtle per-window flicker, stepped at ~3Hz so it reads as data noise
@@ -321,22 +338,22 @@ const Renderer = {
           const i = r * CFG.COLS + c;
           if (this.depth[i] !== Infinity) continue;
           if (r < horizon) {
-            const t = (horizon - r) / horizon; // 0 at horizon, 1 at top
+            // spherical gradient: elevation angle above the horizon drives
+            // the white->blue blend (atan compresses a white band at horizon)
+            const elev = Math.atan2(horizon - r, CFG.Y_SCALE) / (Math.PI / 2);
             const dSun = Math.hypot(c - sunCol, (r - sunRow) * 1.9);
-            if (dSun < 3.2) { this.chars[i] = 64; this.color[i] = this.colId(8, 0.95); }      // '@'
-            else if (dSun < 6.0) { this.chars[i] = 111; this.color[i] = this.colId(7, 0.8); } // 'o'
+            if (dSun < 3.2) { this.chars[i] = 64; this.color[i] = this.skyId(0); }   // '@' sun disc
+            else if (dSun < 6.0) { this.chars[i] = 111; this.color[i] = this.skyId(0.1); } // 'o' halo
             else {
-              const ch = SKY_RAMP[clamp((t * SKY_RAMP.length) | 0, 0, SKY_RAMP.length - 1)];
-              const dither = hash3(c, r, 555) * 0.10;
-              // wide glare around the sun so it reads even when the disc
-              // itself is hidden behind a tower
-              const glow = clamp(1 - dSun / 18, 0, 1) * 0.35;
+              const ch = SKY_RAMP[clamp((elev * 1.6 * SKY_RAMP.length) | 0, 0, SKY_RAMP.length - 1)];
+              const dither = hash3(c, r, 555) * 0.08;
+              // sun glare whitens the gradient locally
+              const glow = clamp(1 - dSun / 18, 0, 1) * 0.6;
               this.chars[i] = ch.charCodeAt(0);
-              this.color[i] = this.colId(glow > 0.12 ? 7 : 10,
-                clamp(0.98 - t * 0.30 - dither + glow, 0, 1));
+              this.color[i] = this.skyId(clamp(elev * 1.35 + dither - glow, 0, 1));
             }
-          } else { // below horizon, beyond MAX_DIST: ground haze
-            this.chars[i] = 44; this.color[i] = this.colId(10, 0.42);                          // ','
+          } else { // below horizon, beyond MAX_DIST: haze matches the horizon white
+            this.chars[i] = 44; this.color[i] = this.skyId(0.05);                     // ','
           }
         }
       }
@@ -374,7 +391,7 @@ const Renderer = {
             const color = this.palette[runColor];
             ctx.fillStyle = color;
             // bloom: bright palette levels glow
-            if ((runColor % this.PAL_LEVELS) >= 6) {
+            if (runColor < this.skyBase && (runColor % this.PAL_LEVELS) >= 6) {
               ctx.shadowColor = color;
               ctx.shadowBlur = 7;
             } else {
