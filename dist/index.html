@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ASCII City</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100vw; max-height: 100vh; image-rendering: pixelated; }
+  #hud {
+    position: fixed; left: 10px; bottom: 8px;
+    font: 12px "Consolas", monospace; color: #3a4a55; user-select: none;
+  }
+  #fps {
+    position: fixed; right: 10px; top: 8px;
+    font: 12px "Consolas", monospace; color: #3a4a55;
+  }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look</div>
+<div id="fps"></div>
+<script>
+// ---- js/config.js ----
+// Global configuration. Plain script, shared global scope (inlined at build time).
+const CFG = {
+  COLS: 150,          // character grid width
+  ROWS: 68,           // character grid height
+  FONT_SIZE: 14,      // px, monospace
+  PLANE_LEN: 0.85,    // camera plane half-length (horizontal FOV)
+  Y_SCALE: 62,        // vertical projection factor (rows per worldunit/dist)
+  MAX_DIST: 44,       // raycast cutoff (world cells)
+  EYE: 1.55,          // camera height above ground
+  WORLD: 96,          // world grid size (cells per side)
+  SEED: 20260815,
+  CAR_COUNT: 42,
+  PED_COUNT: 70,
+};
+
+// Cell types
+const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4;
+// Cell flags
+const F_LANE = 1, F_ROAD_V = 2, F_ROAD_H = 4;
+</script>
+<script>
+// ---- js/util.js ----
+// Seeded RNG + hashing helpers.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Fast integer hash -> [0,1). Deterministic per (x,y,z) triple.
+function hash3(x, y, z) {
+  let h = (x * 374761393 + y * 668265263 + z * 2147483647) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+</script>
+<script>
+// ---- js/world.js ----
+// Procedural city: road lattice, sidewalks, building footprints, plazas, trees.
+const World = {
+  type: null, height: null, flags: null, bcol: null, bseed: null,
+  roadX: [], roadY: [],
+
+  idx(x, y) { return y * CFG.WORLD + x; },
+
+  inBounds(x, y) { return x >= 0 && y >= 0 && x < CFG.WORLD && y < CFG.WORLD; },
+
+  cellType(x, y) {
+    if (!this.inBounds(x, y)) return T_BLDG; // world edge is solid
+    return this.type[this.idx(x, y)];
+  },
+
+  isSolid(x, y) {
+    const t = this.cellType(x, y);
+    return t === T_BLDG || t === T_TREE;
+  },
+
+  generate(seed) {
+    const W = CFG.WORLD, rng = mulberry32(seed);
+    const N = W * W;
+    this.type = new Uint8Array(N);
+    this.height = new Uint8Array(N);
+    this.flags = new Uint8Array(N);
+    this.bcol = new Uint8Array(N);
+    this.bseed = new Uint8Array(N);
+
+    // Road lines (3 cells wide, center cell carries lane dashes)
+    this.roadX = []; this.roadY = [];
+    let p = 4 + ((rng() * 4) | 0);
+    while (p < W - 6) { this.roadX.push(p); p += 9 + ((rng() * 8) | 0); }
+    p = 4 + ((rng() * 4) | 0);
+    while (p < W - 6) { this.roadY.push(p); p += 9 + ((rng() * 8) | 0); }
+
+    for (const cx of this.roadX) {
+      for (let y = 0; y < W; y++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const i = this.idx(cx + dx, y);
+          this.type[i] = T_ROAD;
+          this.flags[i] |= F_ROAD_V;
+          if (dx === 0 && (y % 4) < 2) this.flags[i] |= F_LANE;
+        }
+      }
+    }
+    for (const cy of this.roadY) {
+      for (let x = 0; x < W; x++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const i = this.idx(x, cy + dy);
+          this.type[i] = T_ROAD;
+          this.flags[i] |= F_ROAD_H;
+          if (dy === 0 && (x % 4) < 2) this.flags[i] |= F_LANE;
+          else if (dy === 0) this.flags[i] &= ~F_LANE; // intersections: H wins, no double dashes
+        }
+      }
+    }
+
+    // Sidewalks: ring around roads
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      if (this.type[this.idx(x, y)] !== 0) continue;
+      let nearRoad = false;
+      for (let dy = -1; dy <= 1 && !nearRoad; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+          if (this.inBounds(x + dx, y + dy) && this.type[this.idx(x + dx, y + dy)] === T_ROAD) { nearRoad = true; break; }
+      if (nearRoad) this.type[this.idx(x, y)] = T_WALK;
+    }
+
+    // Block interiors: buildings on a 3x3 footprint grid, some plazas with trees
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      const i = this.idx(x, y);
+      if (this.type[i] !== T_GRASS) continue;
+      const fx = (x / 3) | 0, fy = (y / 3) | 0;
+      const hzone = hash3(fx, fy, seed);
+      if (hzone < 0.16) {
+        // plaza: grass, scattered trees
+        if (hash3(x, y, seed ^ 0x5111) < 0.18) {
+          this.type[i] = T_TREE;
+          this.height[i] = 2 + ((hash3(x, y, seed ^ 0x77) * 2) | 0);
+        }
+        continue;
+      }
+      this.type[i] = T_BLDG;
+      const tall = hash3(fx, fy, seed ^ 0x9e37) < 0.13;
+      this.height[i] = tall
+        ? 12 + ((hash3(fx, fy, seed ^ 0xabc) * 15) | 0)
+        : 3 + ((hash3(fx, fy, seed ^ 0xdef) * 6) | 0);
+      this.bcol[i] = (hash3(fx, fy, seed ^ 0x321) * 5) | 0;
+      this.bseed[i] = (hash3(fx, fy, seed ^ 0x654) * 255) | 0;
+    }
+
+    // Street trees: sparse, on sidewalk cells not directly beside a lane crossing
+    for (let y = 1; y < W - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = this.idx(x, y);
+      if (this.type[i] === T_WALK && hash3(x, y, seed ^ 0x1234) < 0.045) {
+        this.type[i] = T_TREE;
+        this.height[i] = 2 + ((hash3(x, y, seed ^ 0x88) * 2) | 0);
+      }
+    }
+  },
+
+  // A road intersection near the world center, for player spawn
+  findSpawn() {
+    const cx = CFG.WORLD / 2;
+    let best = null, bestD = 1e9;
+    for (const rx of this.roadX) for (const ry of this.roadY) {
+      const d = (rx - cx) * (rx - cx) + (ry - cx) * (ry - cx);
+      if (d < bestD) { bestD = d; best = [rx + 0.5, ry + 0.5]; }
+    }
+    return best || [cx, cx];
+  },
+};
+</script>
+<script>
+// ---- js/entities.js ----
+// Ambient traffic: cars follow the road lattice, pedestrians wander sidewalks.
+const Entities = {
+  cars: [], peds: [],
+
+  init(seed) {
+    const rng = mulberry32(seed ^ 0xC0FFEE);
+    this.cars = []; this.peds = [];
+
+    const roadCells = [], walkCells = [];
+    for (let y = 0; y < CFG.WORLD; y++) for (let x = 0; x < CFG.WORLD; x++) {
+      const t = World.type[World.idx(x, y)];
+      if (t === T_ROAD) roadCells.push([x, y]);
+      else if (t === T_WALK) walkCells.push([x, y]);
+    }
+
+    for (let i = 0; i < CFG.CAR_COUNT && roadCells.length; i++) {
+      const [x, y] = roadCells[(rng() * roadCells.length) | 0];
+      const f = World.flags[World.idx(x, y)];
+      let dx = 0, dy = 0;
+      if (f & F_ROAD_V) { dy = rng() < 0.5 ? 1 : -1; }
+      else { dx = rng() < 0.5 ? 1 : -1; }
+      this.cars.push({
+        x: x + 0.5, y: y + 0.5, dx, dy,
+        speed: 2.2 + rng() * 1.8,
+        col: (rng() * 5) | 0,
+      });
+    }
+
+    for (let i = 0; i < CFG.PED_COUNT && walkCells.length; i++) {
+      const [x, y] = walkCells[(rng() * walkCells.length) | 0];
+      this.peds.push({
+        x: x + 0.5, y: y + 0.5, tx: x + 0.5, ty: y + 0.5,
+        speed: 0.6 + rng() * 0.6,
+        shade: 0.55 + rng() * 0.45,
+      });
+    }
+  },
+
+  update(dt, time) {
+    for (const c of this.cars) {
+      const nx = c.x + c.dx * c.speed * dt;
+      const ny = c.y + c.dy * c.speed * dt;
+      const cellAhead = World.cellType(
+        Math.floor(nx + c.dx * 0.6), Math.floor(ny + c.dy * 0.6));
+      if (cellAhead === T_ROAD) { c.x = nx; c.y = ny; }
+      else {
+        // pick a new road direction from the current cell
+        const cx = Math.floor(c.x), cy = Math.floor(c.y);
+        const opts = [];
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (dx === -c.dx && dy === -c.dy) continue; // no U-turn unless stuck
+          if (World.cellType(cx + dx * 2, cy + dy * 2) === T_ROAD) opts.push([dx, dy]);
+        }
+        if (opts.length === 0) { c.dx = -c.dx; c.dy = -c.dy; }
+        else {
+          const pick = opts[(hash3(cx, cy, (time * 997) | 0) * opts.length) | 0];
+          c.dx = pick[0]; c.dy = pick[1];
+          c.x = cx + 0.5; c.y = cy + 0.5;
+        }
+      }
+    }
+
+    for (const p of this.peds) {
+      const ddx = p.tx - p.x, ddy = p.ty - p.y;
+      const d = Math.hypot(ddx, ddy);
+      if (d < 0.08) {
+        // choose a new adjacent sidewalk cell
+        const cx = Math.floor(p.x), cy = Math.floor(p.y);
+        const opts = [];
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]])
+          if (World.cellType(cx + dx, cy + dy) === T_WALK) opts.push([dx, dy]);
+        if (opts.length) {
+          const pick = opts[(hash3(cx, cy, ((time * 613) | 0) ^ 0x99) * opts.length) | 0];
+          p.tx = cx + pick[0] + 0.5; p.ty = cy + pick[1] + 0.5;
+        }
+      } else {
+        p.x += (ddx / d) * p.speed * dt;
+        p.y += (ddy / d) * p.speed * dt;
+      }
+    }
+  },
+};
+</script>
+<script>
+// ---- js/player.js ----
+// First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
+const Player = {
+  x: 0, y: 0, angle: 0.6,
+  keys: {},
+
+  init() {
+    const [sx, sy] = World.findSpawn();
+    this.x = sx; this.y = sy;
+
+    addEventListener('keydown', e => { this.keys[e.code] = true; });
+    addEventListener('keyup', e => { this.keys[e.code] = false; });
+
+    const canvas = document.getElementById('screen');
+    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    addEventListener('mousemove', e => {
+      if (document.pointerLockElement === canvas)
+        this.angle += e.movementX * 0.0022;
+    });
+  },
+
+  blocked(x, y) {
+    const R = 0.22;
+    for (const [ox, oy] of [[-R, -R], [R, -R], [-R, R], [R, R]])
+      if (World.isSolid(Math.floor(x + ox), Math.floor(y + oy))) return true;
+    return false;
+  },
+
+  update(dt) {
+    const k = this.keys;
+    const turn = 2.1 * dt;
+    if (k['ArrowLeft']) this.angle -= turn;
+    if (k['ArrowRight']) this.angle += turn;
+
+    const run = (k['ShiftLeft'] || k['ShiftRight']) ? 2.0 : 1.0;
+    const spd = 4.2 * run * dt;
+    const dx = Math.cos(this.angle), dy = Math.sin(this.angle);
+
+    let mx = 0, my = 0;
+    if (k['KeyW'] || k['ArrowUp']) { mx += dx; my += dy; }
+    if (k['KeyS'] || k['ArrowDown']) { mx -= dx; my -= dy; }
+    if (k['KeyA']) { mx += dy; my -= dx; }
+    if (k['KeyD']) { mx -= dy; my += dx; }
+
+    const len = Math.hypot(mx, my);
+    if (len > 0.001) {
+      mx = mx / len * spd; my = my / len * spd;
+      // axis-separated collision so we slide along walls
+      if (!this.blocked(this.x + mx, this.y)) this.x += mx;
+      if (!this.blocked(this.x, this.y + my)) this.y += my;
+    }
+  },
+};
+</script>
+<script>
+// ---- js/renderer.js ----
+// ASCII raycast renderer.
+// Every visible sample reduces to (glyph, colorId, depth) in a character-cell
+// framebuffer; one batched fillText pass per color-run draws the frame.
+//
+// Brightness pipeline (PRD 10b): shade() is the single composable stage —
+// base * distanceFade today; sunlight and AO multiply in here later.
+const Renderer = {
+  ctx: null, cw: 0, chh: 0,
+  chars: null, color: null, depth: null,
+  palette: [], // colorId -> css string
+  PAL_LEVELS: 8,
+
+  // hue families: [r,g,b] at full brightness
+  HUES: [
+    [120, 235, 255],  // 0 neon cyan
+    [255, 120, 235],  // 1 neon magenta
+    [140, 150, 255],  // 2 blue
+    [200, 130, 255],  // 3 purple
+    [255, 190, 110],  // 4 amber
+    [110, 230, 140],  // 5 green (trees)
+    [190, 195, 205],  // 6 gray (streets, peds)
+    [255, 225, 120],  // 7 yellow (lane marks)
+    [255, 255, 255],  // 8 white
+    [255, 110, 110],  // 9 red
+  ],
+
+  init() {
+    const canvas = document.getElementById('screen');
+    this.ctx = canvas.getContext('2d');
+    this.ctx.font = `bold ${CFG.FONT_SIZE}px "Consolas", "Courier New", monospace`;
+    this.cw = this.ctx.measureText('M').width;
+    this.chh = CFG.FONT_SIZE + 1;
+    canvas.width = Math.ceil(CFG.COLS * this.cw);
+    canvas.height = CFG.ROWS * this.chh;
+    // canvas size reset clears state; set font again
+    this.ctx.font = `bold ${CFG.FONT_SIZE}px "Consolas", "Courier New", monospace`;
+    this.ctx.textBaseline = 'top';
+
+    const N = CFG.COLS * CFG.ROWS;
+    this.chars = new Uint16Array(N);
+    this.color = new Uint8Array(N);
+    this.depth = new Float32Array(N);
+
+    // palette: hue x brightness level
+    this.palette = [];
+    for (let h = 0; h < this.HUES.length; h++) {
+      const [r, g, b] = this.HUES[h];
+      for (let l = 0; l < this.PAL_LEVELS; l++) {
+        const f = (l + 1) / this.PAL_LEVELS;
+        this.palette.push(`rgb(${(r * f) | 0},${(g * f) | 0},${(b * f) | 0})`);
+      }
+    }
+  },
+
+  colId(hue, brightness) {
+    const l = clamp((brightness * this.PAL_LEVELS) | 0, 0, this.PAL_LEVELS - 1);
+    return hue * this.PAL_LEVELS + l;
+  },
+
+  // The composable brightness stage. Lighting terms (sun, AO) multiply in here.
+  shade(base, dist) {
+    const fade = Math.pow(clamp(1 - dist / CFG.MAX_DIST, 0, 1), 1.5);
+    return base * fade;
+  },
+
+  put(col, row, ch, colorId, d) {
+    if (col < 0 || row < 0 || col >= CFG.COLS || row >= CFG.ROWS) return;
+    const i = row * CFG.COLS + col;
+    // write if empty, or strictly closer than what's there (lets content
+    // show through the dither holes of transparent trees)
+    if (this.depth[i] === Infinity || d < this.depth[i]) {
+      this.chars[i] = ch.charCodeAt(0);
+      this.color[i] = colorId;
+      this.depth[i] = d;
+    }
+  },
+
+  render(time) {
+    const COLS = CFG.COLS, ROWS = CFG.ROWS;
+    this.time = time;
+    this.chars.fill(32);
+    this.color.fill(0);
+    this.depth.fill(Infinity);
+
+    const horizon = (ROWS * 0.5) | 0;
+    const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
+    const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
+    const px = Player.x, py = Player.y;
+
+    const WALL_LIT = '@#8&0%';           // lit window glyphs
+    const WALL_DIM = ':;.|';             // unlit structure glyphs
+    const TREE_CH = '%&#*oe';
+    const GROUND_RAMP = ' ..,:;';
+
+    for (let c = 0; c < COLS; c++) {
+      const camX = 2 * c / COLS - 1;
+      const rdx = dirX + planeX * camX;
+      const rdy = dirY + planeY * camX;
+
+      let mapX = Math.floor(px), mapY = Math.floor(py);
+      const dDx = Math.abs(1 / (rdx || 1e-9)), dDy = Math.abs(1 / (rdy || 1e-9));
+      let stepX, stepY, sideX, sideY;
+      if (rdx < 0) { stepX = -1; sideX = (px - mapX) * dDx; }
+      else { stepX = 1; sideX = (mapX + 1 - px) * dDx; }
+      if (rdy < 0) { stepY = -1; sideY = (py - mapY) * dDy; }
+      else { stepY = 1; sideY = (mapY + 1 - py) * dDy; }
+
+      let clipTop = ROWS;       // rows >= this are already covered by nearer walls
+      let firstSolid = Infinity;
+      let side = 0;
+
+      while (true) {
+        if (sideX < sideY) { sideX += dDx; mapX += stepX; side = 0; }
+        else { sideY += dDy; mapY += stepY; side = 1; }
+
+        const dist = side === 0
+          ? sideX - dDx
+          : sideY - dDy;
+        if (dist > CFG.MAX_DIST) break;
+        if (!World.inBounds(mapX, mapY)) break;
+
+        const i = World.idx(mapX, mapY);
+        const t = World.type[i];
+        if (t !== T_BLDG && t !== T_TREE) continue;
+
+        const d = Math.max(dist, 0.05);
+        const h = World.height[i];
+        const yBot = horizon + CFG.Y_SCALE * CFG.EYE / d;
+        const yTop = horizon - CFG.Y_SCALE * (h - CFG.EYE) / d;
+
+        // fractional hit position along the wall face (window u-coordinate)
+        let wallU = side === 0 ? py + d * rdy : px + d * rdx;
+        wallU -= Math.floor(wallU);
+
+        if (t === T_TREE) {
+          // transparent foliage: dithered, does not advance the clip
+          const r0 = Math.max(Math.ceil(yTop), 0);
+          const r1 = Math.min(Math.floor(yBot), clipTop - 1, ROWS - 1);
+          for (let r = r0; r <= r1; r++) {
+            const wz = (yBot - r) / (yBot - yTop) * h; // world height at this row
+            const isTrunk = wz < 0.7;
+            const cover = isTrunk ? (wallU > 0.35 && wallU < 0.65 ? 1 : 0)
+              : hash3(mapX * 7 + c, r, 991) < 0.52 ? 1 : 0;
+            if (!cover) continue;
+            const b = this.shade(isTrunk ? 0.35 : 0.5 + hash3(c, r, 5) * 0.4, d);
+            const ch = isTrunk ? '|' : TREE_CH[(hash3(mapX, r, mapY) * TREE_CH.length) | 0];
+            this.put(c, r, ch, this.colId(isTrunk ? 4 : 5, b), d);
+          }
+          continue;
+        }
+
+        // building wall
+        if (firstSolid === Infinity) firstSolid = d;
+        const r0 = Math.max(Math.ceil(yTop), 0);
+        const r1 = Math.min(Math.floor(yBot), clipTop - 1, ROWS - 1);
+        const hue = World.bcol[i] % 5;
+        const bs = World.bseed[i];
+        const sideDim = side === 1 ? 0.75 : 1.0;
+
+        for (let r = r0; r <= r1; r++) {
+          const wz = (yBot - r) / (yBot - yTop) * h;
+          const winX = (wallU * 2) | 0;               // 2 window columns per face
+          const winY = wz | 0;                        // 1 window row per world unit
+          const edge = wallU < 0.06 || wallU > 0.94;
+          const topEdge = r === r0 && yTop >= 0;
+          const lit = hash3(mapX * 2 + winX, winY, bs) < 0.30;
+
+          let ch, hueU, b;
+          if (topEdge) { ch = '='; hueU = hue; b = this.shade(0.55, d) * sideDim; }
+          else if (edge) { ch = '|'; hueU = hue; b = this.shade(0.30, d) * sideDim; }
+          else if (lit) {
+            ch = WALL_LIT[(hash3(mapX + winX, winY, bs ^ 3) * WALL_LIT.length) | 0];
+            // subtle per-window flicker, stepped at ~3Hz so it reads as data noise
+            const flick = 0.8 + 0.25 * hash3(mapX + winX, winY, ((this.time * 3) | 0) ^ bs);
+            hueU = hue; b = this.shade(0.85 * flick, d) * sideDim;
+          } else {
+            ch = WALL_DIM[(hash3(mapX + winX, winY + 7, bs) * WALL_DIM.length) | 0];
+            hueU = hue; b = this.shade(0.22, d) * sideDim;
+          }
+          this.put(c, r, ch, this.colId(hueU, b), d);
+        }
+
+        clipTop = Math.min(clipTop, Math.max(r0, 0));
+        if (clipTop <= 0) break;
+      }
+
+      // floor: from screen bottom up until the first solid wall starts
+      for (let r = ROWS - 1; r > horizon; r--) {
+        const rowDist = CFG.Y_SCALE * CFG.EYE / (r - horizon);
+        if (rowDist >= firstSolid || rowDist > CFG.MAX_DIST) break;
+        const i = r * COLS + c;
+        if (this.depth[i] !== Infinity && this.depth[i] < rowDist) continue;
+        const fx = px + rdx * rowDist, fy = py + rdy * rowDist;
+        const cxi = Math.floor(fx), cyi = Math.floor(fy);
+        if (!World.inBounds(cxi, cyi)) continue;
+        const wi = World.idx(cxi, cyi);
+        const t = World.type[wi], f = World.flags[wi];
+
+        let ch, hue, base;
+        if (t === T_ROAD) {
+          if (f & F_LANE) {
+            ch = (f & F_ROAD_H) && !(f & F_ROAD_V) ? '-' : '|';
+            hue = 7; base = 0.6;
+          } else {
+            ch = GROUND_RAMP[(hash3(cxi * 3, cyi * 3, 17) * GROUND_RAMP.length) | 0];
+            hue = 6; base = 0.20;
+          }
+        } else if (t === T_WALK) {
+          ch = hash3(cxi, cyi, 31) < 0.5 ? '.' : ',';
+          hue = 6; base = 0.34;
+        } else { // grass / plaza
+          ch = hash3(cxi, cyi, 41) < 0.5 ? '"' : ',';
+          hue = 5; base = 0.25;
+        }
+        const b = this.shade(base, rowDist);
+        this.put(c, r, ch, this.colId(hue, b), rowDist);
+      }
+    }
+
+    this.renderSprites(dirX, dirY, planeX, planeY);
+    this.renderSky(horizon);
+    this.blit();
+  },
+
+  renderSprites(dirX, dirY, planeX, planeY) {
+    const invDet = 1 / (planeX * dirY - dirX * planeY);
+    const horizon = (CFG.ROWS * 0.5) | 0;
+    const all = [];
+    for (const c of Entities.cars) all.push({ e: c, kind: 0 });
+    for (const p of Entities.peds) all.push({ e: p, kind: 1 });
+
+    // camera-space transform + far-to-near sort
+    for (const s of all) {
+      const relX = s.e.x - Player.x, relY = s.e.y - Player.y;
+      s.tx = invDet * (dirY * relX - dirX * relY);
+      s.tz = invDet * (-planeY * relX + planeX * relY);
+    }
+    all.sort((a, b) => b.tz - a.tz);
+
+    for (const s of all) {
+      if (s.tz < 0.3 || s.tz > CFG.MAX_DIST) continue;
+      const screenC = (CFG.COLS / 2) * (1 + s.tx / s.tz);
+      const colsPerUnit = (CFG.COLS / 2) / (s.tz * CFG.PLANE_LEN);
+      const rowsPerUnit = CFG.Y_SCALE / s.tz;
+      const yBot = horizon + rowsPerUnit * CFG.EYE;
+
+      if (s.kind === 0) { // car
+        const wC = Math.max(1, (1.5 * colsPerUnit) | 0);
+        const hR = Math.max(1, (0.9 * rowsPerUnit) | 0);
+        const hue = s.e.col % 5;
+        for (let rr = 0; rr < hR; rr++) for (let cc = 0; cc < wC; cc++) {
+          const col = (screenC - wC / 2 + cc) | 0;
+          const row = (yBot - rr) | 0;
+          const topRow = rr === hR - 1 && hR > 1;
+          const b = this.shade(topRow ? 0.5 : 0.8, s.tz);
+          this.put(col, row, topRow ? 'o' : '#', this.colId(hue, b), s.tz);
+        }
+      } else { // pedestrian
+        const hR = Math.max(1, (1.7 * rowsPerUnit) | 0);
+        const col = screenC | 0;
+        for (let rr = 0; rr < hR; rr++) {
+          const row = (yBot - rr) | 0;
+          const head = rr === hR - 1 && hR > 1;
+          const b = this.shade(0.6 * s.e.shade, s.tz);
+          this.put(col, row, head ? 'o' : 'i', this.colId(6, b), s.tz);
+        }
+      }
+    }
+  },
+
+  renderSky(horizon) {
+    // sparse starfield with parallax on camera angle
+    const angOff = (Player.angle * CFG.COLS / (2 * Math.PI) * 3) | 0;
+    for (let r = 0; r < horizon + 2; r++) {
+      for (let c = 0; c < CFG.COLS; c++) {
+        const i = r * CFG.COLS + c;
+        if (this.depth[i] !== Infinity) continue;
+        const h = hash3(((c + angOff) % 1024 + 1024) % 1024, r, 777);
+        if (h < 0.012) { this.chars[i] = 46; this.color[i] = this.colId(2, 0.3); }       // '.'
+        else if (h < 0.016) { this.chars[i] = 42; this.color[i] = this.colId(8, 0.25); } // '*'
+      }
+    }
+  },
+
+  blit() {
+    const ctx = this.ctx, COLS = CFG.COLS, ROWS = CFG.ROWS;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    // draw runs of same color per row as single strings (monospace advance)
+    for (let r = 0; r < ROWS; r++) {
+      let runStart = 0, runColor = -1, runStr = '';
+      const base = r * COLS;
+      for (let c = 0; c <= COLS; c++) {
+        const ch = c < COLS ? this.chars[base + c] : 32;
+        const col = c < COLS ? this.color[base + c] : -1;
+        const isSpace = ch === 32;
+        const cur = isSpace ? -2 : col;
+        if (cur !== runColor) {
+          if (runColor >= 0 && runStr.length) {
+            const color = this.palette[runColor];
+            ctx.fillStyle = color;
+            // bloom: bright palette levels glow
+            if ((runColor % this.PAL_LEVELS) >= 6) {
+              ctx.shadowColor = color;
+              ctx.shadowBlur = 7;
+            } else {
+              ctx.shadowBlur = 0;
+            }
+            ctx.fillText(runStr, runStart * this.cw, r * this.chh);
+          }
+          runColor = cur; runStart = c; runStr = '';
+        }
+        if (!isSpace && c < COLS) runStr += String.fromCharCode(ch);
+        else if (runColor >= 0) runStr += ' ';
+      }
+    }
+    ctx.shadowBlur = 0;
+  },
+};
+</script>
+<script>
+// ---- js/main.js ----
+// Bootstrap + frame loop.
+(function () {
+  World.generate(CFG.SEED);
+  Entities.init(CFG.SEED);
+  Player.init();
+  Renderer.init();
+
+  let last = performance.now();
+  let fpsAcc = 0, fpsN = 0, fpsShown = 0;
+  const fpsEl = document.getElementById('fps');
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    const time = now / 1000;
+
+    Player.update(dt);
+    Entities.update(dt, time);
+    Renderer.render(time);
+
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc > 0.5) {
+      fpsShown = Math.round(fpsN / fpsAcc);
+      fpsAcc = 0; fpsN = 0;
+      fpsEl.textContent = fpsShown + ' fps';
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
