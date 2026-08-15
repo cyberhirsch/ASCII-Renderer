@@ -24,11 +24,8 @@ const Player = {
     addEventListener('mousemove', e => {
       if (document.pointerLockElement === canvas) {
         this.angle += e.movementX * 0.0022;
-        // mouse up = look up = horizon drops = pitch grows.
-        // bounds sit where the screen is already 100% sky or 100% ground —
-        // the shear renderer has nothing further to show past vertical
-        const lim = CFG.ROWS * 0.5 + 2;
-        this.pitch = clamp(this.pitch - e.movementY * 0.06, -lim, lim);
+        // mouse up = look up = horizon drops = pitch grows. Unclamped.
+        this.pitch -= e.movementY * 0.06;
       }
     });
   },

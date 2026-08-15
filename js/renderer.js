@@ -175,7 +175,7 @@ const Renderer = {
             if (!cover) continue;
             let base = isTrunk ? 0.35 : 0.5 + hash3(c, r, 5) * 0.4;
             if (CFG.DAY) base = (isTrunk ? 0.45 : 0.75 + hash3(c, r, 5) * 0.25)
-              * Light.sunAt(mapX, mapY, wz);
+              * Light.traceSun(px + d * rdx, py + d * rdy, wz);
             const b = this.shade(base, d);
             const ch = isTrunk ? '|' : TREE_CH[(hash3(mapX, r, mapY) * TREE_CH.length) | 0];
             this.put(c, r, ch, this.colId(isTrunk ? 4 : 5, b), d);
@@ -194,6 +194,9 @@ const Renderer = {
         const nX = side === 0 ? -stepX : 0, nY = side === 1 ? -stepY : 0;
         const airX = side === 0 ? mapX - stepX : mapX;
         const airY = side === 1 ? mapY - stepY : mapY;
+        // exact wall hit point, nudged into the air cell so the shadow ray
+        // doesn't immediately hit the wall's own building
+        const hitX = px + d * rdx + nX * 0.02, hitY = py + d * rdy + nY * 0.02;
         const faceLight = CFG.DAY
           ? 0.7 + 0.3 * Math.max(0, nX * Light.sunX + nY * Light.sunY) : 1;
         const litP = CFG.DAY ? 0.05 : 0.30; // few lit windows in daylight
@@ -221,8 +224,18 @@ const Renderer = {
           }
           let b;
           if (CFG.DAY && !lit) {
-            b = this.shade(base * faceLight * Light.sunAt(airX, airY, wz)
+            const sunV = Light.traceSun(hitX, hitY, wz);
+            b = this.shade(base * faceLight * sunV
               * Light.aoLerp(airX, airY, wz), d) * sideDim;
+            if (sunV === 1) {
+              // specular: reflect sun about the wall normal, dot with view dir
+              const ndl = nX * Light.lx + nY * Light.ly;
+              const rx = 2 * ndl * nX - Light.lx, ry = 2 * ndl * nY - Light.ly, rz = -Light.lz;
+              let vx = -rdx * d, vy = -rdy * d, vz = CFG.EYE - wz;
+              const iv = 1 / Math.hypot(vx, vy, vz);
+              const spec = Math.max(0, (rx * vx + ry * vy + rz * vz) * iv);
+              b += Math.pow(spec, 12) * 0.55;
+            }
           } else {
             b = this.shade(base, d) * sideDim;
           }
@@ -264,9 +277,21 @@ const Renderer = {
           ch = hash3(cxi, cyi, 41) < 0.5 ? '"' : ',';
           hue = 5; base = CFG.DAY ? 0.68 : 0.25;
         }
-        const light = CFG.DAY
-          ? Light.sunAt(cxi, cyi, 0.01) * Light.ao[wi] : 1;
-        const b = this.shade(base * light, rowDist);
+        let b;
+        if (CFG.DAY) {
+          const sunV = Light.traceSun(fx, fy, 0.05);
+          b = this.shade(base * sunV * Light.ao[wi], rowDist);
+          if (sunV === 1) {
+            // ground specular: sun mirrored about the up normal
+            let vx = -rdx * rowDist, vy = -rdy * rowDist, vz = CFG.EYE;
+            const iv = 1 / Math.hypot(vx, vy, vz);
+            const spec = Math.max(0,
+              (-Light.lx * vx - Light.ly * vy + Light.lz * vz) * iv);
+            b += Math.pow(spec, 24) * 0.5;
+          }
+        } else {
+          b = this.shade(base, rowDist);
+        }
         this.put(c, r, ch, this.colId(hue, b), rowDist);
       }
     }

@@ -202,40 +202,28 @@ const World = {
 </script>
 <script>
 // ---- js/light.js ----
-// Baked lighting (PRD 10b): directional sunlight + ambient occlusion.
-// shadowH[cell] = height below which the cell sits in another building's
-// shadow; a point at height z is sunlit iff z >= shadowH. Baked once —
-// geometry is static, so runtime cost is one array lookup.
+// Lighting (PRD 10b): raytraced directional sunlight + baked ambient occlusion.
+// Sun visibility is a real shadow ray: from each visible surface point, march
+// toward the sun through the height grid until something blocks it or the ray
+// climbs above the tallest building. AO stays baked (geometry is static).
 const Light = {
-  shadowH: null, ao: null, sunX: 0, sunY: 0,
+  ao: null, sunX: 0, sunY: 0, tanEl: 0, maxH: 0,
+  // normalized 3D sun direction (surface -> sun), for specular
+  lx: 0, ly: 0, lz: 0,
 
   bake() {
     const W = CFG.WORLD, N = W * W;
-    this.shadowH = new Float32Array(N);
     this.ao = new Float32Array(N);
     this.sunX = Math.cos(CFG.SUN_AZ);
     this.sunY = Math.sin(CFG.SUN_AZ);
-    const tanEl = Math.tan(CFG.SUN_EL);
+    this.tanEl = Math.tan(CFG.SUN_EL);
+    const il = 1 / Math.hypot(this.sunX, this.sunY, this.tanEl);
+    this.lx = this.sunX * il; this.ly = this.sunY * il; this.lz = this.tanEl * il;
+    this.maxH = 0;
+    for (let i = 0; i < N; i++) if (World.height[i] > this.maxH) this.maxH = World.height[i];
 
     for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
       const i = y * W + x;
-
-      // march toward the sun; each blocker of height h at distance t casts
-      // shadow up to (h - t*tan(elevation)) here
-      let sh = 0;
-      for (let t = 1; t <= 30; t++) {
-        const cx = Math.round(x + this.sunX * t);
-        const cy = Math.round(y + this.sunY * t);
-        if (cx < 0 || cy < 0 || cx >= W || cy >= W) break;
-        const j = cy * W + cx;
-        const tt = World.type[j];
-        if (tt === T_BLDG || tt === T_TREE) {
-          const s = World.height[j] - t * tanEl;
-          if (s > sh) sh = s;
-        }
-      }
-      this.shadowH[i] = sh;
-
       // AO: occupancy-weighted 8-neighborhood, taller neighbors darken more
       let occ = 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -246,14 +234,24 @@ const Light = {
         if (World.type[j] === T_BLDG) occ += Math.min(World.height[j] / 6, 1);
         else if (World.type[j] === T_TREE) occ += 0.4;
       }
-      this.ao[i] = 1 - Math.min(occ * 0.14, 0.60);
+      this.ao[i] = 1 - Math.min(occ * 0.28, 0.80);
     }
   },
 
-  // sun visibility of a point at height z over cell (x,y): 1 or shadow factor
-  sunAt(x, y, z) {
-    if (x < 0 || y < 0 || x >= CFG.WORLD || y >= CFG.WORLD) return 1;
-    return z >= this.shadowH[y * CFG.WORLD + x] ? 1 : CFG.SHADOW;
+  // shadow ray from world point (x,y,z) toward the sun: 1 = lit, SHADOW = blocked
+  traceSun(x, y, z) {
+    const W = CFG.WORLD;
+    let px = x, py = y, pz = z;
+    for (let t = 0; t < 64; t++) {
+      px += this.sunX; py += this.sunY; pz += this.tanEl;
+      if (pz >= this.maxH) return 1;
+      const xi = px | 0, yi = py | 0;
+      if (xi < 0 || yi < 0 || xi >= W || yi >= W) return 1;
+      const j = yi * W + xi;
+      const tt = World.type[j];
+      if ((tt === T_BLDG || tt === T_TREE) && World.height[j] > pz) return CFG.SHADOW;
+    }
+    return 1;
   },
 
   // AO fades out with height above ground (contact darkening)
@@ -267,7 +265,7 @@ const Light = {
   groundLight(x, y) {
     const xi = Math.floor(x), yi = Math.floor(y);
     if (xi < 0 || yi < 0 || xi >= CFG.WORLD || yi >= CFG.WORLD) return 1;
-    return this.sunAt(xi, yi, 0.01) * this.ao[yi * CFG.WORLD + xi];
+    return this.traceSun(x, y, 0.05) * this.ao[yi * CFG.WORLD + xi];
   },
 };
 </script>
@@ -384,11 +382,8 @@ const Player = {
     addEventListener('mousemove', e => {
       if (document.pointerLockElement === canvas) {
         this.angle += e.movementX * 0.0022;
-        // mouse up = look up = horizon drops = pitch grows.
-        // bounds sit where the screen is already 100% sky or 100% ground —
-        // the shear renderer has nothing further to show past vertical
-        const lim = CFG.ROWS * 0.5 + 2;
-        this.pitch = clamp(this.pitch - e.movementY * 0.06, -lim, lim);
+        // mouse up = look up = horizon drops = pitch grows. Unclamped.
+        this.pitch -= e.movementY * 0.06;
       }
     });
   },
@@ -605,7 +600,7 @@ const Renderer = {
             if (!cover) continue;
             let base = isTrunk ? 0.35 : 0.5 + hash3(c, r, 5) * 0.4;
             if (CFG.DAY) base = (isTrunk ? 0.45 : 0.75 + hash3(c, r, 5) * 0.25)
-              * Light.sunAt(mapX, mapY, wz);
+              * Light.traceSun(px + d * rdx, py + d * rdy, wz);
             const b = this.shade(base, d);
             const ch = isTrunk ? '|' : TREE_CH[(hash3(mapX, r, mapY) * TREE_CH.length) | 0];
             this.put(c, r, ch, this.colId(isTrunk ? 4 : 5, b), d);
@@ -624,6 +619,9 @@ const Renderer = {
         const nX = side === 0 ? -stepX : 0, nY = side === 1 ? -stepY : 0;
         const airX = side === 0 ? mapX - stepX : mapX;
         const airY = side === 1 ? mapY - stepY : mapY;
+        // exact wall hit point, nudged into the air cell so the shadow ray
+        // doesn't immediately hit the wall's own building
+        const hitX = px + d * rdx + nX * 0.02, hitY = py + d * rdy + nY * 0.02;
         const faceLight = CFG.DAY
           ? 0.7 + 0.3 * Math.max(0, nX * Light.sunX + nY * Light.sunY) : 1;
         const litP = CFG.DAY ? 0.05 : 0.30; // few lit windows in daylight
@@ -651,8 +649,18 @@ const Renderer = {
           }
           let b;
           if (CFG.DAY && !lit) {
-            b = this.shade(base * faceLight * Light.sunAt(airX, airY, wz)
+            const sunV = Light.traceSun(hitX, hitY, wz);
+            b = this.shade(base * faceLight * sunV
               * Light.aoLerp(airX, airY, wz), d) * sideDim;
+            if (sunV === 1) {
+              // specular: reflect sun about the wall normal, dot with view dir
+              const ndl = nX * Light.lx + nY * Light.ly;
+              const rx = 2 * ndl * nX - Light.lx, ry = 2 * ndl * nY - Light.ly, rz = -Light.lz;
+              let vx = -rdx * d, vy = -rdy * d, vz = CFG.EYE - wz;
+              const iv = 1 / Math.hypot(vx, vy, vz);
+              const spec = Math.max(0, (rx * vx + ry * vy + rz * vz) * iv);
+              b += Math.pow(spec, 12) * 0.55;
+            }
           } else {
             b = this.shade(base, d) * sideDim;
           }
@@ -694,9 +702,21 @@ const Renderer = {
           ch = hash3(cxi, cyi, 41) < 0.5 ? '"' : ',';
           hue = 5; base = CFG.DAY ? 0.68 : 0.25;
         }
-        const light = CFG.DAY
-          ? Light.sunAt(cxi, cyi, 0.01) * Light.ao[wi] : 1;
-        const b = this.shade(base * light, rowDist);
+        let b;
+        if (CFG.DAY) {
+          const sunV = Light.traceSun(fx, fy, 0.05);
+          b = this.shade(base * sunV * Light.ao[wi], rowDist);
+          if (sunV === 1) {
+            // ground specular: sun mirrored about the up normal
+            let vx = -rdx * rowDist, vy = -rdy * rowDist, vz = CFG.EYE;
+            const iv = 1 / Math.hypot(vx, vy, vz);
+            const spec = Math.max(0,
+              (-Light.lx * vx - Light.ly * vy + Light.lz * vz) * iv);
+            b += Math.pow(spec, 24) * 0.5;
+          }
+        } else {
+          b = this.shade(base, rowDist);
+        }
         this.put(c, r, ch, this.colId(hue, b), rowDist);
       }
     }
