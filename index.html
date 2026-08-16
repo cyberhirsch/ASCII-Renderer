@@ -7,6 +7,7 @@
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
   canvas { display: block; width: 100vw; height: 100vh; object-fit: cover; }
+  canvas[hidden] { display: none; }
   #hud {
     position: fixed; left: 10px; bottom: 8px;
     font: 12px "Consolas", monospace; color: #3a4a55; user-select: none;
@@ -19,6 +20,7 @@
 </head>
 <body>
 <canvas id="screen"></canvas>
+<canvas id="gpuscreen" hidden></canvas>
 <div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; N day/night &middot; M mono/color &middot; F fullscreen</div>
 <div id="fps"></div>
 <script src="js/config.js"></script>

@@ -19,14 +19,17 @@ const Player = {
     });
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
-    const canvas = document.getElementById('screen');
-    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    // either backend's canvas can be the visible one
+    const canvases = [document.getElementById('screen'),
+                      document.getElementById('gpuscreen')].filter(Boolean);
+    for (const cv of canvases) cv.addEventListener('click', () => cv.requestPointerLock());
+    const locked = () => canvases.indexOf(document.pointerLockElement) !== -1;
     // browsers can fire one huge bogus movement delta when pointer lock
     // engages or the cursor re-syncs; skip the first events and clamp the rest
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
-      if (document.pointerLockElement !== canvas) return;
+      if (!locked()) return;
       if (skipEvents > 0) { skipEvents--; return; }
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);

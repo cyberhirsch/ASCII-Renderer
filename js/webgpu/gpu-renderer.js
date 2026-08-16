@@ -6,7 +6,7 @@ const GPURenderer = {
   reason: '',
 
   async init() {
-    const canvas = document.getElementById('screen');
+    const canvas = document.getElementById('gpuscreen');
     if (!navigator.gpu) { this.reason = 'navigator.gpu missing'; return false; }
     let adapter, device;
     try {
@@ -111,7 +111,7 @@ const GPURenderer = {
   },
 
   resize() {
-    const canvas = document.getElementById('screen');
+    const canvas = document.getElementById('gpuscreen');
     canvas.width = innerWidth;
     canvas.height = innerHeight;
     this.cols = Math.max(40, Math.floor(innerWidth / this.cellPx));
