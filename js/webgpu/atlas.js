@@ -5,10 +5,14 @@
 // the ramp is close to linear in brightness. A hand-ordered ramp is uneven —
 // the gaps show up as banding in smooth gradients.
 const GlyphAtlas = {
-  // text glyphs top out around 25% ink, which leaves the bright end of the
-  // ramp flat; the block elements carry it the rest of the way to solid
-  CANDIDATES: ' .\'`^",:;!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@' +
-              '░▒▓█▖▗▘▝▚▞▌▐▀▄▁▂▃▅▆▇▉▊▋▌▍▎▏▙▛▜▟',
+  // Selectable candidate pools. Letters read as text and make the image look
+  // noisy; blocks read as pixels rather than ASCII. Symbols sit in between,
+  // at the cost of a dimmer bright end (punctuation tops out near 25% ink).
+  SETS: {
+    symbols: ' .\'`^",:;!|/\\()[]{}<>~+-_=*#%&@$?',
+    ascii:   ' .\'`^",:;!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@',
+    blocks:  ' .\':;!|/~+-=*#%&@░▒▓█▖▗▘▝▚▞▌▐▀▄▁▂▃▅▆▇▉▊▋▍▎▏▙▛▜▟',
+  },
   CELL: 32,
   LEVELS: 24,
 
@@ -36,10 +40,10 @@ const GlyphAtlas = {
   },
 
   // pick LEVELS glyphs whose coverages are as evenly spaced as possible
-  buildRamp() {
+  buildRamp(setName) {
     const seen = new Set();
     const uniq = [];
-    for (const g of this.measure(this.CANDIDATES)) {
+    for (const g of this.measure(this.SETS[setName] || this.SETS.symbols)) {
       const key = g.cov.toFixed(4);
       if (seen.has(key)) continue;      // drop visually identical glyphs
       seen.add(key);
@@ -67,8 +71,8 @@ const GlyphAtlas = {
     return ramp;
   },
 
-  build() {
-    const ramp = this.buildRamp();
+  build(setName) {
+    const ramp = this.buildRamp(setName || CFG.GLYPH_SET);
     this.ramp = ramp;
     const n = ramp.length;
     const cv = document.createElement('canvas');

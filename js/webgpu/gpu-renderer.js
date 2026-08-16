@@ -38,17 +38,7 @@ const GPURenderer = {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    const atlas = GlyphAtlas.build();
-    this.levels = atlas.levels;
-    this.atlasTex = device.createTexture({
-      size: [atlas.canvas.width, atlas.canvas.height],
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
-             GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    device.queue.copyExternalImageToTexture(
-      { source: atlas.canvas }, { texture: this.atlasTex },
-      [atlas.canvas.width, atlas.canvas.height]);
+    this.buildAtlas(CFG.GLYPH_SET);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
@@ -81,6 +71,32 @@ const GPURenderer = {
     }
     this.ok = true;
     return true;
+  },
+
+  // (Re)build the glyph atlas texture. Safe to call at runtime; the render
+  // bind group is recreated because the texture object changes.
+  buildAtlas(setName) {
+    const atlas = GlyphAtlas.build(setName);
+    this.levels = atlas.levels;
+    this.rampChars = atlas.chars;
+    if (this.atlasTex) this.atlasTex.destroy();
+    this.atlasTex = this.device.createTexture({
+      size: [atlas.canvas.width, atlas.canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+             GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.device.queue.copyExternalImageToTexture(
+      { source: atlas.canvas }, { texture: this.atlasTex },
+      [atlas.canvas.width, atlas.canvas.height]);
+    if (this.renderPipe) this.allocTargets();
+    return atlas;
+  },
+
+  setGlyphSet(name) {
+    CFG.GLYPH_SET = name;
+    this.buildAtlas(name);
+    return { set: name, levels: this.levels, chars: this.rampChars };
   },
 
   uploadWorld() {

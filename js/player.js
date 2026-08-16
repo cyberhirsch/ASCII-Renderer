@@ -12,6 +12,11 @@ const Player = {
       this.keys[e.code] = true;
       if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
       if (e.code === 'KeyX') CFG.RAW = !CFG.RAW;
+      if (e.code === 'KeyC' && GPURenderer.ok) {
+        const sets = Object.keys(GlyphAtlas.SETS);
+        const next = sets[(sets.indexOf(CFG.GLYPH_SET) + 1) % sets.length];
+        console.info('glyph set:', JSON.stringify(GPURenderer.setGlyphSet(next)));
+      }
       if (e.code === 'KeyF') {
         if (document.fullscreenElement) document.exitFullscreen();
         else document.documentElement.requestFullscreen();

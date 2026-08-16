@@ -10,6 +10,7 @@ const CFG = {
   PED_COUNT: 70,
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
+  GLYPH_SET: 'symbols',  // symbols | ascii | blocks  (C cycles)
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
