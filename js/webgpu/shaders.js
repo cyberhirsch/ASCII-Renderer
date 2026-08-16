@@ -803,9 +803,7 @@ struct RParams {
   black   : f32,     // 20
   white   : f32,     // 24
   gamma   : f32,     // 28
-  lift    : f32,     // 32
-  pad0    : f32,     // 36
-};                   // size 40
+};                   // size 32
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
 @group(0) @binding(1) var atlas  : texture_2d<f32>;
@@ -843,12 +841,8 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 
   // Tone curve first: without it the sky sits at the very top of the ramp,
   // where an ASCII-only set has almost no steps left, and bands.
-  // Lift after the gamma, not before: at a steep gamma the darks are crushed
-  // so hard that extra ambient light cannot climb even one ramp step, whereas
-  // a lift raises the floor while leaving the highlights where they are.
-  let curve = pow(clamp((lum - R.black) / max(R.white - R.black, 1e-3),
-                        0.0, 1.0), R.gamma);
-  let tone = curve * (1.0 - R.lift) + R.lift;
+  let tone = pow(clamp((lum - R.black) / max(R.white - R.black, 1e-3),
+                       0.0, 1.0), R.gamma);
 
   // glyph chosen by tone, dithered by just under one ramp step
   let dith = bayer4(vec2i(cell)) / R.levels;

@@ -56,7 +56,6 @@ const CFG = {
   TONE_BLACK: 0.0,
   TONE_WHITE: 0.90,
   TONE_GAMMA: 2.0,
-  TONE_LIFT: 0.08,    // raises the darkest end only; the minimal fill
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
@@ -1398,9 +1397,7 @@ struct RParams {
   black   : f32,     // 20
   white   : f32,     // 24
   gamma   : f32,     // 28
-  lift    : f32,     // 32
-  pad0    : f32,     // 36
-};                   // size 40
+};                   // size 32
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
 @group(0) @binding(1) var atlas  : texture_2d<f32>;
@@ -1438,12 +1435,8 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 
   // Tone curve first: without it the sky sits at the very top of the ramp,
   // where an ASCII-only set has almost no steps left, and bands.
-  // Lift after the gamma, not before: at a steep gamma the darks are crushed
-  // so hard that extra ambient light cannot climb even one ramp step, whereas
-  // a lift raises the floor while leaving the highlights where they are.
-  let curve = pow(clamp((lum - R.black) / max(R.white - R.black, 1e-3),
-                        0.0, 1.0), R.gamma);
-  let tone = curve * (1.0 - R.lift) + R.lift;
+  let tone = pow(clamp((lum - R.black) / max(R.white - R.black, 1e-3),
+                       0.0, 1.0), R.gamma);
 
   // glyph chosen by tone, dithered by just under one ramp step
   let dith = bayer4(vec2i(cell)) / R.levels;
@@ -1531,7 +1524,7 @@ const GPURenderer = {
     this.uniBuf = device.createBuffer({
       size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
-      size: 40, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     device.pushErrorScope('validation');
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
@@ -1723,8 +1716,7 @@ const GPURenderer = {
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
-      CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA,
-      CFG.TONE_LIFT, 0]));
+      CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
     // --- entities: position, heading, and per-instance dimensions ---
     let k = 0;
