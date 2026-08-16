@@ -167,11 +167,11 @@ const GPURenderer = {
     const cp = Math.cos(p), sp = Math.sin(p);
     const fwd = [Math.cos(a) * cp, Math.sin(a) * cp, sp];
     const right = [-Math.sin(a), Math.cos(a), 0];
-    // up = right x fwd
+    // up = fwd x right  (the other order points down and flips the image)
     const up = [
-      right[1] * fwd[2] - right[2] * fwd[1],
-      right[2] * fwd[0] - right[0] * fwd[2],
-      right[0] * fwd[1] - right[1] * fwd[0],
+      fwd[1] * right[2] - fwd[2] * right[1],
+      fwd[2] * right[0] - fwd[0] * right[2],
+      fwd[0] * right[1] - fwd[1] * right[0],
     ];
     const sx = Math.cos(CFG.SUN_AZ), sy = Math.sin(CFG.SUN_AZ), sz = Math.tan(CFG.SUN_EL);
     const il = 1 / Math.hypot(sx, sy, sz);
