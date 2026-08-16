@@ -9,7 +9,7 @@ const CFG = {
   CAR_COUNT: 42,
   PED_COUNT: 70,
   // rendering
-  MONO: false,        // uniform grayscale (M toggles)
+  MONO: true,         // uniform grayscale (M toggles)
   // palette: hard yellow sun against a deep blue sky, with the ambient term
   // kept low so shadows go dark and the sunlight reads as the only real light
   SUN_COL: [1.00, 0.86, 0.46],
@@ -24,7 +24,7 @@ const CFG = {
   // glyphs go unused, below it they clip and the highlights flatten.
   TONE_BLACK: 0.0,
   TONE_WHITE: 0.90,
-  TONE_GAMMA: 0.9,
+  TONE_GAMMA: 1.6,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
