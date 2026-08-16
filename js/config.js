@@ -29,6 +29,10 @@ const CFG = {
   AO_SAMPLES: 12,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, world units
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
+  // lighting LOD: full shadow/AO ray budgets inside SHADE_NEAR, tapering to a
+  // single hard shadow ray and constant ambient beyond SHADE_FAR
+  SHADE_NEAR: 16,
+  SHADE_FAR: 48,
   // terrain: a continuous, infinite heightfield evaluated in the shader and
   // mirrored in js/util.js. No stored grid, no world bounds.
   TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units

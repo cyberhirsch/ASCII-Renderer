@@ -215,6 +215,8 @@ const GPURenderer = {
     u[28] = CFG.TREE_REACH;
     u[29] = CFG.SEA_LEVEL;
     u[30] = (performance.now() / 1000) % 3600;
+    u[31] = CFG.SHADE_NEAR;
+    u[43] = CFG.SHADE_FAR;
     u.set(CFG.SUN_COL, 32);      u[35] = CFG.SUN_I;
     u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
     u.set(CFG.SKY_HORIZON, 40);

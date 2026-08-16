@@ -38,13 +38,13 @@ struct Uniforms {
   treeReach : f32,   // cells to search for overhanging canopies
   seaLevel  : f32,
   time      : f32,
-  pad1      : f32,
+  shadeNear : f32,   // full shadow/AO quality inside this distance
   sunCol    : vec3f,
   sunI      : f32,
   ambCol    : vec3f,
   ambI      : f32,
   skyLo     : vec3f,
-  pad2      : f32,
+  shadeFar  : f32,   // beyond this: 1 hard shadow ray, constant AO
   skyHi     : vec3f,
   pad3      : f32,
 };
@@ -373,12 +373,12 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
   return false;
 }
 
-fn softShadow(p : vec3f, seed : vec2f) -> f32 {
+fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
   var tt = vec3f(0.0, 0.0, 1.0);
   if (abs(U.sunDir.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
   let b1 = normalize(cross(tt, U.sunDir));
   let b2 = cross(U.sunDir, b1);
-  let n = i32(U.sunSamples);
+  let n = nRays;
   let rot = hash1f(seed) * 6.2831853;
   var lit = 0.0;
   for (var i = 0; i < n; i = i + 1) {
@@ -391,12 +391,12 @@ fn softShadow(p : vec3f, seed : vec2f) -> f32 {
   return lit / f32(n);
 }
 
-fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f) -> f32 {
+fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f, nRays : i32) -> f32 {
   var tt = vec3f(0.0, 0.0, 1.0);
   if (abs(nrm.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
   let b1 = normalize(cross(tt, nrm));
   let b2 = cross(nrm, b1);
-  let n = i32(U.aoSamples);
+  let n = nRays;
   let rot = hash1f(seed + vec2f(17.0, 5.0)) * 6.2831853;
   var vis = 0.0;
   for (var i = 0; i < n; i = i + 1) {
@@ -528,8 +528,17 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   } else {
     let p = org + rd * h.t + h.n * 0.015;
     let seed = vec2f(px) + vec2f(0.37, 0.11);
-    let sun = softShadow(p, seed);
-    let ao = tracedAO(p, h.n, seed);
+    // lighting LOD: ray budgets taper with distance from the player. Beyond
+    // shadeFar a penumbra or an AO pocket subtends less than one glyph, so a
+    // single hard shadow ray and a constant ambient term are indistinguishable.
+    let dHit = h.t + length(org - ro);
+    let q = clamp(1.0 - (dHit - U.shadeNear) / max(U.shadeFar - U.shadeNear, 1e-3),
+                  0.0, 1.0);
+    let nSun = max(1, i32(round(U.sunSamples * q)));
+    let nAO = i32(round(U.aoSamples * q));
+    let sun = softShadow(p, seed, nSun);
+    var ao = 0.88;
+    if (nAO > 0) { ao = tracedAO(p, h.n, seed, nAO); }
     let ndl = select(max(dot(h.n, U.sunDir), 0.0),
                      mix(abs(dot(h.n, U.sunDir)), 1.0, 0.35), h.canopy);
 
@@ -545,8 +554,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
       lit = lit + U.sunCol * spec * 0.75 * sun;
     }
 
-    let dTotal = h.t + (length(org - ro));
-    let fog = clamp(dTotal / U.maxDist, 0.0, 1.0);
+    let fog = clamp(dHit / U.maxDist, 0.0, 1.0);
     let shaded = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
 
     if (h.canopy) {
