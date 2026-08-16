@@ -62,12 +62,18 @@ const GPURenderer = {
       size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // ---- pipelines ----
+    // ---- pipelines (with compile diagnostics: a silent shader failure
+    // otherwise shows up as an unexplained black screen) ----
+    device.pushErrorScope('validation');
+
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
+    const rmod = device.createShaderModule({ code: WGSL_RENDER });
+    if (!await this.checkShader(cmod, 'compute')) return false;
+    if (!await this.checkShader(rmod, 'render')) return false;
+
     this.computePipe = device.createComputePipeline({
       layout: 'auto', compute: { module: cmod, entryPoint: 'main' },
     });
-    const rmod = device.createShaderModule({ code: WGSL_RENDER });
     this.renderPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module: rmod, entryPoint: 'vs' },
@@ -76,7 +82,31 @@ const GPURenderer = {
     });
 
     this.allocTargets();
+
+    const err = await device.popErrorScope();
+    if (err) {
+      this.reason = 'pipeline validation: ' + err.message;
+      console.error('[WebGPU] ' + this.reason);
+      return false;
+    }
+
     this.ok = true;
+    return true;
+  },
+
+  async checkShader(mod, label) {
+    if (!mod.getCompilationInfo) return true;
+    const info = await mod.getCompilationInfo();
+    const errors = info.messages.filter(m => m.type === 'error');
+    for (const m of info.messages) {
+      const where = `${label}.wgsl:${m.lineNum}:${m.linePos}`;
+      if (m.type === 'error') console.error(`[WGSL ${where}] ${m.message}`);
+      else console.warn(`[WGSL ${where}] ${m.message}`);
+    }
+    if (errors.length) {
+      this.reason = `${label} shader failed to compile (${errors.length} error(s); see console)`;
+      return false;
+    }
     return true;
   },
 
@@ -124,6 +154,10 @@ const GPURenderer = {
 
   render() {
     if (!this.ok) return;
+    // check the first few frames for draw-time validation errors, which
+    // would otherwise present as a silent black screen
+    const probe = this.frameNo === undefined ? (this.frameNo = 0) : ++this.frameNo;
+    if (probe < 3) this.device.pushErrorScope('validation');
     const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
     const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
     const el = CFG.SUN_EL, az = CFG.SUN_AZ;
@@ -163,5 +197,41 @@ const GPURenderer = {
     rp.draw(3);
     rp.end();
     this.device.queue.submit([enc.finish()]);
+
+    if (probe < 3) {
+      this.device.popErrorScope().then(err => {
+        if (err) console.error('[WebGPU] frame ' + probe + ' error: ' + err.message);
+      });
+    }
+  },
+
+  // Dumps the low-res compute output so a black screen can be traced to
+  // either the raymarch (all zeros) or the glyph-upscale pass (non-zero here).
+  async debugReadback() {
+    if (!this.ok) return 'GPU renderer not active: ' + (this.reason || 'n/a');
+    const bpr = Math.ceil(this.cols * 4 / 256) * 256;
+    const buf = this.device.createBuffer({
+      size: bpr * this.rows,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToBuffer(
+      { texture: this.lowTex },
+      { buffer: buf, bytesPerRow: bpr },
+      [this.cols, this.rows]);
+    this.device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const d = new Uint8Array(buf.getMappedRange());
+    let nonZero = 0, maxV = 0, sum = 0;
+    for (let y = 0; y < this.rows; y++) for (let x = 0; x < this.cols; x++) {
+      const v = d[y * bpr + x * 4 + 3]; // alpha = luminance
+      if (v > 0) nonZero++;
+      if (v > maxV) maxV = v;
+      sum += v;
+    }
+    const total = this.cols * this.rows;
+    buf.unmap(); buf.destroy();
+    return { cols: this.cols, rows: this.rows, litCells: nonZero, total,
+             maxLum: maxV, avgLum: +(sum / total).toFixed(1) };
   },
 };

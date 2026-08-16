@@ -69,11 +69,11 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   var mapX = i32(floor(U.camPos.x));
   var mapY = i32(floor(U.camPos.y));
   let dD = abs(1.0 / max(abs(rd), vec2f(1e-9)));
-  var step = vec2i(1, 1);
+  var stepDir = vec2i(1, 1);
   var side = vec2f(0.0);
-  if (rd.x < 0.0) { step.x = -1; side.x = (U.camPos.x - f32(mapX)) * dD.x; }
+  if (rd.x < 0.0) { stepDir.x = -1; side.x = (U.camPos.x - f32(mapX)) * dD.x; }
   else { side.x = (f32(mapX) + 1.0 - U.camPos.x) * dD.x; }
-  if (rd.y < 0.0) { step.y = -1; side.y = (U.camPos.y - f32(mapY)) * dD.y; }
+  if (rd.y < 0.0) { stepDir.y = -1; side.y = (U.camPos.y - f32(mapY)) * dD.y; }
   else { side.y = (f32(mapY) + 1.0 - U.camPos.y) * dD.y; }
 
   var lum = 0.0;
@@ -83,8 +83,8 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 
   for (var iter = 0; iter < 512; iter = iter + 1) {
     var dist : f32;
-    if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + step.x; whichSide = 0; dist = side.x - dD.x; }
-    else { side.y = side.y + dD.y; mapY = mapY + step.y; whichSide = 1; dist = side.y - dD.y; }
+    if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + stepDir.x; whichSide = 0; dist = side.x - dD.x; }
+    else { side.y = side.y + dD.y; mapY = mapY + stepDir.y; whichSide = 1; dist = side.y - dD.y; }
     if (dist > U.maxDist) { break; }
 
     let c = cellAt(mapX, mapY);
@@ -100,7 +100,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     // world height of this screen row on the wall face
     let wz = (yBot - fy) / max(yBot - yTop, 1e-4) * h;
     var n = vec3f(0.0, 0.0, 0.0);
-    if (whichSide == 0) { n.x = -f32(step.x); } else { n.y = -f32(step.y); }
+    if (whichSide == 0) { n.x = -f32(stepDir.x); } else { n.y = -f32(stepDir.y); }
     let hitP = vec3f(U.camPos + rd * d, wz) + n * 0.02;
 
     let ndl = max(dot(n, U.sunDir), 0.0);
