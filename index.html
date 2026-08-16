@@ -6,8 +6,13 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; width: 100vw; height: 100vh; object-fit: cover; }
+  canvas { display: block; width: 100vw; height: 100vh; }
   canvas[hidden] { display: none; }
+  #fail {
+    color: #c8d2dc; font: 14px/1.6 "Consolas", monospace;
+    max-width: 34em; padding: 2em; text-align: center;
+  }
+  #fail h1 { font-size: 1.4em; font-weight: 600; color: #e8eef4; }
   #hud {
     position: fixed; left: 10px; bottom: 8px;
     font: 12px "Consolas", monospace; color: #3a4a55; user-select: none;
@@ -20,8 +25,7 @@
 </head>
 <body>
 <canvas id="screen"></canvas>
-<canvas id="gpuscreen" hidden></canvas>
-<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; N day/night &middot; M mono/color &middot; F fullscreen</div>
+<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; M mono/colour &middot; F fullscreen</div>
 <div id="fps"></div>
 <script src="js/config.js"></script>
 <script src="js/util.js"></script>
@@ -29,7 +33,6 @@
 <script src="js/light.js"></script>
 <script src="js/entities.js"></script>
 <script src="js/player.js"></script>
-<script src="js/renderer.js"></script>
 <script src="js/webgpu/atlas.js"></script>
 <script src="js/webgpu/shaders.js"></script>
 <script src="js/webgpu/gpu-renderer.js"></script>

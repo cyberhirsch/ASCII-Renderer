@@ -1,45 +1,43 @@
-// WebGPU backend: compute-shader raymarch into a low-res target, then a
-// glyph-mapping upscale pass. Falls back to the CPU renderer if unavailable.
+// WebGPU renderer: per-pixel 3D raymarch in a compute shader, then a
+// glyph-mapped upscale. This is the only renderer.
 const GPURenderer = {
   ok: false, device: null, ctx: null,
-  cols: 0, rows: 0, cellPx: 12,
+  cols: 0, rows: 0, cellPx: 10,
   reason: '',
 
   async init() {
-    const canvas = document.getElementById('gpuscreen');
-    if (!navigator.gpu) { this.reason = 'navigator.gpu missing'; return false; }
+    const canvas = document.getElementById('screen');
+    if (!navigator.gpu) { this.reason = 'this browser has no WebGPU support'; return false; }
     let adapter, device;
     try {
       adapter = await navigator.gpu.requestAdapter();
-      if (!adapter) { this.reason = 'no GPU adapter'; return false; }
+      if (!adapter) { this.reason = 'no GPU adapter available'; return false; }
       device = await adapter.requestDevice();
     } catch (e) { this.reason = 'device request failed: ' + e.message; return false; }
 
     this.device = device;
     this.ctx = canvas.getContext('webgpu');
-    if (!this.ctx) { this.reason = 'webgpu context unavailable'; return false; }
+    if (!this.ctx) { this.reason = 'could not get a webgpu canvas context'; return false; }
     this.format = navigator.gpu.getPreferredCanvasFormat();
     device.lost.then(info => {
       this.ok = false;
-      console.warn('WebGPU device lost:', info.message);
+      console.error('[WebGPU] device lost: ' + info.message);
     });
 
     this.resize();
     this.ctx.configure({ device, format: this.format, alphaMode: 'opaque' });
 
-    // ---- world data as a storage buffer: type | height<<8 ----
-    const N = CFG.WORLD * CFG.WORLD;
-    const packed = new Uint32Array(N);
-    for (let i = 0; i < N; i++) {
-      packed[i] = (World.type[i] & 0xff) | ((Math.min(World.height[i], 255) & 0xff) << 8);
-    }
-    this.cellBuf = device.createBuffer({
-      size: packed.byteLength,
+    // world cells: type | height<<8 | ao<<16
+    this.uploadWorld();
+
+    // entity buffer: vec4(x, y, halfWidth, height)
+    this.entCount = Entities.cars.length + Entities.peds.length;
+    this.entData = new Float32Array(Math.max(this.entCount, 1) * 4);
+    this.entBuf = device.createBuffer({
+      size: this.entData.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(this.cellBuf, 0, packed);
 
-    // ---- glyph atlas texture ----
     const atlas = GlyphAtlas.build();
     this.levels = atlas.levels;
     this.atlasTex = device.createTexture({
@@ -53,27 +51,19 @@ const GPURenderer = {
       [atlas.canvas.width, atlas.canvas.height]);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-
-    // ---- uniforms ----
     this.uniBuf = device.createBuffer({
-      size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
-      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    // ---- pipelines (with compile diagnostics: a silent shader failure
-    // otherwise shows up as an unexplained black screen) ----
     device.pushErrorScope('validation');
-
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
     const rmod = device.createShaderModule({ code: WGSL_RENDER });
     if (!await this.checkShader(cmod, 'compute')) return false;
     if (!await this.checkShader(rmod, 'render')) return false;
 
     this.computePipe = device.createComputePipeline({
-      layout: 'auto', compute: { module: cmod, entryPoint: 'main' },
-    });
+      layout: 'auto', compute: { module: cmod, entryPoint: 'main' } });
     this.renderPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module: rmod, entryPoint: 'vs' },
@@ -89,9 +79,24 @@ const GPURenderer = {
       console.error('[WebGPU] ' + this.reason);
       return false;
     }
-
     this.ok = true;
     return true;
+  },
+
+  uploadWorld() {
+    const N = CFG.WORLD * CFG.WORLD;
+    const packed = new Uint32Array(N);
+    for (let i = 0; i < N; i++) {
+      const ao = Math.max(0, Math.min(255, Math.round(Light.ao[i] * 255)));
+      packed[i] = (World.type[i] & 0xff) |
+                  ((Math.min(World.height[i], 255) & 0xff) << 8) |
+                  (ao << 16);
+    }
+    this.cellBuf = this.device.createBuffer({
+      size: packed.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.cellBuf, 0, packed);
   },
 
   async checkShader(mod, label) {
@@ -104,18 +109,19 @@ const GPURenderer = {
       else console.warn(`[WGSL ${where}] ${m.message}`);
     }
     if (errors.length) {
-      this.reason = `${label} shader failed to compile (${errors.length} error(s); see console)`;
+      this.reason = `${label} shader failed to compile (see console)`;
       return false;
     }
     return true;
   },
 
   resize() {
-    const canvas = document.getElementById('gpuscreen');
-    canvas.width = innerWidth;
-    canvas.height = innerHeight;
-    this.cols = Math.max(40, Math.floor(innerWidth / this.cellPx));
-    this.rows = Math.max(24, Math.floor(innerHeight / this.cellPx));
+    const canvas = document.getElementById('screen');
+    const dpr = 1; // glyph cells are the pixels that matter here
+    canvas.width = Math.max(320, Math.floor(innerWidth * dpr));
+    canvas.height = Math.max(240, Math.floor(innerHeight * dpr));
+    this.cols = Math.max(40, Math.floor(canvas.width / this.cellPx));
+    this.rows = Math.max(24, Math.floor(canvas.height / this.cellPx));
   },
 
   allocTargets() {
@@ -123,7 +129,8 @@ const GPURenderer = {
     this.lowTex = this.device.createTexture({
       size: [this.cols, this.rows],
       format: 'rgba8unorm',
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING |
+             GPUTextureUsage.COPY_SRC,
     });
     this.computeBind = this.device.createBindGroup({
       layout: this.computePipe.getBindGroupLayout(0),
@@ -131,6 +138,7 @@ const GPURenderer = {
         { binding: 0, resource: { buffer: this.uniBuf } },
         { binding: 1, resource: { buffer: this.cellBuf } },
         { binding: 2, resource: this.lowTex.createView() },
+        { binding: 3, resource: { buffer: this.entBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -142,48 +150,64 @@ const GPURenderer = {
         { binding: 3, resource: { buffer: this.rparBuf } },
       ],
     });
-    this.device.queue.writeBuffer(this.rparBuf, 0,
-      new Float32Array([this.cols, this.rows, this.levels, 0]));
   },
 
   handleResize() {
-    const oldC = this.cols, oldR = this.rows;
+    const oc = this.cols, or = this.rows;
     this.resize();
-    if (this.cols !== oldC || this.rows !== oldR) this.allocTargets();
+    if (this.ok && (this.cols !== oc || this.rows !== or)) this.allocTargets();
   },
 
   render() {
     if (!this.ok) return;
-    // check the first few frames for draw-time validation errors, which
-    // would otherwise present as a silent black screen
-    const probe = this.frameNo === undefined ? (this.frameNo = 0) : ++this.frameNo;
-    if (probe < 3) this.device.pushErrorScope('validation');
-    const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
-    const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
-    const el = CFG.SUN_EL, az = CFG.SUN_AZ;
-    const sx = Math.cos(az), sy = Math.sin(az), sz = Math.tan(el);
+    const dev = this.device;
+
+    // --- camera basis, genuinely rotated by pitch (true 3-point perspective) ---
+    const a = Player.angle, p = Player.pitch;
+    const cp = Math.cos(p), sp = Math.sin(p);
+    const fwd = [Math.cos(a) * cp, Math.sin(a) * cp, sp];
+    const right = [-Math.sin(a), Math.cos(a), 0];
+    // up = right x fwd
+    const up = [
+      right[1] * fwd[2] - right[2] * fwd[1],
+      right[2] * fwd[0] - right[0] * fwd[2],
+      right[0] * fwd[1] - right[1] * fwd[0],
+    ];
+    const sx = Math.cos(CFG.SUN_AZ), sy = Math.sin(CFG.SUN_AZ), sz = Math.tan(CFG.SUN_EL);
     const il = 1 / Math.hypot(sx, sy, sz);
+    const tanX = CFG.PLANE_LEN;
+    const tanY = tanX * (this.rows / this.cols);
 
-    // std140-ish layout matching the WGSL Uniforms struct
     const u = new Float32Array(24);
-    u[0] = Player.x; u[1] = Player.y;         // camPos
-    u[2] = dirX; u[3] = dirY;                 // camDir
-    u[4] = planeX; u[5] = planeY;             // camPlane
-    u[6] = CFG.WORLD; u[7] = CFG.MAX_DIST;
-    u[8] = sx * il; u[9] = sy * il; u[10] = sz * il; // sunDir (vec3, 16B aligned)
-    u[11] = CFG.SHADOW;
-    u[12] = CFG.EYE; u[13] = CFG.Y_SCALE;
-    u[14] = Player.pitch * (this.rows / Math.max(CFG.ROWS, 1));
-    u[15] = Light.maxH || 32;
-    u[16] = this.cols; u[17] = this.rows;
-    this.device.queue.writeBuffer(this.uniBuf, 0, u);
+    u[0] = Player.x;  u[1] = Player.y;
+    u[2] = this.cols; u[3] = this.rows;
+    u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];   u[7] = CFG.EYE;
+    u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
+    u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.WORLD;
+    u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
+    u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
+    dev.queue.writeBuffer(this.uniBuf, 0, u);
+    dev.queue.writeBuffer(this.rparBuf, 0,
+      new Float32Array([this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0]));
 
-    const enc = this.device.createCommandEncoder();
-    const cp = enc.beginComputePass();
-    cp.setPipeline(this.computePipe);
-    cp.setBindGroup(0, this.computeBind);
-    cp.dispatchWorkgroups(Math.ceil(this.cols / 8), Math.ceil(this.rows / 8));
-    cp.end();
+    // --- entities ---
+    let k = 0;
+    for (const c of Entities.cars) {
+      this.entData[k++] = c.x; this.entData[k++] = c.y;
+      this.entData[k++] = 0.42; this.entData[k++] = 0.85;
+    }
+    for (const pd of Entities.peds) {
+      this.entData[k++] = pd.x; this.entData[k++] = pd.y;
+      this.entData[k++] = 0.16; this.entData[k++] = 1.7;
+    }
+    dev.queue.writeBuffer(this.entBuf, 0, this.entData);
+
+    const enc = dev.createCommandEncoder();
+    const cpass = enc.beginComputePass();
+    cpass.setPipeline(this.computePipe);
+    cpass.setBindGroup(0, this.computeBind);
+    cpass.dispatchWorkgroups(Math.ceil(this.cols / 8), Math.ceil(this.rows / 8));
+    cpass.end();
 
     const rp = enc.beginRenderPass({
       colorAttachments: [{
@@ -196,35 +220,34 @@ const GPURenderer = {
     rp.setBindGroup(0, this.renderBind);
     rp.draw(3);
     rp.end();
-    this.device.queue.submit([enc.finish()]);
+    dev.queue.submit([enc.finish()]);
 
+    const probe = this.frameNo === undefined ? (this.frameNo = 0) : ++this.frameNo;
     if (probe < 3) {
-      this.device.popErrorScope().then(err => {
-        if (err) console.error('[WebGPU] frame ' + probe + ' error: ' + err.message);
+      dev.pushErrorScope('validation');
+      dev.popErrorScope().then(err => {
+        if (err) console.error('[WebGPU] frame error: ' + err.message);
       });
     }
   },
 
-  // Dumps the low-res compute output so a black screen can be traced to
-  // either the raymarch (all zeros) or the glyph-upscale pass (non-zero here).
+  // Dumps the compute output so a black screen can be attributed to either
+  // the raymarch (all zeros) or the glyph upscale (non-zero here).
   async debugReadback() {
-    if (!this.ok) return 'GPU renderer not active: ' + (this.reason || 'n/a');
+    if (!this.ok) return 'GPU renderer inactive: ' + (this.reason || 'n/a');
     const bpr = Math.ceil(this.cols * 4 / 256) * 256;
     const buf = this.device.createBuffer({
       size: bpr * this.rows,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.device.createCommandEncoder();
-    enc.copyTextureToBuffer(
-      { texture: this.lowTex },
-      { buffer: buf, bytesPerRow: bpr },
-      [this.cols, this.rows]);
+    enc.copyTextureToBuffer({ texture: this.lowTex },
+      { buffer: buf, bytesPerRow: bpr }, [this.cols, this.rows]);
     this.device.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const d = new Uint8Array(buf.getMappedRange());
     let nonZero = 0, maxV = 0, sum = 0;
     for (let y = 0; y < this.rows; y++) for (let x = 0; x < this.cols; x++) {
-      const v = d[y * bpr + x * 4 + 3]; // alpha = luminance
+      const v = d[y * bpr + x * 4 + 3];
       if (v > 0) nonZero++;
       if (v > maxV) maxV = v;
       sum += v;

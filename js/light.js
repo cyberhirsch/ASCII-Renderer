@@ -1,7 +1,6 @@
-// Lighting (PRD 10b): raytraced directional sunlight + baked ambient occlusion.
-// Sun visibility is a real shadow ray: from each visible surface point, march
-// toward the sun through the height grid until something blocks it or the ray
-// climbs above the tallest building. AO stays baked (geometry is static).
+// Lighting data for the GPU renderer. Sun visibility is traced per pixel in
+// the compute shader; this bakes the ambient occlusion term (geometry is
+// static) and the world's max height, which bounds the shadow ray.
 const Light = {
   ao: null, sunX: 0, sunY: 0, tanEl: 0, maxH: 0,
   // normalized 3D sun direction (surface -> sun), for specular
@@ -34,33 +33,4 @@ const Light = {
     }
   },
 
-  // shadow ray from world point (x,y,z) toward the sun: 1 = lit, SHADOW = blocked
-  traceSun(x, y, z) {
-    const W = CFG.WORLD;
-    let px = x, py = y, pz = z;
-    for (let t = 0; t < 64; t++) {
-      px += this.sunX; py += this.sunY; pz += this.tanEl;
-      if (pz >= this.maxH) return 1;
-      const xi = px | 0, yi = py | 0;
-      if (xi < 0 || yi < 0 || xi >= W || yi >= W) return 1;
-      const j = yi * W + xi;
-      const tt = World.type[j];
-      if ((tt === T_BLDG || tt === T_TREE) && World.height[j] > pz) return CFG.SHADOW;
-    }
-    return 1;
-  },
-
-  // AO fades out with height above ground (contact darkening)
-  aoLerp(x, y, z) {
-    if (x < 0 || y < 0 || x >= CFG.WORLD || y >= CFG.WORLD) return 1;
-    const a = this.ao[y * CFG.WORLD + x];
-    const t = Math.min(z / 3, 1);
-    return a + (1 - a) * t;
-  },
-
-  groundLight(x, y) {
-    const xi = Math.floor(x), yi = Math.floor(y);
-    if (xi < 0 || yi < 0 || xi >= CFG.WORLD || yi >= CFG.WORLD) return 1;
-    return this.traceSun(x, y, 0.05) * this.ao[yi * CFG.WORLD + xi];
-  },
 };

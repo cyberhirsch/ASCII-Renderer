@@ -1,7 +1,7 @@
 // First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
 const Player = {
   x: 0, y: 0, angle: 0.6,
-  pitch: 0, // vertical look, in character rows of horizon offset
+  pitch: 0, // vertical look, radians; ±90° is straight up/down
   keys: {},
 
   init() {
@@ -10,7 +10,6 @@ const Player = {
 
     addEventListener('keydown', e => {
       this.keys[e.code] = true;
-      if (e.code === 'KeyN') CFG.DAY = !CFG.DAY;
       if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
       if (e.code === 'KeyF') {
         if (document.fullscreenElement) document.exitFullscreen();
@@ -19,11 +18,9 @@ const Player = {
     });
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
-    // either backend's canvas can be the visible one
-    const canvases = [document.getElementById('screen'),
-                      document.getElementById('gpuscreen')].filter(Boolean);
-    for (const cv of canvases) cv.addEventListener('click', () => cv.requestPointerLock());
-    const locked = () => canvases.indexOf(document.pointerLockElement) !== -1;
+    const canvas = document.getElementById('screen');
+    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    const locked = () => document.pointerLockElement === canvas;
     // browsers can fire one huge bogus movement delta when pointer lock
     // engages or the cursor re-syncs; skip the first events and clamp the rest
     let skipEvents = 0;
@@ -34,8 +31,10 @@ const Player = {
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);
       this.angle += mx * 0.0022;
-      // mouse up = look up = horizon drops = pitch grows. Unclamped.
-      this.pitch -= my * 0.06;
+      // real camera pitch. Full range: straight up to straight down. It stops
+      // a hair short of the poles, where the camera basis would degenerate.
+      const LIM = Math.PI / 2 - 0.001;
+      this.pitch = clamp(this.pitch - my * 0.0022, -LIM, LIM);
     });
   },
 

@@ -6,8 +6,13 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; width: 100vw; height: 100vh; object-fit: cover; }
+  canvas { display: block; width: 100vw; height: 100vh; }
   canvas[hidden] { display: none; }
+  #fail {
+    color: #c8d2dc; font: 14px/1.6 "Consolas", monospace;
+    max-width: 34em; padding: 2em; text-align: center;
+  }
+  #fail h1 { font-size: 1.4em; font-weight: 600; color: #e8eef4; }
   #hud {
     position: fixed; left: 10px; bottom: 8px;
     font: 12px "Consolas", monospace; color: #3a4a55; user-select: none;
@@ -20,19 +25,14 @@
 </head>
 <body>
 <canvas id="screen"></canvas>
-<canvas id="gpuscreen" hidden></canvas>
-<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; N day/night &middot; M mono/color &middot; F fullscreen</div>
+<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; M mono/colour &middot; F fullscreen</div>
 <div id="fps"></div>
 <script>
 // ---- js/config.js ----
 // Global configuration. Plain script, shared global scope (inlined at build time).
 const CFG = {
-  COLS: 150,          // character grid width (recomputed from window size at init)
-  ROWS: 68,           // character grid height (recomputed from window size at init)
-  FONT_SIZE: 14,      // px, monospace
-  PLANE_LEN: 0.85,    // camera plane half-length (horizontal FOV)
-  Y_SCALE: 62,        // vertical projection factor (rows per worldunit/dist)
-  MAX_DIST: 44,       // raycast cutoff (world cells)
+  PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
+  MAX_DIST: 60,       // ray cutoff (world cells)
   EYE: 1.55,          // camera height above ground
   WORLD: 192,         // world grid size (cells per side)
   CITY: 96,           // city core size, centered; the rest is open ground
@@ -40,10 +40,7 @@ const CFG = {
   CAR_COUNT: 42,
   PED_COUNT: 70,
   // rendering
-  MONO: true,         // uniform grayscale for everything (M toggles)
-  FLAT: true,         // buildings as plain shaded boxes, no windows
-  // lighting
-  DAY: true,
+  MONO: true,         // uniform grayscale (M toggles)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
   SHADOW: 0.35,       // brightness factor inside cast shadows
@@ -204,10 +201,9 @@ const World = {
 </script>
 <script>
 // ---- js/light.js ----
-// Lighting (PRD 10b): raytraced directional sunlight + baked ambient occlusion.
-// Sun visibility is a real shadow ray: from each visible surface point, march
-// toward the sun through the height grid until something blocks it or the ray
-// climbs above the tallest building. AO stays baked (geometry is static).
+// Lighting data for the GPU renderer. Sun visibility is traced per pixel in
+// the compute shader; this bakes the ambient occlusion term (geometry is
+// static) and the world's max height, which bounds the shadow ray.
 const Light = {
   ao: null, sunX: 0, sunY: 0, tanEl: 0, maxH: 0,
   // normalized 3D sun direction (surface -> sun), for specular
@@ -240,35 +236,6 @@ const Light = {
     }
   },
 
-  // shadow ray from world point (x,y,z) toward the sun: 1 = lit, SHADOW = blocked
-  traceSun(x, y, z) {
-    const W = CFG.WORLD;
-    let px = x, py = y, pz = z;
-    for (let t = 0; t < 64; t++) {
-      px += this.sunX; py += this.sunY; pz += this.tanEl;
-      if (pz >= this.maxH) return 1;
-      const xi = px | 0, yi = py | 0;
-      if (xi < 0 || yi < 0 || xi >= W || yi >= W) return 1;
-      const j = yi * W + xi;
-      const tt = World.type[j];
-      if ((tt === T_BLDG || tt === T_TREE) && World.height[j] > pz) return CFG.SHADOW;
-    }
-    return 1;
-  },
-
-  // AO fades out with height above ground (contact darkening)
-  aoLerp(x, y, z) {
-    if (x < 0 || y < 0 || x >= CFG.WORLD || y >= CFG.WORLD) return 1;
-    const a = this.ao[y * CFG.WORLD + x];
-    const t = Math.min(z / 3, 1);
-    return a + (1 - a) * t;
-  },
-
-  groundLight(x, y) {
-    const xi = Math.floor(x), yi = Math.floor(y);
-    if (xi < 0 || yi < 0 || xi >= CFG.WORLD || yi >= CFG.WORLD) return 1;
-    return this.traceSun(x, y, 0.05) * this.ao[yi * CFG.WORLD + xi];
-  },
 };
 </script>
 <script>
@@ -361,7 +328,7 @@ const Entities = {
 // First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
 const Player = {
   x: 0, y: 0, angle: 0.6,
-  pitch: 0, // vertical look, in character rows of horizon offset
+  pitch: 0, // vertical look, radians; ±90° is straight up/down
   keys: {},
 
   init() {
@@ -370,7 +337,6 @@ const Player = {
 
     addEventListener('keydown', e => {
       this.keys[e.code] = true;
-      if (e.code === 'KeyN') CFG.DAY = !CFG.DAY;
       if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
       if (e.code === 'KeyF') {
         if (document.fullscreenElement) document.exitFullscreen();
@@ -379,11 +345,9 @@ const Player = {
     });
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
-    // either backend's canvas can be the visible one
-    const canvases = [document.getElementById('screen'),
-                      document.getElementById('gpuscreen')].filter(Boolean);
-    for (const cv of canvases) cv.addEventListener('click', () => cv.requestPointerLock());
-    const locked = () => canvases.indexOf(document.pointerLockElement) !== -1;
+    const canvas = document.getElementById('screen');
+    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    const locked = () => document.pointerLockElement === canvas;
     // browsers can fire one huge bogus movement delta when pointer lock
     // engages or the cursor re-syncs; skip the first events and clamp the rest
     let skipEvents = 0;
@@ -394,8 +358,10 @@ const Player = {
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);
       this.angle += mx * 0.0022;
-      // mouse up = look up = horizon drops = pitch grows. Unclamped.
-      this.pitch -= my * 0.06;
+      // real camera pitch. Full range: straight up to straight down. It stops
+      // a hair short of the poles, where the camera basis would degenerate.
+      const LIM = Math.PI / 2 - 0.001;
+      this.pitch = clamp(this.pitch - my * 0.0022, -LIM, LIM);
     });
   },
 
@@ -433,444 +399,6 @@ const Player = {
 };
 </script>
 <script>
-// ---- js/renderer.js ----
-// ASCII raycast renderer.
-// Every visible sample reduces to (glyph, colorId, depth) in a character-cell
-// framebuffer; one batched fillText pass per color-run draws the frame.
-//
-// Brightness pipeline (PRD 10b): shade() is the single composable stage —
-// base * distanceFade today; sunlight and AO multiply in here later.
-const Renderer = {
-  ctx: null, cw: 0, chh: 0,
-  chars: null, color: null, depth: null,
-  palette: [], // colorId -> css string
-  PAL_LEVELS: 8,
-
-  // hue families: [r,g,b] at full brightness
-  HUES: [
-    [120, 235, 255],  // 0 neon cyan
-    [255, 120, 235],  // 1 neon magenta
-    [140, 150, 255],  // 2 blue
-    [200, 130, 255],  // 3 purple
-    [255, 190, 110],  // 4 amber
-    [110, 230, 140],  // 5 green (trees)
-    [190, 195, 205],  // 6 gray (streets, peds)
-    [255, 225, 120],  // 7 yellow (lane marks)
-    [255, 255, 255],  // 8 white
-    [255, 110, 110],  // 9 red
-    [150, 195, 255],  // 10 sky blue
-  ],
-
-  init() {
-    const canvas = document.getElementById('screen');
-    this.ctx = canvas.getContext('2d');
-    this.resize();
-    addEventListener('resize', () => this.resize());
-
-    // palette: hue x brightness level
-    this.palette = [];
-    for (let h = 0; h < this.HUES.length; h++) {
-      const [r, g, b] = this.HUES[h];
-      for (let l = 0; l < this.PAL_LEVELS; l++) {
-        const f = (l + 1) / this.PAL_LEVELS;
-        this.palette.push(`rgb(${(r * f) | 0},${(g * f) | 0},${(b * f) | 0})`);
-      }
-    }
-    // dedicated sky gradient row: white at horizon -> blue at zenith.
-    // written directly (not via colId) so it stays colored in mono mode.
-    this.skyBase = this.palette.length;
-    for (let l = 0; l < this.PAL_LEVELS; l++) {
-      const f = l / (this.PAL_LEVELS - 1);
-      const r = (245 + (80 - 245) * f) | 0;
-      const g = (248 + (140 - 248) * f) | 0;
-      const b = (255 + (235 - 255) * f) | 0;
-      this.palette.push(`rgb(${r},${g},${b})`);
-    }
-  },
-
-  // sky color by elevation 0 (horizon, white) .. 1 (zenith, blue)
-  skyId(t) {
-    return this.skyBase + clamp((t * this.PAL_LEVELS) | 0, 0, this.PAL_LEVELS - 1);
-  },
-
-  // fullscreen: derive the character grid from the window size
-  resize() {
-    const canvas = this.ctx.canvas;
-    const font = `bold ${CFG.FONT_SIZE}px "Consolas", "Courier New", monospace`;
-    this.ctx.font = font;
-    this.cw = this.ctx.measureText('M').width;
-    this.chh = CFG.FONT_SIZE + 1;
-    CFG.COLS = Math.max(40, Math.floor(innerWidth / this.cw));
-    CFG.ROWS = Math.max(24, Math.floor(innerHeight / this.chh));
-    canvas.width = Math.ceil(CFG.COLS * this.cw);
-    canvas.height = CFG.ROWS * this.chh;
-    this.ctx.font = font; // size reset clears state
-    this.ctx.textBaseline = 'top';
-    const N = CFG.COLS * CFG.ROWS;
-    this.chars = new Uint16Array(N);
-    this.color = new Uint8Array(N);
-    this.depth = new Float32Array(N);
-  },
-
-  colId(hue, brightness) {
-    if (CFG.MONO) hue = 6; // uniform grayscale: brightness is the only signal
-    const l = clamp((brightness * this.PAL_LEVELS) | 0, 0, this.PAL_LEVELS - 1);
-    return hue * this.PAL_LEVELS + l;
-  },
-
-  // The composable brightness stage: base * lighting * distance fade.
-  // Day fades toward haze (floor 0.22) instead of black.
-  shade(base, dist) {
-    const t = clamp(1 - dist / CFG.MAX_DIST, 0, 1);
-    if (CFG.DAY) {
-      // aerial perspective: blend toward bright haze with distance
-      const hz = Math.pow(1 - t, 1.4);
-      return base * (1 - hz) + 0.58 * hz;
-    }
-    return base * Math.pow(t, 1.5);
-  },
-
-  put(col, row, ch, colorId, d) {
-    if (col < 0 || row < 0 || col >= CFG.COLS || row >= CFG.ROWS) return;
-    const i = row * CFG.COLS + col;
-    // write if empty, or strictly closer than what's there (lets content
-    // show through the dither holes of transparent trees)
-    if (this.depth[i] === Infinity || d < this.depth[i]) {
-      this.chars[i] = ch.charCodeAt(0);
-      this.color[i] = colorId;
-      this.depth[i] = d;
-    }
-  },
-
-  render(time) {
-    const COLS = CFG.COLS, ROWS = CFG.ROWS;
-    this.time = time;
-    this.chars.fill(32);
-    this.color.fill(0);
-    this.depth.fill(Infinity);
-
-    const horizon = (ROWS * 0.5 + Player.pitch) | 0; // may leave the screen: full freelook
-    const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
-    const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
-    const px = Player.x, py = Player.y;
-
-    const WALL_LIT = '@#8&0%';           // lit window glyphs
-    const WALL_DIM = ':;.|';             // unlit structure glyphs
-    const TREE_CH = '%&#*oe';
-    const GROUND_RAMP = ' ..,:;';
-
-    for (let c = 0; c < COLS; c++) {
-      const camX = 2 * c / COLS - 1;
-      const rdx = dirX + planeX * camX;
-      const rdy = dirY + planeY * camX;
-
-      let mapX = Math.floor(px), mapY = Math.floor(py);
-      const dDx = Math.abs(1 / (rdx || 1e-9)), dDy = Math.abs(1 / (rdy || 1e-9));
-      let stepX, stepY, sideX, sideY;
-      if (rdx < 0) { stepX = -1; sideX = (px - mapX) * dDx; }
-      else { stepX = 1; sideX = (mapX + 1 - px) * dDx; }
-      if (rdy < 0) { stepY = -1; sideY = (py - mapY) * dDy; }
-      else { stepY = 1; sideY = (mapY + 1 - py) * dDy; }
-
-      let clipTop = ROWS;       // rows >= this are already covered by nearer walls
-      let firstSolid = Infinity;
-      let side = 0;
-
-      while (true) {
-        if (sideX < sideY) { sideX += dDx; mapX += stepX; side = 0; }
-        else { sideY += dDy; mapY += stepY; side = 1; }
-
-        const dist = side === 0
-          ? sideX - dDx
-          : sideY - dDy;
-        if (dist > CFG.MAX_DIST) break;
-        if (!World.inBounds(mapX, mapY)) break;
-
-        const i = World.idx(mapX, mapY);
-        const t = World.type[i];
-        if (t !== T_BLDG && t !== T_TREE) continue;
-
-        const d = Math.max(dist, 0.05);
-        const h = World.height[i];
-        const yBot = horizon + CFG.Y_SCALE * CFG.EYE / d;
-        const yTop = horizon - CFG.Y_SCALE * (h - CFG.EYE) / d;
-
-        // fractional hit position along the wall face (window u-coordinate)
-        let wallU = side === 0 ? py + d * rdy : px + d * rdx;
-        wallU -= Math.floor(wallU);
-
-        if (t === T_TREE) {
-          // transparent foliage: dithered, does not advance the clip
-          const r0 = Math.max(Math.ceil(yTop), 0);
-          const r1 = Math.min(Math.floor(yBot), clipTop - 1, ROWS - 1);
-          for (let r = r0; r <= r1; r++) {
-            const wz = (yBot - r) / (yBot - yTop) * h; // world height at this row
-            const isTrunk = wz < 0.7;
-            const cover = isTrunk ? (wallU > 0.35 && wallU < 0.65 ? 1 : 0)
-              : hash3(mapX * 7 + c, r, 991) < 0.52 ? 1 : 0;
-            if (!cover) continue;
-            let base = isTrunk ? 0.35 : 0.5 + hash3(c, r, 5) * 0.4;
-            if (CFG.DAY) base = (isTrunk ? 0.45 : 0.75 + hash3(c, r, 5) * 0.25)
-              * Light.traceSun(px + d * rdx, py + d * rdy, wz);
-            const b = this.shade(base, d);
-            const ch = isTrunk ? '|' : TREE_CH[(hash3(mapX, r, mapY) * TREE_CH.length) | 0];
-            this.put(c, r, ch, this.colId(isTrunk ? 4 : 5, b), d);
-          }
-          continue;
-        }
-
-        // building wall
-        if (firstSolid === Infinity) firstSolid = d;
-        const r0 = Math.max(Math.ceil(yTop), 0);
-        const r1 = Math.min(Math.floor(yBot), clipTop - 1, ROWS - 1);
-        const hue = World.bcol[i] % 5;
-        const bs = World.bseed[i];
-        const sideDim = side === 1 ? 0.75 : 1.0;
-        // face normal + the air cell in front of the face (sun/AO sample point)
-        const nX = side === 0 ? -stepX : 0, nY = side === 1 ? -stepY : 0;
-        const airX = side === 0 ? mapX - stepX : mapX;
-        const airY = side === 1 ? mapY - stepY : mapY;
-        // exact wall hit point, nudged into the air cell so the shadow ray
-        // doesn't immediately hit the wall's own building
-        const hitX = px + d * rdx + nX * 0.02, hitY = py + d * rdy + nY * 0.02;
-        const faceLight = CFG.DAY
-          ? 0.7 + 0.3 * Math.max(0, nX * Light.sunX + nY * Light.sunY) : 1;
-        const litP = CFG.DAY ? 0.05 : 0.30; // few lit windows in daylight
-
-        for (let r = r0; r <= r1; r++) {
-          const wz = (yBot - r) / (yBot - yTop) * h;
-          const winX = (wallU * 2) | 0;               // 2 window columns per face
-          const winY = wz | 0;                        // 1 window row per world unit
-          const edge = wallU < 0.06 || wallU > 0.94;
-          const topEdge = r === r0 && yTop >= 0;
-          const lit = hash3(mapX * 2 + winX, winY, bs) < litP;
-
-          let ch, base;
-          if (topEdge) { ch = '='; base = CFG.DAY ? 0.85 : 0.55; }
-          else if (edge) { ch = '|'; base = CFG.DAY ? 0.50 : 0.30; }
-          else if (CFG.FLAT) { ch = '#'; base = CFG.DAY ? 0.75 : 0.30; }
-          else if (lit) {
-            ch = WALL_LIT[(hash3(mapX + winX, winY, bs ^ 3) * WALL_LIT.length) | 0];
-            // subtle per-window flicker, stepped at ~3Hz so it reads as data noise
-            const flick = 0.8 + 0.25 * hash3(mapX + winX, winY, ((this.time * 3) | 0) ^ bs);
-            base = 0.85 * flick;
-          } else {
-            ch = WALL_DIM[(hash3(mapX + winX, winY + 7, bs) * WALL_DIM.length) | 0];
-            base = CFG.DAY ? 0.80 : 0.22;
-          }
-          let b;
-          if (CFG.DAY && !lit) {
-            const sunV = Light.traceSun(hitX, hitY, wz);
-            b = this.shade(base * faceLight * sunV
-              * Light.aoLerp(airX, airY, wz), d) * sideDim;
-            if (sunV === 1) {
-              // specular: reflect sun about the wall normal, dot with view dir
-              const ndl = nX * Light.lx + nY * Light.ly;
-              const rx = 2 * ndl * nX - Light.lx, ry = 2 * ndl * nY - Light.ly, rz = -Light.lz;
-              let vx = -rdx * d, vy = -rdy * d, vz = CFG.EYE - wz;
-              const iv = 1 / Math.hypot(vx, vy, vz);
-              const spec = Math.max(0, (rx * vx + ry * vy + rz * vz) * iv);
-              b += Math.pow(spec, 12) * 0.55;
-            }
-          } else {
-            b = this.shade(base, d) * sideDim;
-          }
-          // daylight desaturates buildings to concrete gray; neon is for night.
-          // far surfaces tint toward the sky for aerial perspective.
-          const hz = CFG.DAY && d / CFG.MAX_DIST > 0.62;
-          this.put(c, r, ch, this.colId(hz ? 10 : CFG.DAY ? 6 : hue, b), d);
-        }
-
-        clipTop = Math.min(clipTop, Math.max(r0, 0));
-        if (clipTop <= 0) break;
-      }
-
-      // floor: from screen bottom up until the first solid wall starts
-      for (let r = ROWS - 1; r > horizon; r--) {
-        const rowDist = CFG.Y_SCALE * CFG.EYE / (r - horizon);
-        if (rowDist >= firstSolid || rowDist > CFG.MAX_DIST) break;
-        const i = r * COLS + c;
-        if (this.depth[i] !== Infinity && this.depth[i] < rowDist) continue;
-        const fx = px + rdx * rowDist, fy = py + rdy * rowDist;
-        const cxi = Math.floor(fx), cyi = Math.floor(fy);
-        if (!World.inBounds(cxi, cyi)) continue;
-        const wi = World.idx(cxi, cyi);
-        const t = World.type[wi], f = World.flags[wi];
-
-        let ch, hue, base;
-        if (t === T_ROAD) {
-          if (f & F_LANE) {
-            ch = (f & F_ROAD_H) && !(f & F_ROAD_V) ? '-' : '|';
-            hue = 7; base = CFG.DAY ? 0.75 : 0.6;
-          } else {
-            ch = GROUND_RAMP[(hash3(cxi * 3, cyi * 3, 17) * GROUND_RAMP.length) | 0];
-            hue = 6; base = CFG.DAY ? 0.55 : 0.20;
-          }
-        } else if (t === T_WALK) {
-          ch = hash3(cxi, cyi, 31) < 0.5 ? '.' : ',';
-          hue = 6; base = CFG.DAY ? 0.72 : 0.34;
-        } else { // grass / plaza
-          ch = hash3(cxi, cyi, 41) < 0.5 ? '"' : ',';
-          hue = 5; base = CFG.DAY ? 0.68 : 0.25;
-        }
-        let b;
-        if (CFG.DAY) {
-          const sunV = Light.traceSun(fx, fy, 0.05);
-          b = this.shade(base * sunV * Light.ao[wi], rowDist);
-          if (sunV === 1) {
-            // ground specular: sun mirrored about the up normal
-            let vx = -rdx * rowDist, vy = -rdy * rowDist, vz = CFG.EYE;
-            const iv = 1 / Math.hypot(vx, vy, vz);
-            const spec = Math.max(0,
-              (-Light.lx * vx - Light.ly * vy + Light.lz * vz) * iv);
-            b += Math.pow(spec, 24) * 0.5;
-          }
-        } else {
-          b = this.shade(base, rowDist);
-        }
-        this.put(c, r, ch, this.colId(hue, b), rowDist);
-      }
-    }
-
-    this.renderSprites(dirX, dirY, planeX, planeY, horizon);
-    this.renderSky(horizon);
-    this.blit();
-  },
-
-  renderSprites(dirX, dirY, planeX, planeY, horizon) {
-    const invDet = 1 / (planeX * dirY - dirX * planeY);
-    const all = [];
-    for (const c of Entities.cars) all.push({ e: c, kind: 0 });
-    for (const p of Entities.peds) all.push({ e: p, kind: 1 });
-
-    // camera-space transform + far-to-near sort
-    for (const s of all) {
-      const relX = s.e.x - Player.x, relY = s.e.y - Player.y;
-      s.tx = invDet * (dirY * relX - dirX * relY);
-      s.tz = invDet * (-planeY * relX + planeX * relY);
-    }
-    all.sort((a, b) => b.tz - a.tz);
-
-    for (const s of all) {
-      if (s.tz < 0.3 || s.tz > CFG.MAX_DIST) continue;
-      const screenC = (CFG.COLS / 2) * (1 + s.tx / s.tz);
-      const colsPerUnit = (CFG.COLS / 2) / (s.tz * CFG.PLANE_LEN);
-      const rowsPerUnit = CFG.Y_SCALE / s.tz;
-      const yBot = horizon + rowsPerUnit * CFG.EYE;
-      const gl = CFG.DAY ? Light.groundLight(s.e.x, s.e.y) : 1;
-
-      if (s.kind === 0) { // car
-        const wC = Math.max(1, (1.5 * colsPerUnit) | 0);
-        const hR = Math.max(1, (0.9 * rowsPerUnit) | 0);
-        const hue = s.e.col % 5;
-        for (let rr = 0; rr < hR; rr++) for (let cc = 0; cc < wC; cc++) {
-          const col = (screenC - wC / 2 + cc) | 0;
-          const row = (yBot - rr) | 0;
-          const topRow = rr === hR - 1 && hR > 1;
-          const b = this.shade((topRow ? 0.5 : 0.8) * gl, s.tz);
-          this.put(col, row, topRow ? 'o' : '#', this.colId(hue, b), s.tz);
-        }
-      } else { // pedestrian
-        const hR = Math.max(1, (1.7 * rowsPerUnit) | 0);
-        const col = screenC | 0;
-        for (let rr = 0; rr < hR; rr++) {
-          const row = (yBot - rr) | 0;
-          const head = rr === hR - 1 && hR > 1;
-          const b = this.shade((CFG.DAY ? 0.85 : 0.6) * s.e.shade * gl, s.tz);
-          this.put(col, row, head ? 'o' : 'i', this.colId(6, b), s.tz);
-        }
-      }
-    }
-  },
-
-  renderSky(horizon) {
-    if (CFG.DAY) {
-      // dithered blue gradient, sun disc at the sun azimuth, haze below horizon
-      let aDiff = CFG.SUN_AZ - Player.angle;
-      aDiff = ((aDiff + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
-      const sunCol = Math.abs(aDiff) < 1.1
-        ? ((CFG.COLS / 2) * (1 + Math.tan(aDiff) / CFG.PLANE_LEN)) | 0 : -9999;
-      // sun sits above the neutral horizon by ~half a screen: hidden at level
-      // view, revealed by a modest look-up regardless of window size
-      const sunRow = (horizon - CFG.ROWS * 0.55) | 0;
-      const SKY_RAMP = '=::;;';
-      for (let r = 0; r < CFG.ROWS; r++) {
-        for (let c = 0; c < CFG.COLS; c++) {
-          const i = r * CFG.COLS + c;
-          if (this.depth[i] !== Infinity) continue;
-          if (r < horizon) {
-            // spherical gradient: elevation angle above the horizon drives
-            // the white->blue blend (atan compresses a white band at horizon)
-            const elev = Math.atan2(horizon - r, CFG.Y_SCALE) / (Math.PI / 2);
-            const dSun = Math.hypot(c - sunCol, (r - sunRow) * 1.9);
-            if (dSun < 3.2) { this.chars[i] = 64; this.color[i] = this.skyId(0); }   // '@' sun disc
-            else if (dSun < 6.0) { this.chars[i] = 111; this.color[i] = this.skyId(0.1); } // 'o' halo
-            else {
-              const ch = SKY_RAMP[clamp((elev * 1.6 * SKY_RAMP.length) | 0, 0, SKY_RAMP.length - 1)];
-              const dither = hash3(c, r, 555) * 0.08;
-              // sun glare whitens the gradient locally
-              const glow = clamp(1 - dSun / 18, 0, 1) * 0.6;
-              this.chars[i] = ch.charCodeAt(0);
-              this.color[i] = this.skyId(clamp(elev * 1.35 + dither - glow, 0, 1));
-            }
-          } else { // below horizon, beyond MAX_DIST: haze matches the horizon white
-            this.chars[i] = 44; this.color[i] = this.skyId(0.05);                     // ','
-          }
-        }
-      }
-      return;
-    }
-    // night: sparse starfield with parallax on camera angle
-    const angOff = (Player.angle * CFG.COLS / (2 * Math.PI) * 3) | 0;
-    const skyEnd = Math.min(horizon + 2, CFG.ROWS);
-    for (let r = 0; r < skyEnd; r++) {
-      for (let c = 0; c < CFG.COLS; c++) {
-        const i = r * CFG.COLS + c;
-        if (this.depth[i] !== Infinity) continue;
-        const h = hash3(((c + angOff) % 1024 + 1024) % 1024, r, 777);
-        if (h < 0.012) { this.chars[i] = 46; this.color[i] = this.colId(2, 0.3); }       // '.'
-        else if (h < 0.016) { this.chars[i] = 42; this.color[i] = this.colId(8, 0.25); } // '*'
-      }
-    }
-  },
-
-  blit() {
-    const ctx = this.ctx, COLS = CFG.COLS, ROWS = CFG.ROWS;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    // draw runs of same color per row as single strings (monospace advance)
-    for (let r = 0; r < ROWS; r++) {
-      let runStart = 0, runColor = -1, runStr = '';
-      const base = r * COLS;
-      for (let c = 0; c <= COLS; c++) {
-        const ch = c < COLS ? this.chars[base + c] : 32;
-        const col = c < COLS ? this.color[base + c] : -1;
-        const isSpace = ch === 32;
-        const cur = isSpace ? -2 : col;
-        if (cur !== runColor) {
-          if (runColor >= 0 && runStr.length) {
-            const color = this.palette[runColor];
-            ctx.fillStyle = color;
-            // bloom: bright palette levels glow
-            if (runColor < this.skyBase && (runColor % this.PAL_LEVELS) >= 6) {
-              ctx.shadowColor = color;
-              ctx.shadowBlur = 7;
-            } else {
-              ctx.shadowBlur = 0;
-            }
-            ctx.fillText(runStr, runStart * this.cw, r * this.chh);
-          }
-          runColor = cur; runStart = c; runStr = '';
-        }
-        if (!isSpace && c < COLS) runStr += String.fromCharCode(ch);
-        else if (runColor >= 0) runStr += ' ';
-      }
-    }
-    ctx.shadowBlur = 0;
-  },
-};
-</script>
-<script>
 // ---- js/webgpu/atlas.js ----
 // Procedural glyph atlas: a brightness ramp of ASCII glyphs rendered to an
 // offscreen canvas, white-on-black so the GPU can use the red channel as a
@@ -900,63 +428,222 @@ const GlyphAtlas = {
 </script>
 <script>
 // ---- js/webgpu/shaders.js ----
-// WGSL sources for the GPU pipeline.
+// WGSL sources.
 //
-// Pass 1 (compute): one invocation per low-res cell. Each thread raymarches
-// the world grid (DDA), finds the surface, then traces a real shadow ray
-// toward the sun and shades it. Writes luminance + color into a storage
-// texture — the "very low res image" of the requested technique.
+// Pass 1 (compute): one invocation per low-res cell, each casting a TRUE 3D
+// ray — the camera basis is genuinely rotated by pitch, so vertical world
+// edges converge to a third vanishing point instead of staying parallel as
+// they do in a column-raycaster with a sheared horizon. Rays march the height
+// field (DDA in xy, linear in z), hit building sides, roofs, the ground, or
+// entity boxes, then trace a real shadow ray toward the sun and shade.
 //
-// Pass 2 (render): a fullscreen triangle samples that low-res image, picks a
-// glyph from the atlas by luminance, and upscales — one glyph per low-res
-// pixel — producing the ASCII image at display resolution.
+// Pass 2 (render): a fullscreen triangle maps each low-res cell to a glyph
+// chosen by luminance and upscales it.
 
 const WGSL_COMPUTE = /* wgsl */`
 struct Uniforms {
   camPos    : vec2f,
-  camDir    : vec2f,
-  camPlane  : vec2f,
-  gridSize  : f32,
+  res       : vec2f,
+  fwd       : vec3f,
+  eye       : f32,
+  right     : vec3f,
   maxDist   : f32,
+  up        : vec3f,
+  gridSize  : f32,
   sunDir    : vec3f,
   shadowK   : f32,
-  eye       : f32,
-  yScale    : f32,
-  pitch     : f32,
+  tanX      : f32,
+  tanY      : f32,
   maxHeight : f32,
-  res       : vec2f,
-  _pad      : vec2f,
+  entCount  : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
-// cell type packed per world cell: x = type, y = height
 @group(0) @binding(1) var<storage, read> cells : array<u32>;
 @group(0) @binding(2) var outTex : texture_storage_2d<rgba8unorm, write>;
+// each entity: xy = position, z = half width, w = height
+@group(0) @binding(3) var<storage, read> ents : array<vec4f>;
 
 const T_ROAD : u32 = 1u;
 const T_WALK : u32 = 2u;
 const T_BLDG : u32 = 3u;
 const T_TREE : u32 = 4u;
 
-fn cellAt(x : i32, y : i32) -> vec2u {
+struct Cell { kind : u32, h : f32, ao : f32 };
+
+fn cellAt(x : i32, y : i32) -> Cell {
   let g = i32(U.gridSize);
-  if (x < 0 || y < 0 || x >= g || y >= g) { return vec2u(T_BLDG, 8u); }
-  let packed = cells[u32(y * g + x)];
-  return vec2u(packed & 0xffu, (packed >> 8u) & 0xffu);
+  var c : Cell;
+  if (x < 0 || y < 0 || x >= g || y >= g) {
+    c.kind = 0u; c.h = 0.0; c.ao = 1.0;
+    return c;
+  }
+  let p = cells[u32(y * g + x)];
+  c.kind = p & 0xffu;
+  c.h = f32((p >> 8u) & 0xffu);
+  c.ao = f32((p >> 16u) & 0xffu) / 255.0;
+  return c;
 }
 
-fn isSolid(c : vec2u) -> bool { return c.x == T_BLDG || c.x == T_TREE; }
+fn isSolid(k : u32) -> bool { return k == T_BLDG || k == T_TREE; }
 
-// Real shadow ray: march toward the sun until blocked or above all geometry.
+// Real shadow ray: march toward the sun until blocked or clear of all geometry.
 fn traceShadow(p : vec3f) -> f32 {
-  var q = p;
-  for (var i = 0; i < 64; i = i + 1) {
-    q = q + U.sunDir;
+  var q = p + U.sunDir * 0.06;
+  for (var i = 0; i < 96; i = i + 1) {
+    q = q + U.sunDir * 0.7;
     if (q.z >= U.maxHeight) { return 1.0; }
     let c = cellAt(i32(floor(q.x)), i32(floor(q.y)));
-    if (isSolid(c) && f32(c.y) > q.z) { return U.shadowK; }
+    if (isSolid(c.kind) && c.h > q.z) { return U.shadowK; }
   }
   return 1.0;
+}
+
+struct Hit {
+  t     : f32,      // distance along the ray
+  n     : vec3f,    // surface normal
+  albedo: vec3f,
+  ao    : f32,
+  ok    : bool,
+};
+
+fn shadeSky(rd : vec3f) -> vec3f {
+  // spherical gradient: white at the horizon, blue at the zenith
+  let t = clamp(rd.z, 0.0, 1.0);
+  var col = mix(vec3f(0.95, 0.96, 1.0), vec3f(0.30, 0.50, 0.92), pow(t, 0.65));
+  // sun disc and glare, at its true direction
+  let d = dot(normalize(rd), U.sunDir);
+  if (d > 0.9995) { return vec3f(1.0, 1.0, 0.96); }
+  col = col + vec3f(1.0, 0.92, 0.72) * pow(max(d, 0.0), 220.0) * 0.9;
+  col = col + vec3f(1.0, 0.95, 0.85) * pow(max(d, 0.0), 18.0) * 0.18;
+  if (rd.z < 0.0) {
+    // below the horizon and beyond everything: ground haze
+    col = mix(vec3f(0.82, 0.84, 0.88), col, exp(rd.z * 6.0));
+  }
+  return col;
+}
+
+// ray vs axis-aligned entity box; returns distance or -1
+fn hitBox(ro : vec3f, rd : vec3f, lo : vec3f, hi : vec3f) -> f32 {
+  let inv = 1.0 / rd;
+  let t0 = (lo - ro) * inv;
+  let t1 = (hi - ro) * inv;
+  let tmin = min(t0, t1);
+  let tmax = max(t0, t1);
+  let a = max(max(tmin.x, tmin.y), tmin.z);
+  let b = min(min(tmax.x, tmax.y), tmax.z);
+  if (b < max(a, 0.0)) { return -1.0; }
+  return select(a, 0.0, a < 0.0);
+}
+
+fn trace(ro : vec3f, rd : vec3f) -> Hit {
+  var hit : Hit;
+  hit.ok = false;
+  hit.t = U.maxDist;
+
+  // --- height field: DDA in xy, z is linear in horizontal distance ---
+  let hlen = length(rd.xy);
+  if (hlen > 1e-5) {
+    let rd2 = rd.xy / hlen;
+    let zs = rd.z / hlen;            // dz per unit horizontal distance
+    var mapX = i32(floor(ro.x));
+    var mapY = i32(floor(ro.y));
+    let dD = abs(1.0 / max(abs(rd2), vec2f(1e-9)));
+    var sgn = vec2i(1, 1);
+    var side = vec2f(0.0);
+    if (rd2.x < 0.0) { sgn.x = -1; side.x = (ro.x - f32(mapX)) * dD.x; }
+    else { side.x = (f32(mapX) + 1.0 - ro.x) * dD.x; }
+    if (rd2.y < 0.0) { sgn.y = -1; side.y = (ro.y - f32(mapY)) * dD.y; }
+    else { side.y = (f32(mapY) + 1.0 - ro.y) * dD.y; }
+
+    var dEnter = 0.0;
+    var axis = 0;
+    let dGround = select(-1.0, -ro.z / zs, zs < -1e-6);  // horiz dist to z=0
+
+    for (var i = 0; i < 768; i = i + 1) {
+      let dExit = min(side.x, side.y);
+      let c = cellAt(mapX, mapY);
+      let zEnter = ro.z + zs * dEnter;
+
+      if (isSolid(c.kind)) {
+        if (zEnter < c.h && zEnter >= 0.0 && dEnter > 0.0) {
+          // side face. DDA distances are horizontal; the ray parameter needs
+          // them divided by the ray's horizontal length.
+          hit.t = dEnter / hlen;
+          var n = vec3f(0.0);
+          if (axis == 0) { n.x = -f32(sgn.x); } else { n.y = -f32(sgn.y); }
+          hit.n = n;
+          hit.albedo = select(vec3f(0.80, 0.81, 0.83), vec3f(0.45, 0.75, 0.5),
+                              c.kind == T_TREE);
+          hit.ao = c.ao;
+          hit.ok = true;
+          break;
+        }
+        if (zs < -1e-6) {
+          // descending: may land on the roof inside this cell
+          let dRoof = (c.h - ro.z) / zs;
+          if (dRoof >= dEnter && dRoof <= dExit) {
+            hit.t = dRoof / hlen;
+            hit.n = vec3f(0.0, 0.0, 1.0);
+            hit.albedo = select(vec3f(0.86, 0.87, 0.89), vec3f(0.5, 0.8, 0.55),
+                                c.kind == T_TREE);
+            hit.ao = c.ao;
+            hit.ok = true;
+            break;
+          }
+        }
+      } else if (dGround > 0.0 && dGround >= dEnter && dGround <= dExit) {
+        hit.t = dGround / hlen;
+        hit.n = vec3f(0.0, 0.0, 1.0);
+        var a = vec3f(0.55, 0.72, 0.45);            // grass
+        if (c.kind == T_ROAD) { a = vec3f(0.42, 0.43, 0.46); }
+        if (c.kind == T_WALK) { a = vec3f(0.68, 0.68, 0.70); }
+        hit.albedo = a;
+        hit.ao = c.ao;
+        hit.ok = true;
+        break;
+      }
+
+      if (dEnter > U.maxDist) { break; }
+      if (zs > 0.0 && ro.z + zs * dEnter > U.maxHeight) { break; }
+
+      dEnter = dExit;
+      if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + sgn.x; axis = 0; }
+      else { side.y = side.y + dD.y; mapY = mapY + sgn.y; axis = 1; }
+    }
+  } else if (rd.z < 0.0) {
+    // straight down
+    hit.t = -ro.z / rd.z;
+    hit.n = vec3f(0.0, 0.0, 1.0);
+    let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
+    hit.albedo = vec3f(0.5, 0.5, 0.52);
+    hit.ao = c.ao;
+    hit.ok = true;
+  }
+
+  // --- entities (cars, pedestrians) as small boxes ---
+  let n = i32(U.entCount);
+  for (var i = 0; i < n; i = i + 1) {
+    let e = ents[i];
+    let lo = vec3f(e.x - e.z, e.y - e.z, 0.0);
+    let hi = vec3f(e.x + e.z, e.y + e.z, e.w);
+    let t = hitBox(ro, rd, lo, hi);
+    if (t >= 0.0 && t < hit.t) {
+      let p = ro + rd * t;
+      // normal from whichever face the point sits on
+      let c = (lo + hi) * 0.5;
+      let d = (p - c) / max((hi - lo) * 0.5, vec3f(1e-4));
+      var nn = vec3f(0.0, 0.0, 1.0);
+      if (abs(d.x) > abs(d.y) && abs(d.x) > abs(d.z)) { nn = vec3f(sign(d.x), 0.0, 0.0); }
+      else if (abs(d.y) > abs(d.z)) { nn = vec3f(0.0, sign(d.y), 0.0); }
+      hit.t = t;
+      hit.n = nn;
+      hit.albedo = select(vec3f(0.75, 0.76, 0.8), vec3f(0.6, 0.62, 0.68), e.w < 1.2);
+      hit.ao = 0.9;
+      hit.ok = true;
+    }
+  }
+  return hit;
 }
 
 @compute @workgroup_size(8, 8)
@@ -964,92 +651,41 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   let px = vec2i(gid.xy);
   if (px.x >= i32(U.res.x) || px.y >= i32(U.res.y)) { return; }
 
-  let horizon = U.res.y * 0.5 + U.pitch;
-  let camX = 2.0 * (f32(px.x) + 0.5) / U.res.x - 1.0;
-  let rd = U.camDir + U.camPlane * camX;
+  // true 3D ray: camera basis is genuinely rotated, giving vertical convergence
+  let ndc = vec2f(
+    (f32(px.x) + 0.5) / U.res.x * 2.0 - 1.0,
+    1.0 - (f32(px.y) + 0.5) / U.res.y * 2.0);
+  let rd = normalize(U.fwd + U.right * (ndc.x * U.tanX) + U.up * (ndc.y * U.tanY));
+  let ro = vec3f(U.camPos, U.eye);
 
-  var mapX = i32(floor(U.camPos.x));
-  var mapY = i32(floor(U.camPos.y));
-  let dD = abs(1.0 / max(abs(rd), vec2f(1e-9)));
-  var stepDir = vec2i(1, 1);
-  var side = vec2f(0.0);
-  if (rd.x < 0.0) { stepDir.x = -1; side.x = (U.camPos.x - f32(mapX)) * dD.x; }
-  else { side.x = (f32(mapX) + 1.0 - U.camPos.x) * dD.x; }
-  if (rd.y < 0.0) { stepDir.y = -1; side.y = (U.camPos.y - f32(mapY)) * dD.y; }
-  else { side.y = (f32(mapY) + 1.0 - U.camPos.y) * dD.y; }
+  var col : vec3f;
+  let h = trace(ro, rd);
 
-  var lum = 0.0;
-  var tint = vec3f(0.55, 0.70, 0.95); // sky default
-  var hit = false;
-  var whichSide = 0;
+  if (!h.ok) {
+    col = shadeSky(rd);
+  } else {
+    let p = ro + rd * h.t + h.n * 0.02;
+    let sun = traceShadow(p);
+    let ndl = max(dot(h.n, U.sunDir), 0.0);
 
-  for (var iter = 0; iter < 512; iter = iter + 1) {
-    var dist : f32;
-    if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + stepDir.x; whichSide = 0; dist = side.x - dD.x; }
-    else { side.y = side.y + dD.y; mapY = mapY + stepDir.y; whichSide = 1; dist = side.y - dD.y; }
-    if (dist > U.maxDist) { break; }
+    // ambient: sky above, bounce below, scaled by baked occlusion
+    let amb = mix(0.28, 0.5, h.n.z * 0.5 + 0.5) * h.ao;
+    var lit = h.albedo * (amb + ndl * sun * 0.85);
 
-    let c = cellAt(mapX, mapY);
-    if (!isSolid(c)) { continue; }
-
-    let d = max(dist, 0.05);
-    let h = f32(c.y);
-    let yBot = horizon + U.yScale * U.eye / d;
-    let yTop = horizon - U.yScale * (h - U.eye) / d;
-    let fy = f32(px.y);
-    if (fy < yTop || fy > yBot) { continue; }
-
-    // world height of this screen row on the wall face
-    let wz = (yBot - fy) / max(yBot - yTop, 1e-4) * h;
-    var n = vec3f(0.0, 0.0, 0.0);
-    if (whichSide == 0) { n.x = -f32(stepDir.x); } else { n.y = -f32(stepDir.y); }
-    let hitP = vec3f(U.camPos + rd * d, wz) + n * 0.02;
-
-    let ndl = max(dot(n, U.sunDir), 0.0);
-    let sun = traceShadow(hitP);
-    var base = 0.35 + 0.65 * ndl;
-    base = base * sun;
-
-    // specular: reflect sun about the face normal
+    // specular, only where the sun actually reaches
     if (sun > 0.9) {
-      let r = reflect(-U.sunDir, n);
-      let v = normalize(vec3f(-rd * d, U.eye - wz));
-      base = base + pow(max(dot(r, v), 0.0), 12.0) * 0.5;
+      let r = reflect(-U.sunDir, h.n);
+      let spec = pow(max(dot(r, -rd), 0.0), 24.0);
+      lit = lit + vec3f(1.0, 0.98, 0.92) * spec * 0.45;
     }
 
-    let fade = clamp(1.0 - d / U.maxDist, 0.0, 1.0);
-    lum = clamp(base * (0.35 + 0.65 * fade) + (1.0 - fade) * 0.25, 0.0, 1.0);
-    if (c.x == T_TREE) { tint = vec3f(0.55, 0.85, 0.6); } else { tint = vec3f(0.85, 0.86, 0.88); }
-    hit = true;
-    break;
+    // aerial perspective toward the horizon sky colour
+    let fog = clamp(h.t / U.maxDist, 0.0, 1.0);
+    col = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
   }
 
-  if (!hit) {
-    let fy = f32(px.y);
-    if (fy < horizon) {
-      // sky: white at horizon -> blue at zenith
-      let t = clamp((horizon - fy) / max(horizon, 1.0), 0.0, 1.0);
-      lum = 0.85 - t * 0.25;
-      tint = mix(vec3f(0.96, 0.97, 1.0), vec3f(0.35, 0.55, 0.95), t);
-    } else {
-      // floor cast
-      let rowD = U.yScale * U.eye / max(fy - horizon, 0.001);
-      if (rowD < U.maxDist) {
-        let fp = U.camPos + rd * rowD;
-        let c = cellAt(i32(floor(fp.x)), i32(floor(fp.y)));
-        let sun = traceShadow(vec3f(fp, 0.05));
-        var base = select(0.45, 0.62, c.x == T_WALK);
-        if (c.x == T_ROAD) { base = 0.38; }
-        let fade = clamp(1.0 - rowD / U.maxDist, 0.0, 1.0);
-        lum = clamp(base * sun * (0.35 + 0.65 * fade) + (1.0 - fade) * 0.25, 0.0, 1.0);
-        tint = vec3f(0.8, 0.82, 0.85);
-      } else {
-        lum = 0.55; tint = vec3f(0.9, 0.93, 1.0);
-      }
-    }
-  }
-
-  textureStore(outTex, px, vec4f(tint * lum, lum));
+  let lum = clamp(dot(col, vec3f(0.30, 0.59, 0.11)), 0.0, 1.0);
+  textureStore(outTex, px, vec4f(col, lum));
 }
 `;
 
@@ -1061,7 +697,6 @@ struct VSOut {
 
 @vertex
 fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
-  // fullscreen triangle
   var p = array<vec2f, 3>(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
   var o : VSOut;
   o.pos = vec4f(p[vi], 0.0, 1.0);
@@ -1070,9 +705,9 @@ fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
 }
 
 struct RParams {
-  gridRes : vec2f,   // low-res cell count
-  levels  : f32,     // glyph count in the atlas
-  _pad    : f32,
+  gridRes : vec2f,
+  levels  : f32,
+  mono    : f32,
 };
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
@@ -1082,68 +717,66 @@ struct RParams {
 
 @fragment
 fn fs(in : VSOut) -> @location(0) vec4f {
-  // which low-res cell this pixel belongs to, and where inside the glyph
   let cellF = in.uv * R.gridRes;
-  let cell = floor(cellF);
+  let cell = clamp(floor(cellF), vec2f(0.0), R.gridRes - vec2f(1.0));
   let inCell = fract(cellF);
 
   let texel = textureLoad(lowTex, vec2i(cell), 0);
   let lum = texel.a;
 
-  // pick glyph by luminance, sample its coverage from the atlas strip
-  let gi = floor(clamp(lum, 0.0, 0.999) * R.levels);
+  // glyph chosen by luminance; atlas is a horizontal strip of glyphs
+  let gi = floor(clamp(lum, 0.0, 0.9999) * R.levels);
   let au = (gi + inCell.x) / R.levels;
   let cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
 
-  let color = select(texel.rgb / max(lum, 0.001), vec3f(1.0), lum <= 0.001);
-  return vec4f(color * lum * cov, 1.0);
+  var tint = texel.rgb;
+  if (R.mono > 0.5) { tint = vec3f(lum); }
+  return vec4f(tint * cov, 1.0);
 }
 `;
 </script>
 <script>
 // ---- js/webgpu/gpu-renderer.js ----
-// WebGPU backend: compute-shader raymarch into a low-res target, then a
-// glyph-mapping upscale pass. Falls back to the CPU renderer if unavailable.
+// WebGPU renderer: per-pixel 3D raymarch in a compute shader, then a
+// glyph-mapped upscale. This is the only renderer.
 const GPURenderer = {
   ok: false, device: null, ctx: null,
-  cols: 0, rows: 0, cellPx: 12,
+  cols: 0, rows: 0, cellPx: 10,
   reason: '',
 
   async init() {
-    const canvas = document.getElementById('gpuscreen');
-    if (!navigator.gpu) { this.reason = 'navigator.gpu missing'; return false; }
+    const canvas = document.getElementById('screen');
+    if (!navigator.gpu) { this.reason = 'this browser has no WebGPU support'; return false; }
     let adapter, device;
     try {
       adapter = await navigator.gpu.requestAdapter();
-      if (!adapter) { this.reason = 'no GPU adapter'; return false; }
+      if (!adapter) { this.reason = 'no GPU adapter available'; return false; }
       device = await adapter.requestDevice();
     } catch (e) { this.reason = 'device request failed: ' + e.message; return false; }
 
     this.device = device;
     this.ctx = canvas.getContext('webgpu');
-    if (!this.ctx) { this.reason = 'webgpu context unavailable'; return false; }
+    if (!this.ctx) { this.reason = 'could not get a webgpu canvas context'; return false; }
     this.format = navigator.gpu.getPreferredCanvasFormat();
     device.lost.then(info => {
       this.ok = false;
-      console.warn('WebGPU device lost:', info.message);
+      console.error('[WebGPU] device lost: ' + info.message);
     });
 
     this.resize();
     this.ctx.configure({ device, format: this.format, alphaMode: 'opaque' });
 
-    // ---- world data as a storage buffer: type | height<<8 ----
-    const N = CFG.WORLD * CFG.WORLD;
-    const packed = new Uint32Array(N);
-    for (let i = 0; i < N; i++) {
-      packed[i] = (World.type[i] & 0xff) | ((Math.min(World.height[i], 255) & 0xff) << 8);
-    }
-    this.cellBuf = device.createBuffer({
-      size: packed.byteLength,
+    // world cells: type | height<<8 | ao<<16
+    this.uploadWorld();
+
+    // entity buffer: vec4(x, y, halfWidth, height)
+    this.entCount = Entities.cars.length + Entities.peds.length;
+    this.entData = new Float32Array(Math.max(this.entCount, 1) * 4);
+    this.entBuf = device.createBuffer({
+      size: this.entData.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(this.cellBuf, 0, packed);
 
-    // ---- glyph atlas texture ----
     const atlas = GlyphAtlas.build();
     this.levels = atlas.levels;
     this.atlasTex = device.createTexture({
@@ -1157,27 +790,19 @@ const GPURenderer = {
       [atlas.canvas.width, atlas.canvas.height]);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-
-    // ---- uniforms ----
     this.uniBuf = device.createBuffer({
-      size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
-      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    // ---- pipelines (with compile diagnostics: a silent shader failure
-    // otherwise shows up as an unexplained black screen) ----
     device.pushErrorScope('validation');
-
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
     const rmod = device.createShaderModule({ code: WGSL_RENDER });
     if (!await this.checkShader(cmod, 'compute')) return false;
     if (!await this.checkShader(rmod, 'render')) return false;
 
     this.computePipe = device.createComputePipeline({
-      layout: 'auto', compute: { module: cmod, entryPoint: 'main' },
-    });
+      layout: 'auto', compute: { module: cmod, entryPoint: 'main' } });
     this.renderPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module: rmod, entryPoint: 'vs' },
@@ -1193,9 +818,24 @@ const GPURenderer = {
       console.error('[WebGPU] ' + this.reason);
       return false;
     }
-
     this.ok = true;
     return true;
+  },
+
+  uploadWorld() {
+    const N = CFG.WORLD * CFG.WORLD;
+    const packed = new Uint32Array(N);
+    for (let i = 0; i < N; i++) {
+      const ao = Math.max(0, Math.min(255, Math.round(Light.ao[i] * 255)));
+      packed[i] = (World.type[i] & 0xff) |
+                  ((Math.min(World.height[i], 255) & 0xff) << 8) |
+                  (ao << 16);
+    }
+    this.cellBuf = this.device.createBuffer({
+      size: packed.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.cellBuf, 0, packed);
   },
 
   async checkShader(mod, label) {
@@ -1208,18 +848,19 @@ const GPURenderer = {
       else console.warn(`[WGSL ${where}] ${m.message}`);
     }
     if (errors.length) {
-      this.reason = `${label} shader failed to compile (${errors.length} error(s); see console)`;
+      this.reason = `${label} shader failed to compile (see console)`;
       return false;
     }
     return true;
   },
 
   resize() {
-    const canvas = document.getElementById('gpuscreen');
-    canvas.width = innerWidth;
-    canvas.height = innerHeight;
-    this.cols = Math.max(40, Math.floor(innerWidth / this.cellPx));
-    this.rows = Math.max(24, Math.floor(innerHeight / this.cellPx));
+    const canvas = document.getElementById('screen');
+    const dpr = 1; // glyph cells are the pixels that matter here
+    canvas.width = Math.max(320, Math.floor(innerWidth * dpr));
+    canvas.height = Math.max(240, Math.floor(innerHeight * dpr));
+    this.cols = Math.max(40, Math.floor(canvas.width / this.cellPx));
+    this.rows = Math.max(24, Math.floor(canvas.height / this.cellPx));
   },
 
   allocTargets() {
@@ -1227,7 +868,8 @@ const GPURenderer = {
     this.lowTex = this.device.createTexture({
       size: [this.cols, this.rows],
       format: 'rgba8unorm',
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING |
+             GPUTextureUsage.COPY_SRC,
     });
     this.computeBind = this.device.createBindGroup({
       layout: this.computePipe.getBindGroupLayout(0),
@@ -1235,6 +877,7 @@ const GPURenderer = {
         { binding: 0, resource: { buffer: this.uniBuf } },
         { binding: 1, resource: { buffer: this.cellBuf } },
         { binding: 2, resource: this.lowTex.createView() },
+        { binding: 3, resource: { buffer: this.entBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -1246,48 +889,64 @@ const GPURenderer = {
         { binding: 3, resource: { buffer: this.rparBuf } },
       ],
     });
-    this.device.queue.writeBuffer(this.rparBuf, 0,
-      new Float32Array([this.cols, this.rows, this.levels, 0]));
   },
 
   handleResize() {
-    const oldC = this.cols, oldR = this.rows;
+    const oc = this.cols, or = this.rows;
     this.resize();
-    if (this.cols !== oldC || this.rows !== oldR) this.allocTargets();
+    if (this.ok && (this.cols !== oc || this.rows !== or)) this.allocTargets();
   },
 
   render() {
     if (!this.ok) return;
-    // check the first few frames for draw-time validation errors, which
-    // would otherwise present as a silent black screen
-    const probe = this.frameNo === undefined ? (this.frameNo = 0) : ++this.frameNo;
-    if (probe < 3) this.device.pushErrorScope('validation');
-    const dirX = Math.cos(Player.angle), dirY = Math.sin(Player.angle);
-    const planeX = -dirY * CFG.PLANE_LEN, planeY = dirX * CFG.PLANE_LEN;
-    const el = CFG.SUN_EL, az = CFG.SUN_AZ;
-    const sx = Math.cos(az), sy = Math.sin(az), sz = Math.tan(el);
+    const dev = this.device;
+
+    // --- camera basis, genuinely rotated by pitch (true 3-point perspective) ---
+    const a = Player.angle, p = Player.pitch;
+    const cp = Math.cos(p), sp = Math.sin(p);
+    const fwd = [Math.cos(a) * cp, Math.sin(a) * cp, sp];
+    const right = [-Math.sin(a), Math.cos(a), 0];
+    // up = right x fwd
+    const up = [
+      right[1] * fwd[2] - right[2] * fwd[1],
+      right[2] * fwd[0] - right[0] * fwd[2],
+      right[0] * fwd[1] - right[1] * fwd[0],
+    ];
+    const sx = Math.cos(CFG.SUN_AZ), sy = Math.sin(CFG.SUN_AZ), sz = Math.tan(CFG.SUN_EL);
     const il = 1 / Math.hypot(sx, sy, sz);
+    const tanX = CFG.PLANE_LEN;
+    const tanY = tanX * (this.rows / this.cols);
 
-    // std140-ish layout matching the WGSL Uniforms struct
     const u = new Float32Array(24);
-    u[0] = Player.x; u[1] = Player.y;         // camPos
-    u[2] = dirX; u[3] = dirY;                 // camDir
-    u[4] = planeX; u[5] = planeY;             // camPlane
-    u[6] = CFG.WORLD; u[7] = CFG.MAX_DIST;
-    u[8] = sx * il; u[9] = sy * il; u[10] = sz * il; // sunDir (vec3, 16B aligned)
-    u[11] = CFG.SHADOW;
-    u[12] = CFG.EYE; u[13] = CFG.Y_SCALE;
-    u[14] = Player.pitch * (this.rows / Math.max(CFG.ROWS, 1));
-    u[15] = Light.maxH || 32;
-    u[16] = this.cols; u[17] = this.rows;
-    this.device.queue.writeBuffer(this.uniBuf, 0, u);
+    u[0] = Player.x;  u[1] = Player.y;
+    u[2] = this.cols; u[3] = this.rows;
+    u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];   u[7] = CFG.EYE;
+    u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
+    u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.WORLD;
+    u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
+    u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
+    dev.queue.writeBuffer(this.uniBuf, 0, u);
+    dev.queue.writeBuffer(this.rparBuf, 0,
+      new Float32Array([this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0]));
 
-    const enc = this.device.createCommandEncoder();
-    const cp = enc.beginComputePass();
-    cp.setPipeline(this.computePipe);
-    cp.setBindGroup(0, this.computeBind);
-    cp.dispatchWorkgroups(Math.ceil(this.cols / 8), Math.ceil(this.rows / 8));
-    cp.end();
+    // --- entities ---
+    let k = 0;
+    for (const c of Entities.cars) {
+      this.entData[k++] = c.x; this.entData[k++] = c.y;
+      this.entData[k++] = 0.42; this.entData[k++] = 0.85;
+    }
+    for (const pd of Entities.peds) {
+      this.entData[k++] = pd.x; this.entData[k++] = pd.y;
+      this.entData[k++] = 0.16; this.entData[k++] = 1.7;
+    }
+    dev.queue.writeBuffer(this.entBuf, 0, this.entData);
+
+    const enc = dev.createCommandEncoder();
+    const cpass = enc.beginComputePass();
+    cpass.setPipeline(this.computePipe);
+    cpass.setBindGroup(0, this.computeBind);
+    cpass.dispatchWorkgroups(Math.ceil(this.cols / 8), Math.ceil(this.rows / 8));
+    cpass.end();
 
     const rp = enc.beginRenderPass({
       colorAttachments: [{
@@ -1300,35 +959,34 @@ const GPURenderer = {
     rp.setBindGroup(0, this.renderBind);
     rp.draw(3);
     rp.end();
-    this.device.queue.submit([enc.finish()]);
+    dev.queue.submit([enc.finish()]);
 
+    const probe = this.frameNo === undefined ? (this.frameNo = 0) : ++this.frameNo;
     if (probe < 3) {
-      this.device.popErrorScope().then(err => {
-        if (err) console.error('[WebGPU] frame ' + probe + ' error: ' + err.message);
+      dev.pushErrorScope('validation');
+      dev.popErrorScope().then(err => {
+        if (err) console.error('[WebGPU] frame error: ' + err.message);
       });
     }
   },
 
-  // Dumps the low-res compute output so a black screen can be traced to
-  // either the raymarch (all zeros) or the glyph-upscale pass (non-zero here).
+  // Dumps the compute output so a black screen can be attributed to either
+  // the raymarch (all zeros) or the glyph upscale (non-zero here).
   async debugReadback() {
-    if (!this.ok) return 'GPU renderer not active: ' + (this.reason || 'n/a');
+    if (!this.ok) return 'GPU renderer inactive: ' + (this.reason || 'n/a');
     const bpr = Math.ceil(this.cols * 4 / 256) * 256;
     const buf = this.device.createBuffer({
       size: bpr * this.rows,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.device.createCommandEncoder();
-    enc.copyTextureToBuffer(
-      { texture: this.lowTex },
-      { buffer: buf, bytesPerRow: bpr },
-      [this.cols, this.rows]);
+    enc.copyTextureToBuffer({ texture: this.lowTex },
+      { buffer: buf, bytesPerRow: bpr }, [this.cols, this.rows]);
     this.device.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const d = new Uint8Array(buf.getMappedRange());
     let nonZero = 0, maxV = 0, sum = 0;
     for (let y = 0; y < this.rows; y++) for (let x = 0; x < this.cols; x++) {
-      const v = d[y * bpr + x * 4 + 3]; // alpha = luminance
+      const v = d[y * bpr + x * 4 + 3];
       if (v > 0) nonZero++;
       if (v > maxV) maxV = v;
       sum += v;
@@ -1342,48 +1000,32 @@ const GPURenderer = {
 </script>
 <script>
 // ---- js/main.js ----
-// Bootstrap + frame loop.
-//
-// Two backends share the world/sim: the CPU character renderer (default,
-// works everywhere) and an optional WebGPU backend that raymarches in a
-// compute shader and glyph-maps the low-res result on the GPU. Each owns its
-// own canvas — a canvas can only hold one context type — so G swaps between
-// them instantly, with no reload.
+// Bootstrap + frame loop. WebGPU is the only renderer; without it there is
+// nothing to fall back on, so say so plainly instead of showing black.
 (async function () {
   World.generate(CFG.SEED);
   Light.bake();
   Entities.init(CFG.SEED);
   Player.init();
-  Renderer.init();
 
-  const hud = document.getElementById('hud');
-  const cpuCanvas = document.getElementById('screen');
-  const gpuCanvas = document.getElementById('gpuscreen');
-  const baseHud = hud.textContent;
-  let useGPU = false, gpuReady = false;
+  let ready = false;
+  try { ready = await GPURenderer.init(); }
+  catch (e) { GPURenderer.reason = e.message; }
 
-  try { gpuReady = await GPURenderer.init(); }
-  catch (e) { GPURenderer.reason = e.message; gpuReady = false; }
-
-  function setBackend(gpu) {
-    useGPU = gpu && gpuReady;
-    cpuCanvas.hidden = useGPU;
-    gpuCanvas.hidden = !useGPU;
-    hud.textContent = baseHud + (gpuReady ? ' · G: ' + (useGPU ? 'GPU' : 'CPU') : '');
+  if (!ready) {
+    document.getElementById('screen').hidden = true;
+    const msg = document.createElement('div');
+    msg.id = 'fail';
+    msg.innerHTML = '<h1>WebGPU required</h1><p>' +
+      (GPURenderer.reason || 'unknown error') + '</p>' +
+      '<p>This renderer runs entirely on the GPU. Try a current Chrome, Edge, ' +
+      'Firefox or Safari on a machine with a working GPU driver.</p>';
+    document.body.appendChild(msg);
+    console.error('[ASCII City] ' + GPURenderer.reason);
+    return;
   }
 
-  if (gpuReady) {
-    addEventListener('resize', () => GPURenderer.handleResize());
-    setBackend(true);
-  } else {
-    console.info('WebGPU unavailable (' + (GPURenderer.reason || 'unknown') +
-      '); using CPU renderer.');
-    setBackend(false);
-  }
-
-  addEventListener('keydown', e => {
-    if (e.code === 'KeyG' && gpuReady) setBackend(!useGPU);
-  });
+  addEventListener('resize', () => GPURenderer.handleResize());
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0;
@@ -1392,15 +1034,15 @@ const GPURenderer = {
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    const time = now / 1000;
 
     Player.update(dt);
-    Entities.update(dt, time);
-    if (useGPU) GPURenderer.render(); else Renderer.render(time);
+    Entities.update(dt, now / 1000);
+    GPURenderer.render();
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
-      fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' + (useGPU ? 'GPU' : 'CPU');
+      fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' +
+        GPURenderer.cols + '×' + GPURenderer.rows;
       fpsAcc = 0; fpsN = 0;
     }
     requestAnimationFrame(frame);
