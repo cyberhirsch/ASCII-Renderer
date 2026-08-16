@@ -119,15 +119,18 @@ const GPURenderer = {
 
   uploadWorld() {
     const N = CFG.WORLD * CFG.WORLD;
-    // type | height<<8 | baseGround<<16 | treeNearby<<24.
+    // type | height<<8 | baseGround<<16 | nearObj<<24 | elev<<25.
     // Canopies overhang their own cell, so a ray must test trees in a
     // neighbourhood; the flag marks where that search is worth doing.
+    // elev is ground elevation in ELEV_STEP units (7 bits, 0..127 capacity,
+    // generator caps at ELEV_MAX=63).
     const W = CFG.WORLD, R = CFG.TREE_REACH;
     const packed = new Uint32Array(N);
     for (let i = 0; i < N; i++) {
       packed[i] = (World.type[i] & 0xff) |
                   ((Math.min(World.height[i], 255) & 0xff) << 8) |
-                  ((World.base[i] & 0xff) << 16);
+                  ((World.base[i] & 0xff) << 16) |
+                  ((World.elev[i] & 0x7f) << 25);
     }
     // flag cells whose neighbourhood holds a tree or a prop, so rays only pay
     // for the object search where something can actually be hit

@@ -41,10 +41,17 @@ const CFG = {
   AO_SAMPLES: 32,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, in world cells
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
+  // terrain: elevation is stored per cell in 0.5-unit steps (elev 0..63),
+  // packed into cell-word bits 25..31. The city sits on one flat level.
+  ELEV_STEP: 0.5,
+  ELEV_MAX: 63,
+  CITY_ELEV: 6,       // city plateau, in elev steps (z = 3.0)
+  TERRAIN_AMP: 26,    // noise amplitude, elev steps
+  MOUNTAIN_AMP: 30,   // additional rise toward the world edges
 };
 
 // Cell types
-const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4;
+const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4, T_WATER = 5;
 // Prop kinds (street furniture), must match the shader constants
 const P_NONE = 0, P_LIGHT = 1, P_BIN = 2, P_BOARD = 3;
 // Cell flags

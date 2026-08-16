@@ -1,11 +1,20 @@
-// Procedural city: road lattice, sidewalks, building footprints, plazas, trees.
+// Procedural world: terrain heightmap with rivers, a city plateau (road
+// lattice, sidewalks, building footprints, plazas), trees, street furniture.
 const World = {
   type: null, height: null, flags: null, bcol: null, bseed: null,
   roadX: [], roadY: [],
 
   base: null,   // ground type beneath a tree cell, so trees keep their paving
+  elev: null,   // ground elevation in ELEV_STEP units (0..ELEV_MAX)
 
   idx(x, y) { return y * CFG.WORLD + x; },
+
+  // ground z in world units
+  groundZ(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    if (!this.inBounds(xi, yi)) return 0;
+    return this.elev[this.idx(xi, yi)] * CFG.ELEV_STEP;
+  },
 
   inBounds(x, y) { return x >= 0 && y >= 0 && x < CFG.WORLD && y < CFG.WORLD; },
 
@@ -28,10 +37,13 @@ const World = {
     this.flags = new Uint8Array(N);
     this.bcol = new Uint8Array(N);
     this.bseed = new Uint8Array(N);
+    this.elev = new Uint8Array(N);
 
     // City core is centered; everything outside stays open ground
     const c0 = (W - CFG.CITY) >> 1, c1 = c0 + CFG.CITY;
     this.cityMin = c0; this.cityMax = c1;
+
+    this.genTerrain(seed, c0, c1);
 
     // Road lines (3 cells wide, center cell carries lane dashes)
     this.roadX = []; this.roadY = [];
@@ -113,6 +125,107 @@ const World = {
         this.type[i] = T_TREE;
         this.height[i] = 2 + ((hash3(x, y, seed ^ 0x88) * 2) | 0);
       }
+    }
+  },
+
+  // Terrain: fractal heightmap, mountains rising toward the world edges, the
+  // city flattened onto one plateau with a blended skirt, and rivers walked
+  // downhill from high ground, carving T_WATER.
+  genTerrain(seed, c0, c1) {
+    const W = CFG.WORLD;
+    const cx = (c0 + c1) / 2, cy = cx;
+    const cityR = (c1 - c0) / 2;
+
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      const i = this.idx(x, y);
+      // base rolling terrain; the power remap deepens valleys toward zero
+      // rather than letting fbm hover around its mean
+      const n = fbm2(x / 26, y / 26, seed ^ 0x7e11);
+      let e = Math.pow(n, 1.7) * CFG.TERRAIN_AMP * 1.25;
+      // mountains toward the edges: ramp on chebyshev distance from centre
+      const edge = Math.max(Math.abs(x - W / 2), Math.abs(y - W / 2)) / (W / 2);
+      const ridge = fbm2(x / 14, y / 14, seed ^ 0x0be1);
+      e += Math.pow(Math.max(0, edge - 0.55) / 0.45, 1.6) * CFG.MOUNTAIN_AMP * (0.55 + ridge * 0.7);
+
+      // flatten the city plateau; blend across a skirt outside it
+      const dx = Math.max(0, Math.abs(x - cx) - cityR);
+      const dy = Math.max(0, Math.abs(y - cy) - cityR);
+      const dOut = Math.hypot(dx, dy);          // 0 inside the core
+      const SKIRT = 14;
+      if (dOut <= 0) e = CFG.CITY_ELEV;
+      else if (dOut < SKIRT) {
+        const t = dOut / SKIRT;
+        const s = t * t * (3 - 2 * t);
+        e = CFG.CITY_ELEV * (1 - s) + e * s;
+      }
+      this.elev[i] = clamp(Math.round(e), 0, CFG.ELEV_MAX);
+    }
+
+    // rivers: start at high points in opposite quadrants, walk downhill
+    this.carveRiver(seed ^ 0xA1, (W * 0.18) | 0, (W * 0.22) | 0);
+    this.carveRiver(seed ^ 0xB2, (W * 0.80) | 0, (W * 0.76) | 0);
+  },
+
+  carveRiver(seed, sx, sy) {
+    const W = CFG.WORLD;
+    // find the highest cell in a small search window around the start
+    let bx = sx, by = sy, be = -1;
+    for (let y = Math.max(1, sy - 8); y < Math.min(W - 1, sy + 8); y++)
+      for (let x = Math.max(1, sx - 8); x < Math.min(W - 1, sx + 8); x++)
+        if (this.elev[this.idx(x, y)] > be) { be = this.elev[this.idx(x, y)]; bx = x; by = y; }
+
+    let x = bx, y = by, px = 0, py = 0;
+    for (let step = 0; step < 600; step++) {
+      // carve: centre + orthogonal neighbours, banks flattened to water level
+      const level = this.elev[this.idx(x, y)];
+      for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (!this.inBounds(nx, ny)) continue;
+        const j = this.idx(nx, ny);
+        if (dx === 0 && dy === 0) {
+          this.type[j] = T_WATER;
+          this.elev[j] = Math.max(0, level - 1);
+        } else if (this.type[j] !== T_WATER) {
+          this.elev[j] = Math.min(this.elev[j], level);
+        }
+      }
+      // steepest descent among 8 neighbours, with momentum as tiebreak and a
+      // strong penalty for stepping toward the city: the plateau skirt is the
+      // local downhill in half the map, and rivers must flow outward, not
+      // pool against the city buffer
+      const W2 = CFG.WORLD / 2;
+      const distC = Math.hypot(x - W2, y - W2);
+      let nbx = x, nby = y, nbe = Infinity;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (!this.inBounds(nx, ny)) return;           // reached the world edge
+        const inward = Math.hypot(nx - W2, ny - W2) < distC ? 2.2 : 0;
+        const e = this.elev[this.idx(nx, ny)] + inward
+          + (dx === px && dy === py ? -0.35 : 0)
+          + hash3(nx, ny, seed) * 0.6;                // meander
+        if (e < nbe) { nbe = e; nbx = nx; nby = ny; }
+      }
+      if (nbe > this.elev[this.idx(x, y)] + 4) {
+        // only steep uphill or inward left: treat as a pit
+        nbx = x; nby = y;
+      }
+      if (nbx === x && nby === y) {
+        // stuck in a pit: pool out a small lake and stop
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (!this.inBounds(nx, ny)) continue;
+          const j = this.idx(nx, ny);
+          this.type[j] = T_WATER;
+          this.elev[j] = this.elev[this.idx(x, y)];
+        }
+        return;
+      }
+      px = nbx - x; py = nby - y;
+      x = nbx; y = nby;
+      // never carve through the city plateau
+      if (x >= this.cityMin - 2 && x < this.cityMax + 2 &&
+          y >= this.cityMin - 2 && y < this.cityMax + 2) return;
     }
   },
 

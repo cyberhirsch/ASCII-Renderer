@@ -74,10 +74,17 @@ const CFG = {
   AO_SAMPLES: 32,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, in world cells
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
+  // terrain: elevation is stored per cell in 0.5-unit steps (elev 0..63),
+  // packed into cell-word bits 25..31. The city sits on one flat level.
+  ELEV_STEP: 0.5,
+  ELEV_MAX: 63,
+  CITY_ELEV: 6,       // city plateau, in elev steps (z = 3.0)
+  TERRAIN_AMP: 26,    // noise amplitude, elev steps
+  MOUNTAIN_AMP: 30,   // additional rise toward the world edges
 };
 
 // Cell types
-const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4;
+const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4, T_WATER = 5;
 // Prop kinds (street furniture), must match the shader constants
 const P_NONE = 0, P_LIGHT = 1, P_BIN = 2, P_BOARD = 3;
 // Cell flags
@@ -104,17 +111,44 @@ function hash3(x, y, z) {
 }
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// 2D value noise over hash3, smoothstep-interpolated, range [0,1).
+// Deterministic in (x, y, seed) — no sequence state, safe to sample in any order.
+function vnoise2(x, y, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const fx = x - xi, fy = y - yi;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = hash3(xi, yi, seed), b = hash3(xi + 1, yi, seed);
+  const c = hash3(xi, yi + 1, seed), d = hash3(xi + 1, yi + 1, seed);
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+
+// fractal sum, 3 octaves
+function fbm2(x, y, seed) {
+  return vnoise2(x, y, seed) * 0.55 +
+         vnoise2(x * 2.13, y * 2.13, seed ^ 0x9e37) * 0.28 +
+         vnoise2(x * 4.31, y * 4.31, seed ^ 0x51ed) * 0.17;
+}
 </script>
 <script>
 // ---- js/world.js ----
-// Procedural city: road lattice, sidewalks, building footprints, plazas, trees.
+// Procedural world: terrain heightmap with rivers, a city plateau (road
+// lattice, sidewalks, building footprints, plazas), trees, street furniture.
 const World = {
   type: null, height: null, flags: null, bcol: null, bseed: null,
   roadX: [], roadY: [],
 
   base: null,   // ground type beneath a tree cell, so trees keep their paving
+  elev: null,   // ground elevation in ELEV_STEP units (0..ELEV_MAX)
 
   idx(x, y) { return y * CFG.WORLD + x; },
+
+  // ground z in world units
+  groundZ(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    if (!this.inBounds(xi, yi)) return 0;
+    return this.elev[this.idx(xi, yi)] * CFG.ELEV_STEP;
+  },
 
   inBounds(x, y) { return x >= 0 && y >= 0 && x < CFG.WORLD && y < CFG.WORLD; },
 
@@ -137,10 +171,13 @@ const World = {
     this.flags = new Uint8Array(N);
     this.bcol = new Uint8Array(N);
     this.bseed = new Uint8Array(N);
+    this.elev = new Uint8Array(N);
 
     // City core is centered; everything outside stays open ground
     const c0 = (W - CFG.CITY) >> 1, c1 = c0 + CFG.CITY;
     this.cityMin = c0; this.cityMax = c1;
+
+    this.genTerrain(seed, c0, c1);
 
     // Road lines (3 cells wide, center cell carries lane dashes)
     this.roadX = []; this.roadY = [];
@@ -222,6 +259,107 @@ const World = {
         this.type[i] = T_TREE;
         this.height[i] = 2 + ((hash3(x, y, seed ^ 0x88) * 2) | 0);
       }
+    }
+  },
+
+  // Terrain: fractal heightmap, mountains rising toward the world edges, the
+  // city flattened onto one plateau with a blended skirt, and rivers walked
+  // downhill from high ground, carving T_WATER.
+  genTerrain(seed, c0, c1) {
+    const W = CFG.WORLD;
+    const cx = (c0 + c1) / 2, cy = cx;
+    const cityR = (c1 - c0) / 2;
+
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      const i = this.idx(x, y);
+      // base rolling terrain; the power remap deepens valleys toward zero
+      // rather than letting fbm hover around its mean
+      const n = fbm2(x / 26, y / 26, seed ^ 0x7e11);
+      let e = Math.pow(n, 1.7) * CFG.TERRAIN_AMP * 1.25;
+      // mountains toward the edges: ramp on chebyshev distance from centre
+      const edge = Math.max(Math.abs(x - W / 2), Math.abs(y - W / 2)) / (W / 2);
+      const ridge = fbm2(x / 14, y / 14, seed ^ 0x0be1);
+      e += Math.pow(Math.max(0, edge - 0.55) / 0.45, 1.6) * CFG.MOUNTAIN_AMP * (0.55 + ridge * 0.7);
+
+      // flatten the city plateau; blend across a skirt outside it
+      const dx = Math.max(0, Math.abs(x - cx) - cityR);
+      const dy = Math.max(0, Math.abs(y - cy) - cityR);
+      const dOut = Math.hypot(dx, dy);          // 0 inside the core
+      const SKIRT = 14;
+      if (dOut <= 0) e = CFG.CITY_ELEV;
+      else if (dOut < SKIRT) {
+        const t = dOut / SKIRT;
+        const s = t * t * (3 - 2 * t);
+        e = CFG.CITY_ELEV * (1 - s) + e * s;
+      }
+      this.elev[i] = clamp(Math.round(e), 0, CFG.ELEV_MAX);
+    }
+
+    // rivers: start at high points in opposite quadrants, walk downhill
+    this.carveRiver(seed ^ 0xA1, (W * 0.18) | 0, (W * 0.22) | 0);
+    this.carveRiver(seed ^ 0xB2, (W * 0.80) | 0, (W * 0.76) | 0);
+  },
+
+  carveRiver(seed, sx, sy) {
+    const W = CFG.WORLD;
+    // find the highest cell in a small search window around the start
+    let bx = sx, by = sy, be = -1;
+    for (let y = Math.max(1, sy - 8); y < Math.min(W - 1, sy + 8); y++)
+      for (let x = Math.max(1, sx - 8); x < Math.min(W - 1, sx + 8); x++)
+        if (this.elev[this.idx(x, y)] > be) { be = this.elev[this.idx(x, y)]; bx = x; by = y; }
+
+    let x = bx, y = by, px = 0, py = 0;
+    for (let step = 0; step < 600; step++) {
+      // carve: centre + orthogonal neighbours, banks flattened to water level
+      const level = this.elev[this.idx(x, y)];
+      for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (!this.inBounds(nx, ny)) continue;
+        const j = this.idx(nx, ny);
+        if (dx === 0 && dy === 0) {
+          this.type[j] = T_WATER;
+          this.elev[j] = Math.max(0, level - 1);
+        } else if (this.type[j] !== T_WATER) {
+          this.elev[j] = Math.min(this.elev[j], level);
+        }
+      }
+      // steepest descent among 8 neighbours, with momentum as tiebreak and a
+      // strong penalty for stepping toward the city: the plateau skirt is the
+      // local downhill in half the map, and rivers must flow outward, not
+      // pool against the city buffer
+      const W2 = CFG.WORLD / 2;
+      const distC = Math.hypot(x - W2, y - W2);
+      let nbx = x, nby = y, nbe = Infinity;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (!this.inBounds(nx, ny)) return;           // reached the world edge
+        const inward = Math.hypot(nx - W2, ny - W2) < distC ? 2.2 : 0;
+        const e = this.elev[this.idx(nx, ny)] + inward
+          + (dx === px && dy === py ? -0.35 : 0)
+          + hash3(nx, ny, seed) * 0.6;                // meander
+        if (e < nbe) { nbe = e; nbx = nx; nby = ny; }
+      }
+      if (nbe > this.elev[this.idx(x, y)] + 4) {
+        // only steep uphill or inward left: treat as a pit
+        nbx = x; nby = y;
+      }
+      if (nbx === x && nby === y) {
+        // stuck in a pit: pool out a small lake and stop
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (!this.inBounds(nx, ny)) continue;
+          const j = this.idx(nx, ny);
+          this.type[j] = T_WATER;
+          this.elev[j] = this.elev[this.idx(x, y)];
+        }
+        return;
+      }
+      px = nbx - x; py = nby - y;
+      x = nbx; y = nby;
+      // never carve through the city plateau
+      if (x >= this.cityMin - 2 && x < this.cityMax + 2 &&
+          y >= this.cityMin - 2 && y < this.cityMax + 2) return;
     }
   },
 
@@ -1588,15 +1726,18 @@ const GPURenderer = {
 
   uploadWorld() {
     const N = CFG.WORLD * CFG.WORLD;
-    // type | height<<8 | baseGround<<16 | treeNearby<<24.
+    // type | height<<8 | baseGround<<16 | nearObj<<24 | elev<<25.
     // Canopies overhang their own cell, so a ray must test trees in a
     // neighbourhood; the flag marks where that search is worth doing.
+    // elev is ground elevation in ELEV_STEP units (7 bits, 0..127 capacity,
+    // generator caps at ELEV_MAX=63).
     const W = CFG.WORLD, R = CFG.TREE_REACH;
     const packed = new Uint32Array(N);
     for (let i = 0; i < N; i++) {
       packed[i] = (World.type[i] & 0xff) |
                   ((Math.min(World.height[i], 255) & 0xff) << 8) |
-                  ((World.base[i] & 0xff) << 16);
+                  ((World.base[i] & 0xff) << 16) |
+                  ((World.elev[i] & 0x7f) << 25);
     }
     // flag cells whose neighbourhood holds a tree or a prop, so rays only pay
     // for the object search where something can actually be hit
