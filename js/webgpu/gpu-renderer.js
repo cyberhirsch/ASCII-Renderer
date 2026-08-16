@@ -206,7 +206,7 @@ const GPURenderer = {
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
-      CFG.RAW ? 1 : 0, 0, 0, 0]));
+      CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
     // --- entities ---
     let k = 0;

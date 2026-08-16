@@ -41,7 +41,14 @@ const CFG = {
   PED_COUNT: 70,
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
-  GLYPH_SET: 'symbols',  // symbols | ascii | blocks  (C cycles)
+  GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
+  // tone curve applied before glyph selection: maps the scene's useful
+  // brightness range onto the ramp so bright areas don't clip at the top
+  // white must stay above the sky's own luminance (~0.96 at the horizon) or
+  // the sky clips to one glyph and loses its gradient entirely
+  TONE_BLACK: 0.02,
+  TONE_WHITE: 1.0,
+  TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
@@ -400,13 +407,13 @@ const Player = {
 // the ramp is close to linear in brightness. A hand-ordered ramp is uneven —
 // the gaps show up as banding in smooth gradients.
 const GlyphAtlas = {
-  // Selectable candidate pools. Letters read as text and make the image look
-  // noisy; blocks read as pixels rather than ASCII. Symbols sit in between,
-  // at the cost of a dimmer bright end (punctuation tops out near 25% ink).
+  // Candidate pools, printable ASCII only — no block elements, which read as
+  // pixels rather than as text. Both pools top out near 25% ink, so the tone
+  // curve in the fragment shader does the work of keeping bright areas
+  // (mainly sky) off the end of the ramp.
   SETS: {
-    symbols: ' .\'`^",:;!|/\\()[]{}<>~+-_=*#%&@$?',
     ascii:   ' .\'`^",:;!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@',
-    blocks:  ' .\':;!|/~+-=*#%&@░▒▓█▖▗▘▝▚▞▌▐▀▄▁▂▃▅▆▇▉▊▋▍▎▏▙▛▜▟',
+    symbols: ' .\'`^",:;!|/\\()[]{}<>~+-_=*#%&@$?',
   },
   CELL: 32,
   LEVELS: 24,
@@ -846,9 +853,9 @@ struct RParams {
   levels  : f32,     // 8
   mono    : f32,     // 12
   raw     : f32,     // 16
-  pad0    : f32,     // 20
-  pad1    : f32,     // 24
-  pad2    : f32,     // 28
+  black   : f32,     // 20
+  white   : f32,     // 24
+  gamma   : f32,     // 28
 };                   // size 32
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
@@ -885,9 +892,14 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     return vec4f(c, 1.0);
   }
 
-  // glyph chosen by luminance, dithered by just under one ramp step
+  // Tone curve first: without it the sky sits at the very top of the ramp,
+  // where an ASCII-only set has almost no steps left, and bands.
+  let tone = pow(clamp((lum - R.black) / max(R.white - R.black, 1e-3),
+                       0.0, 1.0), R.gamma);
+
+  // glyph chosen by tone, dithered by just under one ramp step
   let dith = bayer4(vec2i(cell)) / R.levels;
-  let gi = floor(clamp(lum + dith, 0.0, 0.9999) * R.levels);
+  let gi = floor(clamp(tone + dith, 0.0, 0.9999) * R.levels);
   let au = (gi + inCell.x) / R.levels;
   let cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
 
@@ -1110,7 +1122,7 @@ const GPURenderer = {
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
-      CFG.RAW ? 1 : 0, 0, 0, 0]));
+      CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
     // --- entities ---
     let k = 0;

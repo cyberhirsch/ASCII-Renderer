@@ -5,13 +5,13 @@
 // the ramp is close to linear in brightness. A hand-ordered ramp is uneven —
 // the gaps show up as banding in smooth gradients.
 const GlyphAtlas = {
-  // Selectable candidate pools. Letters read as text and make the image look
-  // noisy; blocks read as pixels rather than ASCII. Symbols sit in between,
-  // at the cost of a dimmer bright end (punctuation tops out near 25% ink).
+  // Candidate pools, printable ASCII only — no block elements, which read as
+  // pixels rather than as text. Both pools top out near 25% ink, so the tone
+  // curve in the fragment shader does the work of keeping bright areas
+  // (mainly sky) off the end of the ramp.
   SETS: {
-    symbols: ' .\'`^",:;!|/\\()[]{}<>~+-_=*#%&@$?',
     ascii:   ' .\'`^",:;!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@',
-    blocks:  ' .\':;!|/~+-=*#%&@░▒▓█▖▗▘▝▚▞▌▐▀▄▁▂▃▅▆▇▉▊▋▍▎▏▙▛▜▟',
+    symbols: ' .\'`^",:;!|/\\()[]{}<>~+-_=*#%&@$?',
   },
   CELL: 32,
   LEVELS: 24,

@@ -10,7 +10,14 @@ const CFG = {
   PED_COUNT: 70,
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
-  GLYPH_SET: 'symbols',  // symbols | ascii | blocks  (C cycles)
+  GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
+  // tone curve applied before glyph selection: maps the scene's useful
+  // brightness range onto the ramp so bright areas don't clip at the top
+  // white must stay above the sky's own luminance (~0.96 at the horizon) or
+  // the sky clips to one glyph and loses its gradient entirely
+  TONE_BLACK: 0.02,
+  TONE_WHITE: 1.0,
+  TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows

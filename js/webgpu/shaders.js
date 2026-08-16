@@ -354,9 +354,9 @@ struct RParams {
   levels  : f32,     // 8
   mono    : f32,     // 12
   raw     : f32,     // 16
-  pad0    : f32,     // 20
-  pad1    : f32,     // 24
-  pad2    : f32,     // 28
+  black   : f32,     // 20
+  white   : f32,     // 24
+  gamma   : f32,     // 28
 };                   // size 32
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
@@ -393,9 +393,14 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     return vec4f(c, 1.0);
   }
 
-  // glyph chosen by luminance, dithered by just under one ramp step
+  // Tone curve first: without it the sky sits at the very top of the ramp,
+  // where an ASCII-only set has almost no steps left, and bands.
+  let tone = pow(clamp((lum - R.black) / max(R.white - R.black, 1e-3),
+                       0.0, 1.0), R.gamma);
+
+  // glyph chosen by tone, dithered by just under one ramp step
   let dith = bayer4(vec2i(cell)) / R.levels;
-  let gi = floor(clamp(lum + dith, 0.0, 0.9999) * R.levels);
+  let gi = floor(clamp(tone + dith, 0.0, 0.9999) * R.levels);
   let au = (gi + inCell.x) / R.levels;
   let cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
 
