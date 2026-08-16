@@ -1,7 +1,8 @@
-// First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
+// First-person player over the infinite terrain: WASD move, arrows/mouse
+// look, slope- and water-limited movement, trunk-circle tree collision.
 const Player = {
   x: 0, y: 0, z: 0, angle: 0.6,
-  pitch: 0, // vertical look, radians; ±90° is straight up/down
+  pitch: 0, // radians; ±90° is straight up/down
   keys: {},
 
   init() {
@@ -28,8 +29,6 @@ const Player = {
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => canvas.requestPointerLock());
     const locked = () => document.pointerLockElement === canvas;
-    // browsers can fire one huge bogus movement delta when pointer lock
-    // engages or the cursor re-syncs; skip the first events and clamp the rest
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
@@ -38,22 +37,19 @@ const Player = {
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);
       this.angle += mx * 0.0022;
-      // real camera pitch. Full range: straight up to straight down. It stops
-      // a hair short of the poles, where the camera basis would degenerate.
       const LIM = Math.PI / 2 - 0.001;
       this.pitch = clamp(this.pitch - my * 0.0022, -LIM, LIM);
     });
   },
 
   blocked(x, y) {
-    const R = 0.22;
-    for (const [ox, oy] of [[-R, -R], [R, -R], [-R, R], [R, R]]) {
-      const cx = Math.floor(x + ox), cy = Math.floor(y + oy);
-      if (World.isSolid(cx, cy)) return true;
-      if (World.cellType(cx, cy) === T_WATER) return true;     // no swimming
-      // terrain step limit: refuse climbs or drops steeper than 1.0 units
-      if (Math.abs(World.groundZ(cx + 0.5, cy + 0.5) - this.z) > 1.0) return true;
-    }
+    // water and steep terrain
+    const h = World.groundZ(x, y);
+    if (h < CFG.SEA_LEVEL + 0.05) return true;
+    if (Math.abs(h - this.z) > 1.0) return true;
+    // tree trunks: circle test against nearby hash-placed trees
+    const near = World.trunkNear(x, y, 1);
+    if (near && near.dist < near.tree.trunkR + 0.22) return true;
     return false;
   },
 
@@ -76,11 +72,11 @@ const Player = {
     const len = Math.hypot(mx, my);
     if (len > 0.001) {
       mx = mx / len * spd; my = my / len * spd;
-      // axis-separated collision so we slide along walls
+      // axis-separated collision so we slide along obstacles
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
     }
-    // ride the terrain, smoothed so cell steps read as a walk not a jolt
+    // ride the terrain, smoothed
     const gz = World.groundZ(this.x, this.y);
     this.z += (gz - this.z) * Math.min(1, dt * 10);
   },

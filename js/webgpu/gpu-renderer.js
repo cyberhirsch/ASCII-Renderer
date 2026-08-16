@@ -27,32 +27,12 @@ const GPURenderer = {
     this.resize();
     this.ctx.configure({ device, format: this.format, alphaMode: 'opaque' });
 
-    // world cells: type | height<<8 | ao<<16
-    this.uploadWorld();
-
-    // two vec4 per entity: (x, y, heading, kind), (halfLen, halfWid, height, phase)
-    this.entCount = Entities.cars.length + Entities.peds.length;
-    this.entData = new Float32Array(Math.max(this.entCount, 1) * 8);
+    // The world is procedural in the shader — nothing to upload. Entities:
+    // capacity-sized buffer, two vec4 each, live count sent per frame.
+    this.entData = new Float32Array(CFG.MAX_ENTS * 8);
     this.entBuf = device.createBuffer({
       size: this.entData.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    // billboard signage
-    const signs = SignAtlas.build();
-    this.signCount = signs.count;
-    this.signTex = device.createTexture({
-      size: [signs.canvas.width, signs.canvas.height],
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
-             GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    device.queue.copyExternalImageToTexture(
-      { source: signs.canvas }, { texture: this.signTex },
-      [signs.canvas.width, signs.canvas.height]);
-    this.signSamp = device.createSampler({
-      magFilter: 'linear', minFilter: 'linear',
-      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
     });
 
     this.buildAtlas(CFG.GLYPH_SET);
@@ -117,44 +97,6 @@ const GPURenderer = {
     return { set: name, levels: this.levels, chars: this.rampChars };
   },
 
-  uploadWorld() {
-    const N = CFG.WORLD * CFG.WORLD;
-    // type | height<<8 | baseGround<<16 | nearObj<<24 | elev<<25.
-    // Canopies overhang their own cell, so a ray must test trees in a
-    // neighbourhood; the flag marks where that search is worth doing.
-    // elev is ground elevation in ELEV_STEP units (7 bits, 0..127 capacity,
-    // generator caps at ELEV_MAX=63).
-    const W = CFG.WORLD, R = CFG.TREE_REACH;
-    const packed = new Uint32Array(N);
-    for (let i = 0; i < N; i++) {
-      packed[i] = (World.type[i] & 0xff) |
-                  ((Math.min(World.height[i], 255) & 0xff) << 8) |
-                  ((World.base[i] & 0xff) << 16) |
-                  ((World.elev[i] & 0x7f) << 25);
-    }
-    // flag cells whose neighbourhood holds a tree or a prop, so rays only pay
-    // for the object search where something can actually be hit
-    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x;
-      if (World.type[i] !== T_TREE && !World.prop[i]) continue;
-      const y0 = Math.max(0, y - R), y1 = Math.min(W - 1, y + R);
-      const x0 = Math.max(0, x - R), x1 = Math.min(W - 1, x + R);
-      for (let ny = y0; ny <= y1; ny++)
-        for (let nx = x0; nx <= x1; nx++) packed[ny * W + nx] |= (1 << 24);
-    }
-    this.cellBuf = this.device.createBuffer({
-      size: packed.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.cellBuf, 0, packed);
-
-    this.propBuf = this.device.createBuffer({
-      size: World.prop.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.propBuf, 0, World.prop);
-  },
-
   async checkShader(mod, label) {
     if (!mod.getCompilationInfo) return true;
     const info = await mod.getCompilationInfo();
@@ -205,12 +147,8 @@ const GPURenderer = {
       layout: this.computePipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniBuf } },
-        { binding: 1, resource: { buffer: this.cellBuf } },
-        { binding: 2, resource: this.lowTex.createView() },
-        { binding: 3, resource: { buffer: this.entBuf } },
-        { binding: 4, resource: { buffer: this.propBuf } },
-        { binding: 5, resource: this.signTex.createView() },
-        { binding: 6, resource: this.signSamp },
+        { binding: 1, resource: this.lowTex.createView() },
+        { binding: 2, resource: { buffer: this.entBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -260,13 +198,14 @@ const GPURenderer = {
     u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];
     u[7] = (Player.z || 0) + CFG.EYE;
     u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
-    u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.WORLD;
+    u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.SEED;
     u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
-    u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
+    u[20] = tanX; u[21] = tanY; u[22] = CFG.TERRAIN_MAX;
+    u[23] = Math.min(Entities.list.length, CFG.MAX_ENTS);
     u[24] = CFG.SUN_ANGLE; u[25] = CFG.SUN_SAMPLES;
     u[26] = CFG.AO_SAMPLES; u[27] = CFG.AO_RADIUS;
     u[28] = CFG.TREE_REACH;
-    u[29] = this.signCount;
+    u[29] = CFG.SEA_LEVEL;
     u[30] = (performance.now() / 1000) % 3600;
     u.set(CFG.SUN_COL, 32);      u[35] = CFG.SUN_I;
     u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
@@ -277,26 +216,19 @@ const GPURenderer = {
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
       CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
-    // --- entities: position, heading, per-instance dimensions, ground z ---
+    // --- entities: (x, y, heading, kind) + kind extras, e1[0] = ground z ---
     let k = 0;
-    for (const c of Entities.cars) {
-      this.entData[k++] = c.x; this.entData[k++] = c.y;
-      this.entData[k++] = Math.atan2(c.dy, c.dx); this.entData[k++] = 0; // car
-      this.entData[k++] = 0.46; this.entData[k++] = 0.24;
-      this.entData[k++] = World.groundZ(c.x, c.y);   // e1.z = ground
-      this.entData[k++] = (c.col % 5) / 5;
+    const live = Math.min(Entities.list.length, CFG.MAX_ENTS);
+    for (let i = 0; i < live; i++) {
+      const e = Entities.list[i];
+      this.entData[k++] = e.x; this.entData[k++] = e.y;
+      this.entData[k++] = e.heading || 0; this.entData[k++] = e.kind || 0;
+      this.entData[k++] = World.groundZ(e.x, e.y);
+      this.entData[k++] = e.e1 ? e.e1[1] : 0;
+      this.entData[k++] = e.e1 ? e.e1[2] : 0;
+      this.entData[k++] = e.e1 ? e.e1[3] : 0;
     }
-    for (const pd of Entities.peds) {
-      const dx = pd.tx - pd.x, dy = pd.ty - pd.y;
-      const ang = (dx * dx + dy * dy) > 1e-6 ? Math.atan2(dy, dx) : 0;
-      this.entData[k++] = pd.x; this.entData[k++] = pd.y;
-      this.entData[k++] = ang;  this.entData[k++] = 1; // pedestrian
-      this.entData[k++] = World.groundZ(pd.x, pd.y);  // e1.x = ground
-      this.entData[k++] = 0.0;
-      this.entData[k++] = 1.55 + pd.shade * 0.25;
-      this.entData[k++] = pd.shade;
-    }
-    dev.queue.writeBuffer(this.entBuf, 0, this.entData);
+    if (live > 0) dev.queue.writeBuffer(this.entBuf, 0, this.entData);
 
     const enc = dev.createCommandEncoder();
     const cpass = enc.beginComputePass();

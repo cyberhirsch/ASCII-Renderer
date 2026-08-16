@@ -1,10 +1,7 @@
-// Bootstrap + frame loop. WebGPU is the only renderer; without it there is
-// nothing to fall back on, so say so plainly instead of showing black.
+// Bootstrap + frame loop. The world is procedural in the shader; nothing to
+// generate up front beyond finding a spawn point.
 (async function () {
-  World.generate(CFG.SEED);
-  World.placeProps(CFG.SEED);
-  Light.bake();
-  Entities.init(CFG.SEED);
+  Entities.init();
   Player.init();
 
   let ready = false;
@@ -20,7 +17,7 @@
       '<p>This renderer runs entirely on the GPU. Try a current Chrome, Edge, ' +
       'Firefox or Safari on a machine with a working GPU driver.</p>';
     document.body.appendChild(msg);
-    console.error('[ASCII City] ' + GPURenderer.reason);
+    console.error('[ASCII World] ' + GPURenderer.reason);
     return;
   }
 
@@ -41,7 +38,8 @@
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' +
-        GPURenderer.cols + '×' + GPURenderer.rows;
+        GPURenderer.cols + '×' + GPURenderer.rows + ' · ' +
+        Player.x.toFixed(0) + ',' + Player.y.toFixed(0);
       fpsAcc = 0; fpsN = 0;
     }
     requestAnimationFrame(frame);

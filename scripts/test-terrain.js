@@ -1,89 +1,93 @@
-// Terrain generator tests, runnable without a browser: loads the plain-script
-// modules into one VM context (mirroring what build.js produces) and checks
-// the heightmap, city plateau, rivers, and determinism.
+// Tests for the infinite procedural terrain: smoothness, range, sea coverage,
+// tree density, spawn validity, and JS-side determinism. The WGSL twin cannot
+// run here; parity rests on the functions being line-for-line ports (see the
+// KEEP IN SYNC comments in js/webgpu/shaders.js and js/util.js).
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const root = path.join(__dirname, '..');
 
-function makeWorld() {
-  // consts in a vm script are script-scoped, so concatenate the modules and
-  // export what the tests need from inside the same script
-  const src = ['config', 'util', 'world']
-    .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
-    .join('\n') +
-    '\nWorld.generate(CFG.SEED); World.placeProps(CFG.SEED);' +
-    '\n({ CFG, World, T_WATER, T_BLDG });';
-  return vm.runInNewContext(src, { console, Math }, { filename: 'world-under-test' });
-}
+const src = ['config', 'util', 'world']
+  .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
+  .join('\n') + '\n({ CFG, terrainH, treeAt, World });';
+const c = vm.runInNewContext(src, { console, Math }, { filename: 'under-test' });
 
 let failures = 0;
 const fail = m => { failures++; console.error('FAIL  ' + m); };
 const ok = m => console.log('  ok  ' + m);
 
-const c1 = makeWorld();
-const c2 = makeWorld();
-const W = c1.CFG.WORLD;
-const { elev, type } = c1.World;
+// range and statistics over a wide area
+let min = Infinity, max = -Infinity, sum = 0, below = 0;
+const N = 200;
+for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+  const h = c.terrainH(i * 7.3 - 700, j * 7.3 - 700);
+  if (h < min) min = h;
+  if (h > max) max = h;
+  sum += h;
+  if (h < c.CFG.SEA_LEVEL) below++;
+}
+ok(`height min=${min.toFixed(2)} max=${max.toFixed(2)} mean=${(sum / (N * N)).toFixed(2)} (amp ${c.CFG.TERRAIN_MAX})`);
+if (max > c.CFG.TERRAIN_MAX + 1e-6) fail('height exceeds TERRAIN_MAX');
+if (max < c.CFG.TERRAIN_MAX * 0.55) fail('mountains too low');
+if (min > c.CFG.SEA_LEVEL) fail('no terrain below sea level anywhere');
+const seaFrac = below / (N * N);
+(seaFrac > 0.03 && seaFrac < 0.6)
+  ? ok(`sea coverage ${(seaFrac * 100).toFixed(1)}%`)
+  : fail(`sea coverage out of range: ${(seaFrac * 100).toFixed(1)}%`);
+
+// smoothness: worst step across a 0.25 lattice must stay well under the old
+// 0.5-unit terracing — this is the "no minecraft" property
+let worst = 0;
+for (let i = 0; i < 4000; i++) {
+  const x = (i % 63) * 3.17, y = ((i / 63) | 0) * 2.71;
+  const h0 = c.terrainH(x, y);
+  const dh = Math.max(
+    Math.abs(c.terrainH(x + 0.25, y) - h0),
+    Math.abs(c.terrainH(x, y + 0.25) - h0));
+  if (dh > worst) worst = dh;
+}
+worst < 0.45 ? ok(`smooth: worst 0.25-step delta ${worst.toFixed(3)}`)
+             : fail(`terrain too steep/jagged: 0.25-step delta ${worst.toFixed(3)}`);
 
 // determinism
-const same = Buffer.from(c1.World.elev).equals(Buffer.from(c2.World.elev)) &&
-             Buffer.from(c1.World.type).equals(Buffer.from(c2.World.type));
-same ? ok('two generates are byte-identical') : fail('generator is not deterministic');
+const a1 = c.terrainH(1234.5, -987.25), a2 = c.terrainH(1234.5, -987.25);
+a1 === a2 ? ok('terrainH deterministic') : fail('terrainH nondeterministic');
 
-// stats
-let min = 255, max = 0, sum = 0;
-for (const e of elev) { if (e < min) min = e; if (e > max) max = e; sum += e; }
-ok(`elev min=${min} max=${max} mean=${(sum / elev.length).toFixed(1)} (cap ${c1.CFG.ELEV_MAX})`);
-if (max > c1.CFG.ELEV_MAX) fail('elevation exceeds ELEV_MAX');
-if (max < 20) fail('no mountains: max elevation too low');
-if (min > 4) fail('no lowlands');
-
-// city plateau is perfectly flat at CITY_ELEV
-const { cityMin, cityMax } = c1.World;
-let flat = true;
-for (let y = cityMin; y < cityMax && flat; y++)
-  for (let x = cityMin; x < cityMax; x++)
-    if (elev[y * W + x] !== c1.CFG.CITY_ELEV) { flat = false; break; }
-flat ? ok(`city plateau flat at elev ${c1.CFG.CITY_ELEV}`) : fail('city plateau not flat');
-
-// rivers exist, entirely outside the city
-let water = 0, waterInCity = 0;
-for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-  if (type[y * W + x] === c1.T_WATER) {
-    water++;
-    if (x >= cityMin && x < cityMax && y >= cityMin && y < cityMax) waterInCity++;
-  }
+// tree density: forests exist but are not wall-to-wall
+let trees = 0, cells = 0;
+for (let ix = -400; ix < 400; ix += 2) for (let iy = -400; iy < 400; iy += 2) {
+  cells++;
+  if (c.treeAt(ix, iy)) trees++;
 }
-water > 60 ? ok(`water cells: ${water}`) : fail(`too little water: ${water}`);
-waterInCity === 0 ? ok('no water inside the city') : fail(`water in city: ${waterInCity}`);
+const density = trees / cells;
+(density > 0.005 && density < 0.12)
+  ? ok(`tree density ${(density * 100).toFixed(2)}% over ${cells} cells`)
+  : fail(`tree density out of range: ${(density * 100).toFixed(2)}%`);
 
-// water is never uphill of its surroundings by more than a step (sane carving)
-let badBank = 0;
-for (let y = 1; y < W - 1; y++) for (let x = 1; x < W - 1; x++) {
-  if (type[y * W + x] !== c1.T_WATER) continue;
-  const e = elev[y * W + x];
-  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    if (elev[(y + dy) * W + x + dx] < e - 1 &&
-        type[(y + dy) * W + x + dx] !== c1.T_WATER) badBank++;
-  }
+// tree params sane
+let badTree = 0;
+for (let ix = -50; ix < 50; ix++) for (let iy = -50; iy < 50; iy++) {
+  const t = c.treeAt(ix, iy);
+  if (!t) continue;
+  if (t.cx < ix || t.cx > ix + 1 || t.cy < iy || t.cy > iy + 1) badTree++;
+  if (t.r < 0.9 || t.r > 1.6 || t.trunkH < 2.5 || t.trunkH > 3.9) badTree++;
 }
-badBank === 0 ? ok('river banks are never below their water') :
-  console.log(`  warn  ${badBank} bank cells below water level (minor carving artifacts)`);
+badTree === 0 ? ok('tree params in range') : fail(`${badTree} trees out of range`);
 
-// packing round-trip: elev survives bits 25..31
-for (const e of [0, 1, 31, 63]) {
-  const word = ((e & 0x7f) << 25) | (1 << 24) | (3 & 0xff);
-  const back = (word >>> 25) & 0x7f;
-  if (back !== e) fail(`packing round-trip failed for elev ${e}`);
+// spawn: dry, gentle, reachable
+const [sx, sy] = c.World.findSpawn();
+const sh = c.terrainH(sx, sy);
+(sh >= c.CFG.SEA_LEVEL + 0.6)
+  ? ok(`spawn at ${sx.toFixed(1)},${sy.toFixed(1)} h=${sh.toFixed(2)}`)
+  : fail(`spawn is wet: h=${sh.toFixed(2)}`);
+
+// far-field: the world keeps producing sane terrain a long way out
+for (const d of [1e4, 1e5]) {
+  const h = c.terrainH(d, -d);
+  (h >= 0 && h <= c.CFG.TERRAIN_MAX) ? ok(`sane at distance ${d}: h=${h.toFixed(2)}`)
+    : fail(`broken at distance ${d}: h=${h}`);
 }
-ok('elev packing round-trips through bits 25..31');
-
-// city untouched by rivers implies roads/buildings still exist
-let bldg = 0;
-for (let i = 0; i < type.length; i++) if (type[i] === c1.T_BLDG) bldg++;
-bldg > 2000 ? ok(`buildings: ${bldg} cells`) : fail(`city looks broken: ${bldg} building cells`);
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\nterrain tests passed');

@@ -34,17 +34,11 @@
 // Global configuration. Plain script, shared global scope (inlined at build time).
 const CFG = {
   PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
-  MAX_DIST: 60,       // ray cutoff (world cells)
+  MAX_DIST: 90,       // ray cutoff (world units); beyond fades to haze
   EYE: 1.55,          // camera height above ground
-  WORLD: 192,         // world grid size (cells per side)
-  CITY: 96,           // city core size, centered; the rest is open ground
-  SEED: 20260815,
-  CAR_COUNT: 42,
-  PED_COUNT: 70,
+  SEED: 20260815,     // world seed; integral so it survives the f32 uniform
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
-  // palette: hard yellow sun against a deep blue sky, with the ambient term
-  // kept low so shadows go dark and the sunlight reads as the only real light
   SUN_COL: [1.00, 0.86, 0.46],
   SUN_I: 1.55,
   AMB_COL: [0.20, 0.31, 0.55],
@@ -53,484 +47,165 @@ const CFG = {
   SKY_ZENITH: [0.04, 0.10, 0.32],
   GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
   // Tone curve applied before glyph selection. White sits at the luminance
-  // sunlit surfaces actually reach (~0.79 here); above that the brightest
-  // glyphs go unused, below it they clip and the highlights flatten.
+  // sunlit surfaces actually reach; above that the brightest glyphs go
+  // unused, below it they clip and the highlights flatten.
   TONE_BLACK: 0.0,
   TONE_WHITE: 0.90,
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
-  SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
-  // Near zero: a shadowed point receives sky light, not sunlight. Leaving a
-  // slice of the warm sun in shadow tints it yellow instead of blue.
-  SHADOW: 0.04,
-  // Angular radius of the sun disc, which sets penumbra width. The real sun
-  // is 0.0047 rad; 0.05 was eleven times that and smeared every shadow edge.
-  // This keeps penumbrae that widen with distance, but with a crisp contact.
-  SUN_ANGLE: 0.018,
-  // stratified, so these go a lot further than the same count of random rays.
-  // ~20k cells x 48 rays is small work for a GPU; raise if grain remains.
+  SUN_EL: 0.7,        // sun elevation (rad)
+  SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
+  SUN_ANGLE: 0.018,   // angular radius of the sun disc -> penumbra softness
   SUN_SAMPLES: 16,    // shadow rays per pixel
   AO_SAMPLES: 32,     // hemisphere rays per pixel
-  AO_RADIUS: 9,       // AO ray length, in world cells
+  AO_RADIUS: 9,       // AO ray length, world units
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
-  // terrain: elevation is stored per cell in 0.5-unit steps (elev 0..63),
-  // packed into cell-word bits 25..31. The city sits on one flat level.
-  ELEV_STEP: 0.5,
-  ELEV_MAX: 63,
-  CITY_ELEV: 6,       // city plateau, in elev steps (z = 3.0)
-  TERRAIN_AMP: 26,    // noise amplitude, elev steps
-  MOUNTAIN_AMP: 30,   // additional rise toward the world edges
+  // terrain: a continuous, infinite heightfield evaluated in the shader and
+  // mirrored in js/util.js. No stored grid, no world bounds.
+  TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units
+  SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
+  // entities (future creatures); buffer capacity fixed, live count per frame
+  MAX_ENTS: 64,
 };
-
-// Cell types
-const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4, T_WATER = 5;
-// Prop kinds (street furniture), must match the shader constants
-const P_NONE = 0, P_LIGHT = 1, P_BIN = 2, P_BOARD = 3;
-// Cell flags
-const F_LANE = 1, F_ROAD_V = 2, F_ROAD_H = 4;
 </script>
 <script>
 // ---- js/util.js ----
-// Seeded RNG + hashing helpers.
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-// Fast integer hash -> [0,1). Deterministic per (x,y,z) triple.
-function hash3(x, y, z) {
-  let h = (x * 374761393 + y * 668265263 + z * 2147483647) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
+// Hashing / noise / terrain — bit-compatible mirrors of the WGSL functions in
+// js/webgpu/shaders.js. The GPU draws the world from these functions and the
+// CPU collides against them, so any change MUST be made in both places.
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-// 2D value noise over hash3, smoothstep-interpolated, range [0,1).
-// Deterministic in (x, y, seed) — no sequence state, safe to sample in any order.
-function vnoise2(x, y, seed) {
-  const xi = Math.floor(x), yi = Math.floor(y);
-  const fx = x - xi, fy = y - yi;
+function smoothstep(a, b, x) {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+// u32 hash, identical to WGSL uhash (Math.imul == u32 multiply wrap)
+function jsUhash(a, b) {
+  let n = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663)) >>> 0;
+  n = (n ^ (n >>> 13)) >>> 0;
+  n = Math.imul(n, 1274126177) >>> 0;
+  return (n ^ (n >>> 16)) >>> 0;
+}
+
+function hash01(x, y, s) {
+  return jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, s >>> 0) / 4294967296;
+}
+
+function hash2i(x, y, s) {
+  const h = jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, s >>> 0);
+  return [(h & 0xffff) / 65536, ((h >>> 16) & 0xffff) / 65536];
+}
+
+// 2D value noise, smoothstep-interpolated — mirror of WGSL vn2
+function vn2(px, py, s) {
+  const ix = Math.floor(px), iy = Math.floor(py);
+  const fx = px - ix, fy = py - iy;
   const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
-  const a = hash3(xi, yi, seed), b = hash3(xi + 1, yi, seed);
-  const c = hash3(xi, yi + 1, seed), d = hash3(xi + 1, yi + 1, seed);
+  const a = hash01(ix, iy, s), b = hash01(ix + 1, iy, s);
+  const c = hash01(ix, iy + 1, s), d = hash01(ix + 1, iy + 1, s);
   return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
 }
 
-// fractal sum, 3 octaves
-function fbm2(x, y, seed) {
-  return vnoise2(x, y, seed) * 0.55 +
-         vnoise2(x * 2.13, y * 2.13, seed ^ 0x9e37) * 0.28 +
-         vnoise2(x * 4.31, y * 4.31, seed ^ 0x51ed) * 0.17;
+// -------- terrain height — mirror of WGSL terrainH --------
+function terrainH(px, py) {
+  const s = CFG.SEED >>> 0;
+  const wx = vn2(px * 0.013, py * 0.013, (s ^ 0x77) >>> 0);
+  const wy = vn2(px * 0.013 + 37.0, py * 0.013 + 91.0, (s ^ 0x77) >>> 0);
+  const qx = px * 0.023 + (wx - 0.5) * 1.4;
+  const qy = py * 0.023 + (wy - 0.5) * 1.4;
+  let h = vn2(qx, qy, s) * 0.62 +
+          vn2(qx * 2.7, qy * 2.7, (s ^ 0x9e37) >>> 0) * 0.26 +
+          vn2(qx * 6.1, qy * 6.1, (s ^ 0x51ed) >>> 0) * 0.12;
+  h = Math.pow(h, 1.55);
+  return h * CFG.TERRAIN_MAX;
+}
+
+// -------- tree placement — mirror of WGSL treeAt --------
+// returns null or { cx, cy, r, trunkH, trunkR }
+function treeAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  const forest = vn2(ix * 0.021, iy * 0.021, (s ^ 0xF0F0) >>> 0);
+  const density = smoothstep(0.45, 0.72, forest) * 0.16 + 0.004;
+  if (hash01(ix, iy, (s ^ 0x7EE7) >>> 0) >= density) return null;
+  const h2 = hash2i(ix, iy, (s ^ 0xA11C) >>> 0);
+  const r = 1.0 + h2[0] * 0.5;
+  return {
+    cx: ix + 0.3 + h2[0] * 0.4,
+    cy: iy + 0.3 + h2[1] * 0.4,
+    r,
+    trunkH: 2.6 + h2[1] * 1.2,
+    trunkR: 0.085 + r * 0.055,
+  };
 }
 </script>
 <script>
 // ---- js/world.js ----
-// Procedural world: terrain heightmap with rivers, a city plateau (road
-// lattice, sidewalks, building footprints, plazas), trees, street furniture.
+// World queries over the infinite procedural terrain. The heavy lifting —
+// heightfield and tree placement — lives in js/util.js as bit-compatible
+// mirrors of the shader; this module is the gameplay-facing API on top.
+// Authored sites (ruins, lore) will register here in a later phase.
 const World = {
-  type: null, height: null, flags: null, bcol: null, bseed: null,
-  roadX: [], roadY: [],
+  groundZ(x, y) { return terrainH(x, y); },
 
-  base: null,   // ground type beneath a tree cell, so trees keep their paving
-  elev: null,   // ground elevation in ELEV_STEP units (0..ELEV_MAX)
+  isWater(x, y) { return terrainH(x, y) < CFG.SEA_LEVEL; },
 
-  idx(x, y) { return y * CFG.WORLD + x; },
-
-  // ground z in world units
-  groundZ(x, y) {
-    const xi = Math.floor(x), yi = Math.floor(y);
-    if (!this.inBounds(xi, yi)) return 0;
-    return this.elev[this.idx(xi, yi)] * CFG.ELEV_STEP;
+  // nearest tree trunk within `reach` cells of (x, y), or null
+  trunkNear(x, y, reach) {
+    const cx = Math.floor(x), cy = Math.floor(y);
+    let best = null, bestD = Infinity;
+    for (let oy = -reach; oy <= reach; oy++) {
+      for (let ox = -reach; ox <= reach; ox++) {
+        const tr = treeAt(cx + ox, cy + oy);
+        if (!tr) continue;
+        const d = Math.hypot(tr.cx - x, tr.cy - y);
+        if (d < bestD) { bestD = d; best = tr; }
+      }
+    }
+    return best && { tree: best, dist: bestD };
   },
 
-  inBounds(x, y) { return x >= 0 && y >= 0 && x < CFG.WORLD && y < CFG.WORLD; },
-
-  cellType(x, y) {
-    if (!this.inBounds(x, y)) return T_BLDG; // world edge is solid
-    return this.type[this.idx(x, y)];
-  },
-
-  isSolid(x, y) {
-    const t = this.cellType(x, y);
-    return t === T_BLDG || t === T_TREE;
-  },
-
-  generate(seed) {
-    const W = CFG.WORLD, rng = mulberry32(seed);
-    const N = W * W;
-    this.type = new Uint8Array(N);
-    this.base = new Uint8Array(N);
-    this.height = new Uint8Array(N);
-    this.flags = new Uint8Array(N);
-    this.bcol = new Uint8Array(N);
-    this.bseed = new Uint8Array(N);
-    this.elev = new Uint8Array(N);
-
-    // City core is centered; everything outside stays open ground
-    const c0 = (W - CFG.CITY) >> 1, c1 = c0 + CFG.CITY;
-    this.cityMin = c0; this.cityMax = c1;
-
-    this.genTerrain(seed, c0, c1);
-
-    // Road lines (3 cells wide, center cell carries lane dashes)
-    this.roadX = []; this.roadY = [];
-    let p = c0 + 4 + ((rng() * 4) | 0);
-    while (p < c1 - 6) { this.roadX.push(p); p += 9 + ((rng() * 8) | 0); }
-    p = c0 + 4 + ((rng() * 4) | 0);
-    while (p < c1 - 6) { this.roadY.push(p); p += 9 + ((rng() * 8) | 0); }
-
-    for (const cx of this.roadX) {
-      for (let y = c0; y < c1; y++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const i = this.idx(cx + dx, y);
-          this.type[i] = T_ROAD;
-          this.flags[i] |= F_ROAD_V;
-          if (dx === 0 && (y % 4) < 2) this.flags[i] |= F_LANE;
-        }
-      }
-    }
-    for (const cy of this.roadY) {
-      for (let x = c0; x < c1; x++) {
-        for (let dy = -1; dy <= 1; dy++) {
-          const i = this.idx(x, cy + dy);
-          this.type[i] = T_ROAD;
-          this.flags[i] |= F_ROAD_H;
-          if (dy === 0 && (x % 4) < 2) this.flags[i] |= F_LANE;
-          else if (dy === 0) this.flags[i] &= ~F_LANE; // intersections: H wins, no double dashes
-        }
-      }
-    }
-
-    // Sidewalks: ring around roads
-    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-      if (this.type[this.idx(x, y)] !== 0) continue;
-      let nearRoad = false;
-      for (let dy = -1; dy <= 1 && !nearRoad; dy++)
-        for (let dx = -1; dx <= 1; dx++)
-          if (this.inBounds(x + dx, y + dy) && this.type[this.idx(x + dx, y + dy)] === T_ROAD) { nearRoad = true; break; }
-      if (nearRoad) this.type[this.idx(x, y)] = T_WALK;
-    }
-
-    // Block interiors: buildings on a 3x3 footprint grid, some plazas with trees.
-    // Outside the city core: open plains with scattered trees.
-    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-      const i = this.idx(x, y);
-      if (this.type[i] !== T_GRASS) continue;
-      if (x < c0 || y < c0 || x >= c1 || y >= c1) {
-        if (hash3(x, y, seed ^ 0x7777) < 0.015) {
-          this.base[i] = this.type[i];
-          this.type[i] = T_TREE;
-          this.height[i] = 2 + ((hash3(x, y, seed ^ 0x78) * 2) | 0);
-        }
-        continue;
-      }
-      const fx = (x / 3) | 0, fy = (y / 3) | 0;
-      const hzone = hash3(fx, fy, seed);
-      if (hzone < 0.16) {
-        // plaza: grass, scattered trees
-        if (hash3(x, y, seed ^ 0x5111) < 0.18) {
-          this.base[i] = this.type[i];
-          this.type[i] = T_TREE;
-          this.height[i] = 2 + ((hash3(x, y, seed ^ 0x77) * 2) | 0);
-        }
-        continue;
-      }
-      this.type[i] = T_BLDG;
-      const tall = hash3(fx, fy, seed ^ 0x9e37) < 0.13;
-      this.height[i] = tall
-        ? 12 + ((hash3(fx, fy, seed ^ 0xabc) * 15) | 0)
-        : 3 + ((hash3(fx, fy, seed ^ 0xdef) * 6) | 0);
-      this.bcol[i] = (hash3(fx, fy, seed ^ 0x321) * 5) | 0;
-      this.bseed[i] = (hash3(fx, fy, seed ^ 0x654) * 255) | 0;
-    }
-
-    // Street trees: sparse, on sidewalk cells not directly beside a lane crossing
-    for (let y = 1; y < W - 1; y++) for (let x = 1; x < W - 1; x++) {
-      const i = this.idx(x, y);
-      if (this.type[i] === T_WALK && hash3(x, y, seed ^ 0x1234) < 0.045) {
-        this.base[i] = this.type[i];
-        this.type[i] = T_TREE;
-        this.height[i] = 2 + ((hash3(x, y, seed ^ 0x88) * 2) | 0);
-      }
-    }
-  },
-
-  // Terrain: fractal heightmap, mountains rising toward the world edges, the
-  // city flattened onto one plateau with a blended skirt, and rivers walked
-  // downhill from high ground, carving T_WATER.
-  genTerrain(seed, c0, c1) {
-    const W = CFG.WORLD;
-    const cx = (c0 + c1) / 2, cy = cx;
-    const cityR = (c1 - c0) / 2;
-
-    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-      const i = this.idx(x, y);
-      // base rolling terrain; the power remap deepens valleys toward zero
-      // rather than letting fbm hover around its mean
-      const n = fbm2(x / 26, y / 26, seed ^ 0x7e11);
-      let e = Math.pow(n, 1.7) * CFG.TERRAIN_AMP * 1.25;
-      // mountains toward the edges: ramp on chebyshev distance from centre
-      const edge = Math.max(Math.abs(x - W / 2), Math.abs(y - W / 2)) / (W / 2);
-      const ridge = fbm2(x / 14, y / 14, seed ^ 0x0be1);
-      e += Math.pow(Math.max(0, edge - 0.55) / 0.45, 1.6) * CFG.MOUNTAIN_AMP * (0.55 + ridge * 0.7);
-
-      // flatten the city plateau; blend across a skirt outside it
-      const dx = Math.max(0, Math.abs(x - cx) - cityR);
-      const dy = Math.max(0, Math.abs(y - cy) - cityR);
-      const dOut = Math.hypot(dx, dy);          // 0 inside the core
-      const SKIRT = 14;
-      if (dOut <= 0) e = CFG.CITY_ELEV;
-      else if (dOut < SKIRT) {
-        const t = dOut / SKIRT;
-        const s = t * t * (3 - 2 * t);
-        e = CFG.CITY_ELEV * (1 - s) + e * s;
-      }
-      this.elev[i] = clamp(Math.round(e), 0, CFG.ELEV_MAX);
-    }
-
-    // rivers: start at high points in opposite quadrants, walk downhill
-    this.carveRiver(seed ^ 0xA1, (W * 0.18) | 0, (W * 0.22) | 0);
-    this.carveRiver(seed ^ 0xB2, (W * 0.80) | 0, (W * 0.76) | 0);
-  },
-
-  carveRiver(seed, sx, sy) {
-    const W = CFG.WORLD;
-    // find the highest cell in a small search window around the start
-    let bx = sx, by = sy, be = -1;
-    for (let y = Math.max(1, sy - 8); y < Math.min(W - 1, sy + 8); y++)
-      for (let x = Math.max(1, sx - 8); x < Math.min(W - 1, sx + 8); x++)
-        if (this.elev[this.idx(x, y)] > be) { be = this.elev[this.idx(x, y)]; bx = x; by = y; }
-
-    let x = bx, y = by, px = 0, py = 0;
-    for (let step = 0; step < 600; step++) {
-      // carve: centre + orthogonal neighbours, banks flattened to water level
-      const level = this.elev[this.idx(x, y)];
-      for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx, ny = y + dy;
-        if (!this.inBounds(nx, ny)) continue;
-        const j = this.idx(nx, ny);
-        if (dx === 0 && dy === 0) {
-          this.type[j] = T_WATER;
-          this.elev[j] = Math.max(0, level - 1);
-        } else if (this.type[j] !== T_WATER) {
-          this.elev[j] = Math.min(this.elev[j], level);
-        }
-      }
-      // steepest descent among 8 neighbours, with momentum as tiebreak and a
-      // strong penalty for stepping toward the city: the plateau skirt is the
-      // local downhill in half the map, and rivers must flow outward, not
-      // pool against the city buffer
-      const W2 = CFG.WORLD / 2;
-      const distC = Math.hypot(x - W2, y - W2);
-      let nbx = x, nby = y, nbe = Infinity;
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-        if (!dx && !dy) continue;
-        const nx = x + dx, ny = y + dy;
-        if (!this.inBounds(nx, ny)) return;           // reached the world edge
-        const inward = Math.hypot(nx - W2, ny - W2) < distC ? 2.2 : 0;
-        const e = this.elev[this.idx(nx, ny)] + inward
-          + (dx === px && dy === py ? -0.35 : 0)
-          + hash3(nx, ny, seed) * 0.6;                // meander
-        if (e < nbe) { nbe = e; nbx = nx; nby = ny; }
-      }
-      if (nbe > this.elev[this.idx(x, y)] + 4) {
-        // only steep uphill or inward left: treat as a pit
-        nbx = x; nby = y;
-      }
-      if (nbx === x && nby === y) {
-        // stuck in a pit: pool out a small lake and stop
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (!this.inBounds(nx, ny)) continue;
-          const j = this.idx(nx, ny);
-          this.type[j] = T_WATER;
-          this.elev[j] = this.elev[this.idx(x, y)];
-        }
-        return;
-      }
-      px = nbx - x; py = nby - y;
-      x = nbx; y = nby;
-      // never carve through the city plateau
-      if (x >= this.cityMin - 2 && x < this.cityMax + 2 &&
-          y >= this.cityMin - 2 && y < this.cityMax + 2) return;
-    }
-  },
-
-  // Street furniture on kerbside pavement, facing the road it serves.
-  // Stored per cell as kind | variant<<8, where the variant's low two bits
-  // are the facing and the rest selects a billboard sign.
-  placeProps(seed) {
-    const W = CFG.WORLD, N = W * W;
-    this.prop = new Uint32Array(N);
-    const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
-
-    for (let y = 2; y < W - 2; y++) for (let x = 2; x < W - 2; x++) {
-      const i = this.idx(x, y);
-      if (this.type[i] !== T_WALK) continue;
-
-      // face whichever side the carriageway is on
-      let q = -1;
-      for (let d = 0; d < 4; d++) {
-        if (this.cellType(x + DIRS[d][0], y + DIRS[d][1]) === T_ROAD) { q = d; break; }
-      }
-      if (q < 0) continue;
-
-      if ((x * 3 + y * 5) % 17 === 0) {
-        this.prop[i] = P_LIGHT | (q << 8);
-        continue;
-      }
-      if (hash3(x, y, seed ^ 0xB2) < 0.035) {
-        this.prop[i] = P_BIN | (q << 8);
-        continue;
-      }
-      if (hash3(x, y, seed ^ 0xC3) < 0.022) {
-        // the panel is wide, so keep the span along the kerb clear; a building
-        // directly behind it is fine and in fact typical
-        const [px, py] = [-DIRS[q][1], DIRS[q][0]];
-        let clear = true;
-        for (let s = -1; s <= 1; s++) {
-          const t = this.cellType(x + px * s, y + py * s);
-          if (t === T_BLDG) { clear = false; break; }
-        }
-        if (!clear) continue;
-        const sign = (hash3(x, y, seed ^ 0xD4) * 8) | 0;
-        this.prop[i] = P_BOARD | ((q | (sign << 2)) << 8);
-      }
-    }
-  },
-
-  // A road intersection near the world center, for player spawn
+  // spiral out from the origin for dry, walkable ground
   findSpawn() {
-    const cx = CFG.WORLD / 2;
-    let best = null, bestD = 1e9;
-    for (const rx of this.roadX) for (const ry of this.roadY) {
-      const d = (rx - cx) * (rx - cx) + (ry - cx) * (ry - cx);
-      if (d < bestD) { bestD = d; best = [rx + 0.5, ry + 0.5]; }
+    for (let r = 0; r < 400; r += 3) {
+      for (let a = 0; a < Math.PI * 2; a += 0.7) {
+        const x = Math.cos(a) * r, y = Math.sin(a) * r;
+        const h = terrainH(x, y);
+        if (h < CFG.SEA_LEVEL + 0.6) continue;
+        // gentle ground: sample slope
+        const s = Math.abs(terrainH(x + 1, y) - h) + Math.abs(terrainH(x, y + 1) - h);
+        if (s < 0.8) return [x, y];
+      }
     }
-    return best || [cx, cx];
-  },
-};
-</script>
-<script>
-// ---- js/light.js ----
-// Sun direction and world bounds for the GPU renderer. Shadows and ambient
-// occlusion are both traced per pixel in the compute shader, so nothing is
-// baked here any more — this only supplies the height bound that lets a
-// shadow ray stop once it has climbed clear of all geometry.
-const Light = {
-  sunX: 0, sunY: 0, tanEl: 0, maxH: 0,
-
-  bake() {
-    this.sunX = Math.cos(CFG.SUN_AZ);
-    this.sunY = Math.sin(CFG.SUN_AZ);
-    this.tanEl = Math.tan(CFG.SUN_EL);
-    // bound for shadow-ray early-out: highest point of terrain + building
-    this.maxH = 0;
-    for (let i = 0; i < World.height.length; i++) {
-      const top = World.elev[i] * CFG.ELEV_STEP + World.height[i];
-      if (top > this.maxH) this.maxH = top;
-    }
+    return [0, 0];
   },
 };
 </script>
 <script>
 // ---- js/entities.js ----
-// Ambient traffic: cars follow the road lattice, pedestrians wander sidewalks.
+// Creatures and other mobile things. The city traffic is gone with the city;
+// this list will hold wardens and NPCs from the creature phase onward.
+// Each entry: { x, y, heading, kind, e1: [a, b, c, d] } packed as two vec4
+// per entity for the GPU (kind-specific extras in e1; e1[0] is ground z).
 const Entities = {
-  cars: [], peds: [],
+  list: [],
 
-  init(seed) {
-    const rng = mulberry32(seed ^ 0xC0FFEE);
-    this.cars = []; this.peds = [];
-
-    const roadCells = [], walkCells = [];
-    for (let y = 0; y < CFG.WORLD; y++) for (let x = 0; x < CFG.WORLD; x++) {
-      const t = World.type[World.idx(x, y)];
-      if (t === T_ROAD) roadCells.push([x, y]);
-      else if (t === T_WALK) walkCells.push([x, y]);
-    }
-
-    for (let i = 0; i < CFG.CAR_COUNT && roadCells.length; i++) {
-      const [x, y] = roadCells[(rng() * roadCells.length) | 0];
-      const f = World.flags[World.idx(x, y)];
-      let dx = 0, dy = 0;
-      if (f & F_ROAD_V) { dy = rng() < 0.5 ? 1 : -1; }
-      else { dx = rng() < 0.5 ? 1 : -1; }
-      this.cars.push({
-        x: x + 0.5, y: y + 0.5, dx, dy,
-        speed: 2.2 + rng() * 1.8,
-        col: (rng() * 5) | 0,
-      });
-    }
-
-    for (let i = 0; i < CFG.PED_COUNT && walkCells.length; i++) {
-      const [x, y] = walkCells[(rng() * walkCells.length) | 0];
-      this.peds.push({
-        x: x + 0.5, y: y + 0.5, tx: x + 0.5, ty: y + 0.5,
-        speed: 0.6 + rng() * 0.6,
-        shade: 0.55 + rng() * 0.45,
-      });
-    }
-  },
+  init() { this.list = []; },
 
   update(dt, time) {
-    for (const c of this.cars) {
-      const nx = c.x + c.dx * c.speed * dt;
-      const ny = c.y + c.dy * c.speed * dt;
-      const cellAhead = World.cellType(
-        Math.floor(nx + c.dx * 0.6), Math.floor(ny + c.dy * 0.6));
-      if (cellAhead === T_ROAD) { c.x = nx; c.y = ny; }
-      else {
-        // pick a new road direction from the current cell
-        const cx = Math.floor(c.x), cy = Math.floor(c.y);
-        const opts = [];
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          if (dx === -c.dx && dy === -c.dy) continue; // no U-turn unless stuck
-          if (World.cellType(cx + dx * 2, cy + dy * 2) === T_ROAD) opts.push([dx, dy]);
-        }
-        if (opts.length === 0) { c.dx = -c.dx; c.dy = -c.dy; }
-        else {
-          const pick = opts[(hash3(cx, cy, (time * 997) | 0) * opts.length) | 0];
-          c.dx = pick[0]; c.dy = pick[1];
-          c.x = cx + 0.5; c.y = cy + 0.5;
-        }
-      }
-    }
-
-    for (const p of this.peds) {
-      const ddx = p.tx - p.x, ddy = p.ty - p.y;
-      const d = Math.hypot(ddx, ddy);
-      if (d < 0.08) {
-        // choose a new adjacent sidewalk cell
-        const cx = Math.floor(p.x), cy = Math.floor(p.y);
-        const opts = [];
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]])
-          if (World.cellType(cx + dx, cy + dy) === T_WALK) opts.push([dx, dy]);
-        if (opts.length) {
-          const pick = opts[(hash3(cx, cy, ((time * 613) | 0) ^ 0x99) * opts.length) | 0];
-          p.tx = cx + pick[0] + 0.5; p.ty = cy + pick[1] + 0.5;
-        }
-      } else {
-        p.x += (ddx / d) * p.speed * dt;
-        p.y += (ddy / d) * p.speed * dt;
-      }
-    }
+    // nothing ambient yet
   },
 };
 </script>
 <script>
 // ---- js/player.js ----
-// First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
+// First-person player over the infinite terrain: WASD move, arrows/mouse
+// look, slope- and water-limited movement, trunk-circle tree collision.
 const Player = {
   x: 0, y: 0, z: 0, angle: 0.6,
-  pitch: 0, // vertical look, radians; ±90° is straight up/down
+  pitch: 0, // radians; ±90° is straight up/down
   keys: {},
 
   init() {
@@ -557,8 +232,6 @@ const Player = {
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => canvas.requestPointerLock());
     const locked = () => document.pointerLockElement === canvas;
-    // browsers can fire one huge bogus movement delta when pointer lock
-    // engages or the cursor re-syncs; skip the first events and clamp the rest
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
@@ -567,22 +240,19 @@ const Player = {
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);
       this.angle += mx * 0.0022;
-      // real camera pitch. Full range: straight up to straight down. It stops
-      // a hair short of the poles, where the camera basis would degenerate.
       const LIM = Math.PI / 2 - 0.001;
       this.pitch = clamp(this.pitch - my * 0.0022, -LIM, LIM);
     });
   },
 
   blocked(x, y) {
-    const R = 0.22;
-    for (const [ox, oy] of [[-R, -R], [R, -R], [-R, R], [R, R]]) {
-      const cx = Math.floor(x + ox), cy = Math.floor(y + oy);
-      if (World.isSolid(cx, cy)) return true;
-      if (World.cellType(cx, cy) === T_WATER) return true;     // no swimming
-      // terrain step limit: refuse climbs or drops steeper than 1.0 units
-      if (Math.abs(World.groundZ(cx + 0.5, cy + 0.5) - this.z) > 1.0) return true;
-    }
+    // water and steep terrain
+    const h = World.groundZ(x, y);
+    if (h < CFG.SEA_LEVEL + 0.05) return true;
+    if (Math.abs(h - this.z) > 1.0) return true;
+    // tree trunks: circle test against nearby hash-placed trees
+    const near = World.trunkNear(x, y, 1);
+    if (near && near.dist < near.tree.trunkR + 0.22) return true;
     return false;
   },
 
@@ -605,11 +275,11 @@ const Player = {
     const len = Math.hypot(mx, my);
     if (len > 0.001) {
       mx = mx / len * spd; my = my / len * spd;
-      // axis-separated collision so we slide along walls
+      // axis-separated collision so we slide along obstacles
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
     }
-    // ride the terrain, smoothed so cell steps read as a walk not a jolt
+    // ride the terrain, smoothed
     const gz = World.groundZ(this.x, this.y);
     this.z += (gz - this.z) * Math.min(1, dt * 10);
   },
@@ -749,12 +419,17 @@ const GlyphAtlas = {
 // ---- js/webgpu/shaders.js ----
 // WGSL sources.
 //
-// Pass 1 (compute): one invocation per low-res cell, each casting a TRUE 3D
-// ray — the camera basis is genuinely rotated by pitch, so vertical world
-// edges converge to a third vanishing point instead of staying parallel as
-// they do in a column-raycaster with a sheared horizon. Rays march the height
-// field (DDA in xy, linear in z), hit building sides, roofs, the ground, or
-// entity boxes, then trace a real shadow ray toward the sun and shade.
+// Pass 1 (compute): one invocation per low-res cell, each casting a true 3D
+// ray into an INFINITE procedural world. Terrain is a continuous noise
+// function of world position evaluated in the shader — nothing is stored, so
+// the world has no edges and no cell steps: rays march the smooth heightfield
+// and normals come from its gradient. Trees are placed by deterministic hash
+// per integer cell and traced as trunk + translucent canopy. Water is a sea
+// level plane. Sun visibility is a real marched shadow ray; AO is traced
+// hemisphere rays. Entities (future creatures) are articulated primitives.
+//
+// The same hash/noise functions are mirrored in js/util.js so CPU collision
+// agrees with what the GPU draws.
 //
 // Pass 2 (render): a fullscreen triangle maps each low-res cell to a glyph
 // chosen by luminance and upscales it.
@@ -768,69 +443,136 @@ struct Uniforms {
   right     : vec3f,
   maxDist   : f32,
   up        : vec3f,
-  gridSize  : f32,
+  seed      : f32,   // world seed, integral, folded into every hash
   sunDir    : vec3f,
   shadowK   : f32,
   tanX      : f32,
   tanY      : f32,
-  maxHeight : f32,
+  maxHeight : f32,   // terrain amplitude bound for shadow-ray early-out
   entCount  : f32,
-  sunAngle  : f32,   // angular radius of the sun disc -> penumbra width
+  sunAngle  : f32,
   sunSamples: f32,
   aoSamples : f32,
   aoRadius  : f32,
-  treeReach : f32,   // cells to search for overhanging canopies and props
-  signCount : f32,   // rows in the billboard sign atlas
+  treeReach : f32,   // cells to search for overhanging canopies
+  seaLevel  : f32,
   time      : f32,
   pad1      : f32,
   sunCol    : vec3f,
   sunI      : f32,
   ambCol    : vec3f,
   ambI      : f32,
-  skyLo     : vec3f,   // horizon
+  skyLo     : vec3f,
   pad2      : f32,
-  skyHi     : vec3f,   // zenith
+  skyHi     : vec3f,
   pad3      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
-@group(0) @binding(1) var<storage, read> cells : array<u32>;
-@group(0) @binding(2) var outTex : texture_storage_2d<rgba8unorm, write>;
-// two vec4 per entity: (x, y, heading, kind) and (halfLen, halfWid, height, phase)
-@group(0) @binding(3) var<storage, read> ents : array<vec4f>;
-// per cell: propKind | variant<<8
-@group(0) @binding(4) var<storage, read> props : array<u32>;
-@group(0) @binding(5) var signTex : texture_2d<f32>;
-@group(0) @binding(6) var signSamp : sampler;
+@group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
+// two vec4 per entity: (x, y, heading, kind) and kind-specific extras
+@group(0) @binding(2) var<storage, read> ents : array<vec4f>;
 
-const T_ROAD : u32 = 1u;
-const T_WALK : u32 = 2u;
-const T_BLDG : u32 = 3u;
-const T_TREE : u32 = 4u;
-const T_WATER : u32 = 5u;
-const ELEV_STEP : f32 = 0.5;   // world units per elevation step (bits 25..31)
+// -------- hashing / noise (mirrored in js/util.js) --------
 
-// g is the cell's ground elevation in world units; buildings span g .. g+h
-struct Cell { kind : u32, h : f32, base : u32, nearObj : bool, g : f32 };
-
-fn cellAt(x : i32, y : i32) -> Cell {
-  let gs = i32(U.gridSize);
-  var c : Cell;
-  if (x < 0 || y < 0 || x >= gs || y >= gs) {
-    c.kind = 0u; c.h = 0.0; c.base = 0u; c.nearObj = false; c.g = 0.0;
-    return c;
-  }
-  let p = cells[u32(y * gs + x)];
-  c.kind = p & 0xffu;
-  c.h = f32((p >> 8u) & 0xffu);
-  c.base = (p >> 16u) & 0xffu;
-  c.nearObj = ((p >> 24u) & 1u) != 0u;
-  c.g = f32((p >> 25u) & 0x7fu) * ELEV_STEP;
-  return c;
+fn uhash(a : u32, b : u32) -> u32 {
+  var n = (a * 73856093u) ^ (b * 19349663u);
+  n = n ^ (n >> 13u);
+  n = n * 1274126177u;
+  return n ^ (n >> 16u);
 }
 
-// value noise, for breaking the canopy up so it reads as leaves not a balloon
-fn uhash3(x : i32, y : i32, z : i32) -> u32 {
+fn hash01(x : i32, y : i32, s : u32) -> f32 {
+  let h = uhash(uhash(bitcast<u32>(x), bitcast<u32>(y)), s);
+  return f32(h) * (1.0 / 4294967296.0);
+}
+
+fn hash2i(x : i32, y : i32, s : u32) -> vec2f {
+  let h = uhash(uhash(bitcast<u32>(x), bitcast<u32>(y)), s);
+  return vec2f(f32(h & 0xffffu), f32((h >> 16u) & 0xffffu)) * (1.0 / 65536.0);
+}
+
+// 2D value noise, smoothstep-interpolated
+fn vn2(p : vec2f, s : u32) -> f32 {
+  let ip = vec2i(floor(p));
+  let f = p - floor(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let a = hash01(ip.x,     ip.y,     s);
+  let b = hash01(ip.x + 1, ip.y,     s);
+  let c = hash01(ip.x,     ip.y + 1, s);
+  let d = hash01(ip.x + 1, ip.y + 1, s);
+  return a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+}
+
+fn seedU() -> u32 { return u32(U.seed); }
+
+// -------- terrain: smooth, infinite. KEEP IN SYNC with js/util.js --------
+
+fn terrainH(p : vec2f) -> f32 {
+  let s = seedU();
+  let w = vec2f(vn2(p * 0.013, s ^ 0x77u),
+                vn2(p * 0.013 + vec2f(37.0, 91.0), s ^ 0x77u));
+  let q = p * 0.023 + (w - 0.5) * 1.4;
+  var h = vn2(q, s) * 0.62 + vn2(q * 2.7, s ^ 0x9e37u) * 0.26
+        + vn2(q * 6.1, s ^ 0x51edu) * 0.12;
+  h = pow(h, 1.55);            // deepen valleys, sharpen ridges
+  return h * U.maxHeight;
+}
+
+fn terrainN(p : vec2f) -> vec3f {
+  let e = 0.35;
+  let hx = terrainH(p + vec2f(e, 0.0)) - terrainH(p - vec2f(e, 0.0));
+  let hy = terrainH(p + vec2f(0.0, e)) - terrainH(p - vec2f(0.0, e));
+  return normalize(vec3f(-hx, -hy, 2.0 * e));
+}
+
+// march the heightfield; returns ray parameter or -1
+fn terrainT(ro : vec3f, rd : vec3f, tMax : f32) -> f32 {
+  if (ro.z >= U.maxHeight && rd.z >= 0.0) { return -1.0; }
+  var t = 0.02;
+  var tPrev = t;
+  for (var i = 0; i < 260; i = i + 1) {
+    if (t > tMax) { break; }
+    let p = ro + rd * t;
+    let d = p.z - terrainH(p.xy);
+    if (d < 0.0) {
+      var a = tPrev;
+      var b = t;
+      for (var j = 0; j < 7; j = j + 1) {
+        let m = (a + b) * 0.5;
+        let pm = ro + rd * m;
+        if (pm.z - terrainH(pm.xy) < 0.0) { b = m; } else { a = m; }
+      }
+      return (a + b) * 0.5;
+    }
+    tPrev = t;
+    t = t + clamp(d * 0.45, 0.06, 0.35 + t * 0.045);
+  }
+  return -1.0;
+}
+
+// -------- trees: hash-placed per integer cell. KEEP IN SYNC with js/util.js --------
+
+struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32 };
+
+fn treeAt(ix : i32, iy : i32) -> Tree {
+  var tr : Tree;
+  tr.present = false;
+  let s = seedU();
+  let forest = vn2(vec2f(f32(ix), f32(iy)) * 0.021, s ^ 0xF0F0u);
+  let density = smoothstep(0.45, 0.72, forest) * 0.16 + 0.004;
+  if (hash01(ix, iy, s ^ 0x7EE7u) >= density) { return tr; }
+  let h2 = hash2i(ix, iy, s ^ 0xA11Cu);
+  tr.cx = f32(ix) + 0.3 + h2.x * 0.4;
+  tr.cy = f32(iy) + 0.3 + h2.y * 0.4;
+  tr.r = 1.0 + h2.x * 0.5;
+  tr.trunkH = 2.6 + h2.y * 1.2;
+  tr.present = true;
+  return tr;
+}
+
+// 3D value noise for canopy erosion
+fn uhash3v(x : i32, y : i32, z : i32) -> u32 {
   return uhash(uhash(bitcast<u32>(x), bitcast<u32>(y)), bitcast<u32>(z));
 }
 fn vnoise(p : vec3f) -> f32 {
@@ -839,14 +581,14 @@ fn vnoise(p : vec3f) -> f32 {
   let u = f * f * (3.0 - 2.0 * f);
   let ix = i32(i.x); let iy = i32(i.y); let iz = i32(i.z);
   let s = 1.0 / 4294967296.0;
-  let c000 = f32(uhash3(ix,   iy,   iz  )) * s;
-  let c100 = f32(uhash3(ix+1, iy,   iz  )) * s;
-  let c010 = f32(uhash3(ix,   iy+1, iz  )) * s;
-  let c110 = f32(uhash3(ix+1, iy+1, iz  )) * s;
-  let c001 = f32(uhash3(ix,   iy,   iz+1)) * s;
-  let c101 = f32(uhash3(ix+1, iy,   iz+1)) * s;
-  let c011 = f32(uhash3(ix,   iy+1, iz+1)) * s;
-  let c111 = f32(uhash3(ix+1, iy+1, iz+1)) * s;
+  let c000 = f32(uhash3v(ix,   iy,   iz  )) * s;
+  let c100 = f32(uhash3v(ix+1, iy,   iz  )) * s;
+  let c010 = f32(uhash3v(ix,   iy+1, iz  )) * s;
+  let c110 = f32(uhash3v(ix+1, iy+1, iz  )) * s;
+  let c001 = f32(uhash3v(ix,   iy,   iz+1)) * s;
+  let c101 = f32(uhash3v(ix+1, iy,   iz+1)) * s;
+  let c011 = f32(uhash3v(ix,   iy+1, iz+1)) * s;
+  let c111 = f32(uhash3v(ix+1, iy+1, iz+1)) * s;
   let x00 = mix(c000, c100, u.x);
   let x10 = mix(c010, c110, u.x);
   let x01 = mix(c001, c101, u.x);
@@ -854,173 +596,23 @@ fn vnoise(p : vec3f) -> f32 {
   return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
 }
 
-// Trees are no longer part of the height field: they are traced as a trunk
-// cylinder plus a semi-transparent canopy sphere.
-fn isSolid(k : u32) -> bool { return k == T_BLDG; }
-fn isTree(k : u32) -> bool { return k == T_TREE; }
-
-// Integer hash. sin()-based hashes repeat and correlate across neighbouring
-// pixels, which shows up as structure in the sampling noise.
-fn uhash(a : u32, b : u32) -> u32 {
-  var n = (a * 73856093u) ^ (b * 19349663u);
-  n = n ^ (n >> 13u);
-  n = n * 1274126177u;
-  return n ^ (n >> 16u);
-}
-
-fn hash1(p : vec2f) -> f32 {
+fn hash1f(p : vec2f) -> f32 {
   let ip = vec2i(floor(p));
   return f32(uhash(bitcast<u32>(ip.x), bitcast<u32>(ip.y))) * (1.0 / 4294967296.0);
 }
 
-fn hash2(p : vec2f) -> vec2f {
-  let ip = vec2i(floor(p));
-  let h = uhash(bitcast<u32>(ip.x), bitcast<u32>(ip.y));
-  return vec2f(f32(h & 0xffffu), f32((h >> 16u) & 0xffffu)) * (1.0 / 65536.0);
-}
+// -------- primitives --------
 
-// Exact height-field occlusion test: walks cell boundaries with DDA rather
-// than sampling at fixed intervals, so nothing is stepped over and shadow
-// edges land on real geometry instead of on step boundaries.
-fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
-  let hlen = length(rd.xy);
-  if (hlen < 1e-6) {
-    let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
-    return rd.z > 0.0 && isSolid(c.kind) && c.g + c.h > ro.z;
-  }
-  let rd2 = rd.xy / hlen;
-  let zs = rd.z / hlen;
-  let maxD = maxT * hlen;
-
-  var mapX = i32(floor(ro.x));
-  var mapY = i32(floor(ro.y));
-  let dD = abs(1.0 / max(abs(rd2), vec2f(1e-9)));
-  var sgn = vec2i(1, 1);
-  var side = vec2f(0.0);
-  if (rd2.x < 0.0) { sgn.x = -1; side.x = (ro.x - f32(mapX)) * dD.x; }
-  else { side.x = (f32(mapX) + 1.0 - ro.x) * dD.x; }
-  if (rd2.y < 0.0) { sgn.y = -1; side.y = (ro.y - f32(mapY)) * dD.y; }
-  else { side.y = (f32(mapY) + 1.0 - ro.y) * dD.y; }
-
-  var dEnter = 0.0;
-  for (var i = 0; i < 256; i = i + 1) {
-    let dExit = min(min(side.x, side.y), maxD);
-    let c = cellAt(mapX, mapY);
-    // lowest point of the ray segment crossing this cell
-    let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
-    if (isSolid(c.kind)) {
-      if (zLo < c.g + c.h) { return true; }
-    } else if (zLo < c.g) {
-      // the segment dips below this cell's terrain
-      return true;
-    } else if (c.nearObj) {
-      // Trunks, poles and signage block outright; canopies only partly, tested
-      // stochastically across the sample set so a stand of trees casts dappled
-      // shade rather than a hard silhouette.
-      let ob = traceObjects(ro, rd, mapX, mapY, dEnter / hlen, dExit / hlen);
-      if (ob.ok) {
-        if (!ob.canopy) { return true; }
-        if (hash1(ro.xy * 37.0 + rd.xy * 91.0) < ob.alpha) { return true; }
-      }
-    }
-    if (dExit >= maxD) { return false; }
-    if (zs > 0.0 && ro.z + zs * dEnter > U.maxHeight) { return false; }
-    dEnter = dExit;
-    if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + sgn.x; }
-    else { side.y = side.y + dD.y; mapY = mapY + sgn.y; }
-  }
-  return false;
-}
-
-// Area-light shadow: sample directions across the sun's disc, so penumbrae
-// widen with distance from the occluder instead of being hard everywhere.
-fn softShadow(p : vec3f, seed : vec2f) -> f32 {
-  var t = vec3f(0.0, 0.0, 1.0);
-  if (abs(U.sunDir.z) > 0.9) { t = vec3f(1.0, 0.0, 0.0); }
-  let b1 = normalize(cross(t, U.sunDir));
-  let b2 = cross(U.sunDir, b1);
-
-  // Stratified disc sampling on a golden-angle spiral, rotated per pixel.
-  // Independent random samples clump and leave gaps, so each pixel gets a
-  // different estimate — that is the visible grain. An evenly spread set
-  // cuts the variance dramatically for the same number of rays.
-  let n = i32(U.sunSamples);
-  let rot = hash1(seed) * 6.2831853;
-  var lit = 0.0;
-  for (var i = 0; i < n; i = i + 1) {
-    let u = (f32(i) + 0.5) / f32(n);
-    let rad = sqrt(u) * U.sunAngle;
-    let ang = rot + f32(i) * 2.39996323;   // golden angle
-    let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
-    if (!occluded(p, d, 90.0)) { lit = lit + 1.0; }
-  }
-  return lit / f32(n);
-}
-
-// Traced ambient occlusion: cosine-weighted hemisphere rays, actual visibility.
-fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f) -> f32 {
-  var t = vec3f(0.0, 0.0, 1.0);
-  if (abs(nrm.z) > 0.9) { t = vec3f(1.0, 0.0, 0.0); }
-  let b1 = normalize(cross(t, nrm));
-  let b2 = cross(nrm, b1);
-
-  // Same stratification: radius steps through the strata in order while the
-  // golden angle spreads the azimuth, giving a cosine-weighted set with far
-  // lower variance than independent random directions.
-  let n = i32(U.aoSamples);
-  let rot = hash1(seed + vec2f(17.0, 5.0)) * 6.2831853;
-  var vis = 0.0;
-  for (var i = 0; i < n; i = i + 1) {
-    let u = (f32(i) + 0.5) / f32(n);
-    let rr = sqrt(u);
-    let zz = sqrt(max(0.0, 1.0 - u));
-    let ang = rot + f32(i) * 2.39996323;
-    let d = b1 * (cos(ang) * rr) + b2 * (sin(ang) * rr) + nrm * zz;
-    if (!occluded(p, normalize(d), U.aoRadius)) { vis = vis + 1.0; }
-  }
-  return vis / f32(n);
-}
-
-struct Hit {
-  t      : f32,     // distance along the ray
-  n      : vec3f,   // surface normal
-  albedo : vec3f,
-  ok     : bool,
-  canopy : bool,    // semi-transparent: composite and continue behind it
-  tExit  : f32,     // where to resume the ray past a canopy
-  alpha  : f32,     // canopy coverage for this ray
-  emissive : f32,   // self-lit fraction (lamp glass, backlit signage)
-};
-
-fn shadeSky(rd : vec3f) -> vec3f {
-  // spherical gradient, pale at the horizon deepening to blue overhead
-  let t = clamp(rd.z, 0.0, 1.0);
-  var col = mix(U.skyLo, U.skyHi, pow(t, 0.55));
-  // sun disc and its glare, at the sun's true direction
-  let d = dot(normalize(rd), U.sunDir);
-  if (d > 0.9995) { return U.sunCol * 1.6; }
-  col = col + U.sunCol * pow(max(d, 0.0), 220.0) * 1.1;
-  col = col + U.sunCol * pow(max(d, 0.0), 18.0) * 0.22;
-  if (rd.z < 0.0) {
-    // below the horizon and beyond everything: haze off the ground
-    col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
-  }
-  return col;
-}
-
-// ray vs sphere; returns (entry, exit) distances, or x < 0 on a miss.
-// the exit is needed to resume the ray after a semi-transparent canopy.
 fn hitSphere(ro : vec3f, rd : vec3f, c : vec3f, r : f32) -> vec2f {
   let oc = ro - c;
   let b = dot(oc, rd);
   let cc = dot(oc, oc) - r * r;
   let disc = b * b - cc;
   if (disc < 0.0) { return vec2f(-1.0, -1.0); }
-  let s = sqrt(disc);
-  return vec2f(-b - s, -b + s);
+  let sq = sqrt(disc);
+  return vec2f(-b - sq, -b + sq);
 }
 
-// ray vs vertical cylinder spanning z0..z1; returns near distance or -1
 fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, z0 : f32, z1 : f32) -> f32 {
   let oc = ro.xy - c;
   let a = dot(rd.xy, rd.xy);
@@ -1029,18 +621,15 @@ fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, z0 : f32, z1 : f32) -
   let cc = dot(oc, oc) - r * r;
   let disc = b * b - a * cc;
   if (disc < 0.0) { return -1.0; }
-  let s = sqrt(disc);
-  var t = (-b - s) / a;
-  if (t <= 0.001) { t = (-b + s) / a; }
+  let sq = sqrt(disc);
+  var t = (-b - sq) / a;
+  if (t <= 0.001) { t = (-b + sq) / a; }
   if (t <= 0.001) { return -1.0; }
   let z = ro.z + rd.z * t;
   if (z < z0 || z > z1) { return -1.0; }
   return t;
 }
 
-// Ray vs box rotated about Z. Returns (t, normal); t < 0 on a miss. Almost
-// every prop is built from these, so orientation lives here rather than in
-// each object.
 fn hitOBB(ro : vec3f, rd : vec3f, ctr : vec3f, he : vec3f,
           ca : f32, sa : f32) -> vec4f {
   let p = ro - ctr;
@@ -1067,106 +656,60 @@ fn hitOBB(ro : vec3f, rd : vec3f, ctr : vec3f, he : vec3f,
   return vec4f(max(tn, 0.001), nw.x, nw.y, nw.z);
 }
 
-// local coordinates of a point on a Z-rotated box, for billboard text lookup
-fn obbLocal(p : vec3f, ctr : vec3f, ca : f32, sa : f32) -> vec3f {
-  let d = p - ctr;
-  return vec3f(d.x * ca + d.y * sa, -d.x * sa + d.y * ca, d.z);
-}
-
-// Deterministic canopy geometry for the tree in cell (cx, cy): the grid only
-// stores that a tree is there, so its size and lean are derived from position.
-// returns (centreX, centreY, centreZ, radius); trunk height is centreZ - r*0.6.
-// The canopy clears eye height (1.55) so you walk under trees instead of
-// standing inside one; overhang is bounded by TREE_REACH on the JS side.
-fn treeParams(cx : i32, cy : i32) -> vec4f {
-  let h = hash2(vec2f(f32(cx), f32(cy)));
-  let radius = 1.05 + h.x * 0.45;
-  let trunkH = 2.7 + h.y * 1.1;
-  return vec4f(f32(cx) + 0.5, f32(cy) + 0.5, trunkH + radius * 0.55, radius);
-}
-fn trunkHeightOf(tp : vec4f) -> f32 { return tp.z - tp.w * 0.55; }
-fn trunkRadiusOf(tp : vec4f) -> f32 { return 0.085 + tp.w * 0.055; }
-
-// ray vs axis-aligned entity box; returns distance or -1
-fn hitBox(ro : vec3f, rd : vec3f, lo : vec3f, hi : vec3f) -> f32 {
-  let inv = 1.0 / rd;
-  let t0 = (lo - ro) * inv;
-  let t1 = (hi - ro) * inv;
-  let tmin = min(t0, t1);
-  let tmax = max(t0, t1);
-  let a = max(max(tmin.x, tmin.y), tmin.z);
-  let b = min(min(tmax.x, tmax.y), tmax.z);
-  if (b < max(a, 0.0)) { return -1.0; }
-  return select(a, 0.0, a < 0.0);
-}
-
-const P_LIGHT : u32 = 1u;
-const P_BIN   : u32 = 2u;
-const P_BOARD : u32 = 3u;
-
-fn propAt(x : i32, y : i32) -> vec2u {
-  let g = i32(U.gridSize);
-  if (x < 0 || y < 0 || x >= g || y >= g) { return vec2u(0u, 0u); }
-  let p = props[u32(y * g + x)];
-  return vec2u(p & 0xffu, (p >> 8u) & 0xffu);   // kind, variant
-}
-
-// facing of a prop, quantised to the four cardinal directions
-fn propFacing(variant : u32) -> vec2f {
-  let q = variant & 3u;
-  if (q == 0u) { return vec2f(1.0, 0.0); }
-  if (q == 1u) { return vec2f(0.0, 1.0); }
-  if (q == 2u) { return vec2f(-1.0, 0.0); }
-  return vec2f(0.0, -1.0);
-}
+// -------- trees along a ray: DDA over integer cells, hash presence --------
 
 struct Obj {
-  t        : f32,
-  n        : vec3f,
-  albedo   : vec3f,
-  emissive : f32,
-  canopy   : bool,
-  tExit    : f32,
-  alpha    : f32,
-  ok       : bool,
+  t : f32, n : vec3f, albedo : vec3f, emissive : f32,
+  canopy : bool, tExit : f32, alpha : f32, ok : bool,
 };
 
-// Every grid-anchored object in the neighbourhood of a cell. Trees and props
-// overhang their own cell, so testing only the cell a ray is crossing would
-// slice them off at the cell walls.
-fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
-                tLo : f32, tHi : f32) -> Obj {
+fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
   var o : Obj;
-  o.ok = false; o.canopy = false; o.alpha = 1.0;
-  o.emissive = 0.0; o.tExit = 0.0;
-  var best = tHi;
+  o.ok = false; o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.tExit = 0.0;
+  var best = tMax;
+
+  let hlen = length(rd.xy);
+  if (hlen < 1e-6) { return o; }
+  let rd2 = rd.xy / hlen;
+  var mapX = i32(floor(ro.x));
+  var mapY = i32(floor(ro.y));
+  let dD = abs(1.0 / max(abs(rd2), vec2f(1e-9)));
+  var sgn = vec2i(1, 1);
+  var side = vec2f(0.0);
+  if (rd2.x < 0.0) { sgn.x = -1; side.x = (ro.x - f32(mapX)) * dD.x; }
+  else { side.x = (f32(mapX) + 1.0 - ro.x) * dD.x; }
+  if (rd2.y < 0.0) { sgn.y = -1; side.y = (ro.y - f32(mapY)) * dD.y; }
+  else { side.y = (f32(mapY) + 1.0 - ro.y) * dD.y; }
+
   let reach = i32(U.treeReach);
+  let maxD = tMax * hlen;
 
-  for (var oy = -reach; oy <= reach; oy = oy + 1) {
-  for (var ox = -reach; ox <= reach; ox = ox + 1) {
-    let tx = cx + ox;
-    let ty = cy + oy;
-    let cen = vec2f(f32(tx) + 0.5, f32(ty) + 0.5);
-    let oc = cellAt(tx, ty);
-    let og = oc.g;                 // objects stand on their cell's terrain
+  for (var i = 0; i < 40; i = i + 1) {
+    // neighbourhood search around the current cell: canopies overhang
+    for (var oy = -reach; oy <= reach; oy = oy + 1) {
+    for (var ox = -reach; ox <= reach; ox = ox + 1) {
+      let tx = mapX + ox;
+      let ty = mapY + oy;
+      let tr = treeAt(tx, ty);
+      if (!tr.present) { continue; }
+      let cen = vec2f(tr.cx, tr.cy);
+      let g = terrainH(cen);
+      let canZ = g + tr.trunkH + tr.r * 0.55;
+      let trunkR = 0.085 + tr.r * 0.055;
 
-    // ---- trees ----
-    if (isTree(oc.kind)) {
-      var tp = treeParams(tx, ty);
-      let trunkTop = og + trunkHeightOf(tp);
-      tp.z = tp.z + og;
-      let tTrunk = hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp), og, trunkTop);
-      if (tTrunk > tLo && tTrunk < best) {
+      let tTrunk = hitCylinder(ro, rd, cen, trunkR, g, g + tr.trunkH);
+      if (tTrunk > 0.001 && tTrunk < best) {
         best = tTrunk;
         let hp = ro + rd * tTrunk;
         o.t = tTrunk;
-        o.n = normalize(vec3f(hp.xy - tp.xy, 0.0));
+        o.n = normalize(vec3f(hp.xy - cen, 0.0));
         o.albedo = vec3f(0.30, 0.23, 0.17);
         o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
       }
-      let sph = hitSphere(ro, rd, tp.xyz, tp.w);
-      if (sph.y > tLo) {
-        let tEnter = max(sph.x, tLo);
+
+      let sph = hitSphere(ro, rd, vec3f(cen, canZ), tr.r);
+      if (sph.y > 0.001) {
+        let tEnter = max(sph.x, 0.001);
         if (tEnter < best) {
           let hp = ro + rd * tEnter;
           let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
@@ -1174,9 +717,9 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
           let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
           if (a > 0.03) {
             best = tEnter;
-            o.t = max(tEnter, 0.001);
+            o.t = tEnter;
             o.tExit = sph.y;
-            o.n = normalize(normalize(hp - tp.xyz) +
+            o.n = normalize(normalize(hp - vec3f(cen, canZ)) +
               (vec3f(vnoise(hp * 5.1 + 11.0), vnoise(hp * 5.1 + 23.0),
                      vnoise(hp * 5.1 + 37.0)) - 0.5) * 0.55);
             o.albedo = vec3f(0.40, 0.60, 0.32);
@@ -1186,236 +729,158 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
         }
       }
     }
-
-    // ---- props ----
-    let pr = propAt(tx, ty);
-    if (pr.x == 0u) { continue; }
-    let f = propFacing(pr.y);
-    let ca = f.x;
-    let sa = f.y;
-
-    if (pr.x == P_LIGHT) {
-      // pole, arm reaching over the kerb, and a lamp head
-      let tPole = hitCylinder(ro, rd, cen, 0.055, og, og + 3.15);
-      if (tPole > tLo && tPole < best) {
-        best = tPole;
-        let hp = ro + rd * tPole;
-        o.t = tPole;
-        o.n = normalize(vec3f(hp.xy - cen, 0.0));
-        o.albedo = vec3f(0.22, 0.23, 0.25);
-        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-      }
-      let armC = vec3f(cen + f * 0.42, og + 3.18);
-      let hArm = hitOBB(ro, rd, armC, vec3f(0.42, 0.045, 0.045), ca, sa);
-      if (hArm.x > tLo && hArm.x < best) {
-        best = hArm.x;
-        o.t = hArm.x; o.n = hArm.yzw;
-        o.albedo = vec3f(0.22, 0.23, 0.25);
-        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-      }
-      let lampC = vec3f(cen + f * 0.80, og + 3.06);
-      let hLamp = hitOBB(ro, rd, lampC, vec3f(0.20, 0.11, 0.07), ca, sa);
-      if (hLamp.x > tLo && hLamp.x < best) {
-        best = hLamp.x;
-        o.t = hLamp.x; o.n = hLamp.yzw;
-        o.albedo = vec3f(0.85, 0.84, 0.78);
-        o.canopy = false; o.alpha = 1.0;
-        o.emissive = select(0.0, 0.55, hLamp.w < -0.3); // glass underside
-        o.ok = true;
-      }
-    } else if (pr.x == P_BIN) {
-      let tBin = hitCylinder(ro, rd, cen, 0.23, og, og + 0.62);
-      if (tBin > tLo && tBin < best) {
-        best = tBin;
-        let hp = ro + rd * tBin;
-        o.t = tBin;
-        o.n = normalize(vec3f(hp.xy - cen, 0.0));
-        o.albedo = vec3f(0.26, 0.28, 0.27);
-        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-      }
-      let hLid = hitOBB(ro, rd, vec3f(cen, og + 0.655), vec3f(0.25, 0.25, 0.035),
-                        1.0, 0.0);
-      if (hLid.x > tLo && hLid.x < best) {
-        best = hLid.x;
-        o.t = hLid.x; o.n = hLid.yzw;
-        o.albedo = vec3f(0.19, 0.20, 0.20);
-        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-      }
-    } else if (pr.x == P_BOARD) {
-      let per = vec2f(-f.y, f.x);              // along the panel's width
-      for (var s = 0; s < 2; s = s + 1) {
-        let side = select(-1.0, 1.0, s == 1);
-        let postC = vec3f(cen + per * (side * 1.25), og + 1.55);
-        let hPost = hitOBB(ro, rd, postC, vec3f(0.075, 0.075, 1.55), ca, sa);
-        if (hPost.x > tLo && hPost.x < best) {
-          best = hPost.x;
-          o.t = hPost.x; o.n = hPost.yzw;
-          o.albedo = vec3f(0.20, 0.21, 0.22);
-          o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-        }
-      }
-      let panelC = vec3f(cen, og + 4.05);
-      let he = vec3f(1.55, 0.09, 1.05);
-      let hP = hitOBB(ro, rd, panelC, he, ca, sa);
-      if (hP.x > tLo && hP.x < best) {
-        best = hP.x;
-        o.t = hP.x; o.n = hP.yzw;
-        o.canopy = false; o.alpha = 1.0;
-        let lp = obbLocal(ro + rd * hP.x, panelC, ca, sa);
-        if (abs(hP.z) > 0.5 || abs(hP.y) > 0.5) {
-          // a face carrying artwork: sample the sign atlas
-          let sign = f32(pr.y >> 2u);
-          var u = lp.x / he.x * 0.5 + 0.5;
-          if (dot(vec2f(hP.y, hP.z), f) > 0.0) { u = 1.0 - u; }
-          let v = 0.5 - lp.z / he.z * 0.5;
-          let texel = textureSampleLevel(signTex, signSamp,
-            vec2f(clamp(u, 0.0, 1.0), (sign + clamp(v, 0.0, 1.0)) / U.signCount),
-            0.0).r;
-          o.albedo = mix(vec3f(0.10, 0.11, 0.13), vec3f(0.95, 0.93, 0.85), texel);
-          o.emissive = texel * 0.35;
-        } else {
-          o.albedo = vec3f(0.17, 0.18, 0.19);   // frame edge
-          o.emissive = 0.0;
-        }
-        o.ok = true;
-      }
     }
-  }
+    if (o.ok) { break; }             // nearest in this neighbourhood found
+
+    // advance the DDA by one full neighbourhood width to amortise the search
+    var ended = false;
+    for (var k = 0; k < 4; k = k + 1) {
+      if (min(side.x, side.y) >= maxD) { ended = true; break; }
+      if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + sgn.x; }
+      else { side.y = side.y + dD.y; mapY = mapY + sgn.y; }
+    }
+    if (ended) { break; }
   }
   return o;
 }
 
+// -------- occlusion for shadows and AO --------
+
+fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
+  // terrain: coarse march
+  if (!(ro.z >= U.maxHeight && rd.z >= 0.0)) {
+    var t = 0.15;
+    for (var i = 0; i < 48; i = i + 1) {
+      if (t > maxT) { break; }
+      let p = ro + rd * t;
+      if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
+      let d = p.z - terrainH(p.xy);
+      if (d < 0.0) { return true; }
+      t = t + clamp(d * 0.6, 0.25, 1.6);
+    }
+  }
+  // trees: stochastic canopy, solid trunk
+  let ob = traceTrees(ro, rd, min(maxT, 22.0));
+  if (ob.ok) {
+    if (!ob.canopy) { return true; }
+    if (hash1f(ro.xy * 37.0 + rd.xy * 91.0) < ob.alpha) { return true; }
+  }
+  return false;
+}
+
+fn softShadow(p : vec3f, seed : vec2f) -> f32 {
+  var tt = vec3f(0.0, 0.0, 1.0);
+  if (abs(U.sunDir.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
+  let b1 = normalize(cross(tt, U.sunDir));
+  let b2 = cross(U.sunDir, b1);
+  let n = i32(U.sunSamples);
+  let rot = hash1f(seed) * 6.2831853;
+  var lit = 0.0;
+  for (var i = 0; i < n; i = i + 1) {
+    let u = (f32(i) + 0.5) / f32(n);
+    let rad = sqrt(u) * U.sunAngle;
+    let ang = rot + f32(i) * 2.39996323;
+    let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
+    if (!occluded(p, d, 60.0)) { lit = lit + 1.0; }
+  }
+  return lit / f32(n);
+}
+
+fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f) -> f32 {
+  var tt = vec3f(0.0, 0.0, 1.0);
+  if (abs(nrm.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
+  let b1 = normalize(cross(tt, nrm));
+  let b2 = cross(nrm, b1);
+  let n = i32(U.aoSamples);
+  let rot = hash1f(seed + vec2f(17.0, 5.0)) * 6.2831853;
+  var vis = 0.0;
+  for (var i = 0; i < n; i = i + 1) {
+    let u = (f32(i) + 0.5) / f32(n);
+    let rr = sqrt(u);
+    let zz = sqrt(max(0.0, 1.0 - u));
+    let ang = rot + f32(i) * 2.39996323;
+    let d = b1 * (cos(ang) * rr) + b2 * (sin(ang) * rr) + nrm * zz;
+    if (!occluded(p, normalize(d), U.aoRadius)) { vis = vis + 1.0; }
+  }
+  return vis / f32(n);
+}
+
+// -------- sky --------
+
+fn shadeSky(rd : vec3f) -> vec3f {
+  let t = clamp(rd.z, 0.0, 1.0);
+  var col = mix(U.skyLo, U.skyHi, pow(t, 0.55));
+  let d = dot(normalize(rd), U.sunDir);
+  if (d > 0.9995) { return U.sunCol * 1.6; }
+  col = col + U.sunCol * pow(max(d, 0.0), 220.0) * 1.1;
+  col = col + U.sunCol * pow(max(d, 0.0), 18.0) * 0.22;
+  if (rd.z < 0.0) {
+    col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
+  }
+  return col;
+}
+
+// -------- full trace --------
+
+struct Hit {
+  t : f32, n : vec3f, albedo : vec3f, ok : bool,
+  canopy : bool, tExit : f32, alpha : f32, emissive : f32,
+};
+
 fn trace(ro : vec3f, rd : vec3f) -> Hit {
   var hit : Hit;
-  hit.ok = false;
-  hit.canopy = false;
-  hit.tExit = 0.0;
-  hit.alpha = 1.0;
-  hit.emissive = 0.0;
+  hit.ok = false; hit.canopy = false; hit.tExit = 0.0;
+  hit.alpha = 1.0; hit.emissive = 0.0;
   hit.t = U.maxDist;
 
-  // --- height field: DDA in xy, z is linear in horizontal distance ---
-  let hlen = length(rd.xy);
-  if (hlen > 1e-5) {
-    let rd2 = rd.xy / hlen;
-    let zs = rd.z / hlen;            // dz per unit horizontal distance
-    var mapX = i32(floor(ro.x));
-    var mapY = i32(floor(ro.y));
-    let dD = abs(1.0 / max(abs(rd2), vec2f(1e-9)));
-    var sgn = vec2i(1, 1);
-    var side = vec2f(0.0);
-    if (rd2.x < 0.0) { sgn.x = -1; side.x = (ro.x - f32(mapX)) * dD.x; }
-    else { side.x = (f32(mapX) + 1.0 - ro.x) * dD.x; }
-    if (rd2.y < 0.0) { sgn.y = -1; side.y = (ro.y - f32(mapY)) * dD.y; }
-    else { side.y = (f32(mapY) + 1.0 - ro.y) * dD.y; }
-
-    var dEnter = 0.0;
-    var axis = 0;
-
-    for (var i = 0; i < 768; i = i + 1) {
-      let dExit = min(side.x, side.y);
-      let c = cellAt(mapX, mapY);
-      let zEnter = ro.z + zs * dEnter;
-
-      // Terrain riser: entering a cell below its ground level means the ray
-      // struck the vertical earth face at the cell boundary.
-      if (dEnter > 0.0 && zEnter < c.g) {
-        hit.t = dEnter / hlen;
-        var rn = vec3f(0.0);
-        if (axis == 0) { rn.x = -f32(sgn.x); } else { rn.y = -f32(sgn.y); }
-        hit.n = rn;
-        hit.albedo = vec3f(0.48, 0.42, 0.34);          // earth / rock face
-        hit.ok = true;
-        break;
-      }
-
-      if (isSolid(c.kind)) {
-        // building spans c.g .. c.g + c.h
-        if (zEnter < c.g + c.h && dEnter > 0.0) {
-          hit.t = dEnter / hlen;
-          var n = vec3f(0.0);
-          if (axis == 0) { n.x = -f32(sgn.x); } else { n.y = -f32(sgn.y); }
-          hit.n = n;
-          hit.albedo = vec3f(0.80, 0.81, 0.83);
-          hit.ok = true;
-          break;
-        }
-        if (zs < -1e-6) {
-          // descending: may land on the roof inside this cell
-          let dRoof = (c.g + c.h - ro.z) / zs;
-          if (dRoof >= dEnter && dRoof <= dExit) {
-            hit.t = dRoof / hlen;
-            hit.n = vec3f(0.0, 0.0, 1.0);
-            hit.albedo = vec3f(0.86, 0.87, 0.89);
-            hit.ok = true;
-            break;
-          }
-        }
-      } else {
-        // ground top of this cell, if the ray crosses it here
-        var groundT = -1.0;
-        if (zs < -1e-6) {
-          let dTop = (c.g - ro.z) / zs;
-          if (dTop >= dEnter && dTop <= dExit) { groundT = dTop / hlen; }
-        }
-
-        var found = false;
-        if (c.nearObj) {
-          var tHiObj = dExit / hlen;
-          if (groundT > 0.0) { tHiObj = groundT; }   // nothing stands below ground
-          let ob = traceObjects(ro, rd, mapX, mapY, dEnter / hlen, tHiObj);
-          if (ob.ok) {
-            hit.t = ob.t;
-            hit.n = ob.n;
-            hit.albedo = ob.albedo;
-            hit.canopy = ob.canopy;
-            hit.tExit = ob.tExit;
-            hit.alpha = ob.alpha;
-            hit.emissive = ob.emissive;
-            hit.ok = true;
-            found = true;
-          }
-        }
-        if (found) { break; }
-
-        if (groundT > 0.0) {
-          hit.t = groundT;
-          hit.n = vec3f(0.0, 0.0, 1.0);
-          // a tree cell keeps whatever it was paved with underneath
-          let g = select(c.kind, c.base, isTree(c.kind));
-          var a = vec3f(0.55, 0.72, 0.45);            // grass
-          if (g == T_ROAD) { a = vec3f(0.42, 0.43, 0.46); }
-          if (g == T_WALK) { a = vec3f(0.68, 0.68, 0.70); }
-          if (g == T_WATER) {
-            // water: dark surface with a moving shimmer
-            let wp = ro.xy + rd.xy * groundT;
-            let ripple = vnoise(vec3f(wp.x * 1.7, wp.y * 1.7, U.time * 0.6));
-            a = mix(vec3f(0.10, 0.16, 0.26), vec3f(0.35, 0.48, 0.62), ripple);
-            hit.emissive = 0.10 + ripple * 0.12;
-          }
-          hit.albedo = a;
-          hit.ok = true;
-          break;
-        }
-      }
-
-      if (dEnter > U.maxDist) { break; }
-      if (zs > 0.0 && ro.z + zs * dEnter > U.maxHeight) { break; }
-
-      dEnter = dExit;
-      if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + sgn.x; axis = 0; }
-      else { side.y = side.y + dD.y; mapY = mapY + sgn.y; axis = 1; }
-    }
-  } else if (rd.z < 0.0) {
-    // straight down: ground of the cell we are in
-    let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
-    hit.t = (c.g - ro.z) / rd.z;
-    hit.n = vec3f(0.0, 0.0, 1.0);
-    hit.albedo = vec3f(0.5, 0.5, 0.52);
+  // terrain
+  let tT = terrainT(ro, rd, U.maxDist);
+  if (tT > 0.0) {
+    hit.t = tT;
+    let p = ro + rd * tT;
+    hit.n = terrainN(p.xy);
+    // grass on flats, rock on slopes, sand near the waterline
+    let slope = 1.0 - hit.n.z;
+    var a = mix(vec3f(0.42, 0.58, 0.33), vec3f(0.52, 0.48, 0.42),
+                smoothstep(0.12, 0.38, slope));
+    a = mix(vec3f(0.72, 0.66, 0.50), a,
+            smoothstep(U.seaLevel + 0.15, U.seaLevel + 0.9, p.z));
+    hit.albedo = a;
     hit.ok = true;
   }
 
-  // --- entities: cars and pedestrians, assembled from oriented parts ---
+  // sea plane, wherever it is closer than the terrain
+  if (rd.z < -1e-6) {
+    let tW = (U.seaLevel - ro.z) / rd.z;
+    if (tW > 0.0 && tW < hit.t) {
+      let wp = ro.xy + rd.xy * tW;
+      if (terrainH(wp) < U.seaLevel) {
+        hit.t = tW;
+        let ripple = vnoise(vec3f(wp.x * 1.4, wp.y * 1.4, U.time * 0.55));
+        let ripple2 = vnoise(vec3f(wp.y * 1.4, wp.x * 1.4, U.time * 0.5));
+        hit.n = normalize(vec3f((ripple - 0.5) * 0.14, (ripple2 - 0.5) * 0.14, 1.0));
+        hit.albedo = mix(vec3f(0.10, 0.17, 0.27), vec3f(0.30, 0.44, 0.58), ripple);
+        hit.emissive = 0.08 + ripple * 0.10;
+        hit.canopy = false;
+        hit.ok = true;
+      }
+    }
+  }
+
+  // trees
+  let ob = traceTrees(ro, rd, hit.t);
+  if (ob.ok && ob.t < hit.t) {
+    hit.t = ob.t;
+    hit.n = ob.n;
+    hit.albedo = ob.albedo;
+    hit.canopy = ob.canopy;
+    hit.tExit = ob.tExit;
+    hit.alpha = ob.alpha;
+    hit.emissive = ob.emissive;
+    hit.ok = true;
+  }
+
+  // entities: articulated creatures (none live yet; machinery kept)
   let n = i32(U.entCount);
   for (var i = 0; i < n; i = i + 1) {
     let e0 = ents[i * 2];
@@ -1423,71 +888,12 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
     let pos = e0.xy;
     let ca = cos(e0.z);
     let sa = sin(e0.z);
-    let fwd2 = vec2f(ca, sa);
-    let side2 = vec2f(-sa, ca);
-
-    if (e0.w < 0.5) {
-      // car: body, glasshouse set back, four wheels; e1.z carries ground z
-      let L = e1.x;
-      let W = e1.y;
-      let gz = e1.z;
-      let hB = hitOBB(ro, rd, vec3f(pos, gz + 0.52), vec3f(L, W, 0.22), ca, sa);
-      if (hB.x > 0.0 && hB.x < hit.t) {
-        hit.t = hB.x; hit.n = hB.yzw;
-        hit.albedo = vec3f(0.28 + e1.w * 0.5);
-        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
-      }
-      let hC = hitOBB(ro, rd, vec3f(pos - fwd2 * (L * 0.12), gz + 0.86),
-                      vec3f(L * 0.46, W * 0.86, 0.20), ca, sa);
-      if (hC.x > 0.0 && hC.x < hit.t) {
-        hit.t = hC.x; hit.n = hC.yzw;
-        hit.albedo = vec3f(0.15, 0.17, 0.20);
-        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
-      }
-      for (var w = 0; w < 4; w = w + 1) {
-        let fx = select(-0.62, 0.62, (w & 1) == 1);
-        let fy = select(-1.0, 1.0, (w & 2) == 2);
-        let off = fwd2 * (L * fx) + side2 * (W * fy);
-        let hW = hitOBB(ro, rd, vec3f(pos + off, gz + 0.18),
-                        vec3f(0.18, 0.055, 0.18), ca, sa);
-        if (hW.x > 0.0 && hW.x < hit.t) {
-          hit.t = hW.x; hit.n = hW.yzw;
-          hit.albedo = vec3f(0.08, 0.08, 0.09);
-          hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
-        }
-      }
-    } else {
-      // pedestrian: head, torso, two legs swinging out of phase.
-      // e1.x carries ground z, e1.z the body height.
-      let hgt = e1.z;
-      let gz = e1.x;
-      let swing = sin(U.time * 5.0 + e1.w * 6.283) * 0.15;
-      let headC = vec3f(pos, gz + hgt - 0.13);
-      let hd = hitSphere(ro, rd, headC, 0.125);
-      if (hd.x > 0.001 && hd.x < hit.t) {
-        hit.t = hd.x;
-        hit.n = normalize(ro + rd * hd.x - headC);
-        hit.albedo = vec3f(0.60, 0.53, 0.46);
-        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
-      }
-      let hT = hitOBB(ro, rd, vec3f(pos, gz + hgt * 0.63),
-                      vec3f(0.115, 0.16, hgt * 0.20), ca, sa);
-      if (hT.x > 0.0 && hT.x < hit.t) {
-        hit.t = hT.x; hit.n = hT.yzw;
-        hit.albedo = vec3f(0.26 + e1.w * 0.34, 0.30, 0.38);
-        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
-      }
-      for (var l = 0; l < 2; l = l + 1) {
-        let sd = select(-1.0, 1.0, l == 1);
-        let off = side2 * (0.072 * sd) + fwd2 * (swing * sd);
-        let hL = hitOBB(ro, rd, vec3f(pos + off, gz + hgt * 0.22),
-                        vec3f(0.058, 0.058, hgt * 0.22), ca, sa);
-        if (hL.x > 0.0 && hL.x < hit.t) {
-          hit.t = hL.x; hit.n = hL.yzw;
-          hit.albedo = vec3f(0.19, 0.20, 0.24);
-          hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
-        }
-      }
+    let gz = e1.x;
+    let hB = hitOBB(ro, rd, vec3f(pos, gz + 0.6), vec3f(0.4, 0.4, 0.6), ca, sa);
+    if (hB.x > 0.0 && hB.x < hit.t) {
+      hit.t = hB.x; hit.n = hB.yzw;
+      hit.albedo = vec3f(0.6, 0.6, 0.65);
+      hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
     }
   }
   return hit;
@@ -1498,7 +904,6 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   let px = vec2i(gid.xy);
   if (px.x >= i32(U.res.x) || px.y >= i32(U.res.y)) { return; }
 
-  // true 3D ray: camera basis is genuinely rotated, giving vertical convergence
   let ndc = vec2f(
     (f32(px.x) + 0.5) / U.res.x * 2.0 - 1.0,
     1.0 - (f32(px.y) + 0.5) / U.res.y * 2.0);
@@ -1509,7 +914,6 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   var throughput = 1.0;
   var org = ro;
 
-  // Composite through up to four semi-transparent canopies before giving up.
   for (var bounce = 0; bounce < 4; bounce = bounce + 1) {
   let h = trace(org, rd);
 
@@ -1521,33 +925,26 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     let seed = vec2f(px) + vec2f(0.37, 0.11);
     let sun = softShadow(p, seed);
     let ao = tracedAO(p, h.n, seed);
-    // foliage is lit from both sides: light scatters through the canopy
     let ndl = select(max(dot(h.n, U.sunDir), 0.0),
                      mix(abs(dot(h.n, U.sunDir)), 1.0, 0.35), h.canopy);
 
-    // ambient is sky light: blue, weak, and gated by how much sky is visible
     let skyAmt = mix(0.55, 1.0, h.n.z * 0.5 + 0.5) * ao;
     var lit = h.albedo * U.ambCol * (U.ambI * skyAmt);
-    // direct sunlight: warm, strong, the only light that casts
     lit = lit + h.albedo * U.sunCol *
           (U.sunI * ndl * mix(U.shadowK, 1.0, sun));
-    // self-lit surfaces (lamp glass, backlit signage) ignore shadowing
     lit = lit + h.albedo * U.sunCol * h.emissive;
 
-    // tight, strong highlight: a broad soft one reads as overcast light
     if (sun > 0.0 && !h.canopy) {
       let r = reflect(-U.sunDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 48.0);
       lit = lit + U.sunCol * spec * 0.75 * sun;
     }
 
-    // aerial perspective toward the horizon sky colour
     let dTotal = h.t + (length(org - ro));
     let fog = clamp(dTotal / U.maxDist, 0.0, 1.0);
     let shaded = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
 
     if (h.canopy) {
-      // composite the canopy over whatever lies behind it, then resume
       col = col + throughput * h.alpha * shaded;
       throughput = throughput * (1.0 - h.alpha);
       if (throughput < 0.02) { break; }
@@ -1563,7 +960,6 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   textureStore(outTex, px, vec4f(col, lum));
 }
 `;
-
 const WGSL_RENDER = /* wgsl */`
 struct VSOut {
   @builtin(position) pos : vec4f,
@@ -1682,32 +1078,12 @@ const GPURenderer = {
     this.resize();
     this.ctx.configure({ device, format: this.format, alphaMode: 'opaque' });
 
-    // world cells: type | height<<8 | ao<<16
-    this.uploadWorld();
-
-    // two vec4 per entity: (x, y, heading, kind), (halfLen, halfWid, height, phase)
-    this.entCount = Entities.cars.length + Entities.peds.length;
-    this.entData = new Float32Array(Math.max(this.entCount, 1) * 8);
+    // The world is procedural in the shader — nothing to upload. Entities:
+    // capacity-sized buffer, two vec4 each, live count sent per frame.
+    this.entData = new Float32Array(CFG.MAX_ENTS * 8);
     this.entBuf = device.createBuffer({
       size: this.entData.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    // billboard signage
-    const signs = SignAtlas.build();
-    this.signCount = signs.count;
-    this.signTex = device.createTexture({
-      size: [signs.canvas.width, signs.canvas.height],
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
-             GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    device.queue.copyExternalImageToTexture(
-      { source: signs.canvas }, { texture: this.signTex },
-      [signs.canvas.width, signs.canvas.height]);
-    this.signSamp = device.createSampler({
-      magFilter: 'linear', minFilter: 'linear',
-      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
     });
 
     this.buildAtlas(CFG.GLYPH_SET);
@@ -1772,44 +1148,6 @@ const GPURenderer = {
     return { set: name, levels: this.levels, chars: this.rampChars };
   },
 
-  uploadWorld() {
-    const N = CFG.WORLD * CFG.WORLD;
-    // type | height<<8 | baseGround<<16 | nearObj<<24 | elev<<25.
-    // Canopies overhang their own cell, so a ray must test trees in a
-    // neighbourhood; the flag marks where that search is worth doing.
-    // elev is ground elevation in ELEV_STEP units (7 bits, 0..127 capacity,
-    // generator caps at ELEV_MAX=63).
-    const W = CFG.WORLD, R = CFG.TREE_REACH;
-    const packed = new Uint32Array(N);
-    for (let i = 0; i < N; i++) {
-      packed[i] = (World.type[i] & 0xff) |
-                  ((Math.min(World.height[i], 255) & 0xff) << 8) |
-                  ((World.base[i] & 0xff) << 16) |
-                  ((World.elev[i] & 0x7f) << 25);
-    }
-    // flag cells whose neighbourhood holds a tree or a prop, so rays only pay
-    // for the object search where something can actually be hit
-    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x;
-      if (World.type[i] !== T_TREE && !World.prop[i]) continue;
-      const y0 = Math.max(0, y - R), y1 = Math.min(W - 1, y + R);
-      const x0 = Math.max(0, x - R), x1 = Math.min(W - 1, x + R);
-      for (let ny = y0; ny <= y1; ny++)
-        for (let nx = x0; nx <= x1; nx++) packed[ny * W + nx] |= (1 << 24);
-    }
-    this.cellBuf = this.device.createBuffer({
-      size: packed.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.cellBuf, 0, packed);
-
-    this.propBuf = this.device.createBuffer({
-      size: World.prop.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.propBuf, 0, World.prop);
-  },
-
   async checkShader(mod, label) {
     if (!mod.getCompilationInfo) return true;
     const info = await mod.getCompilationInfo();
@@ -1860,12 +1198,8 @@ const GPURenderer = {
       layout: this.computePipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniBuf } },
-        { binding: 1, resource: { buffer: this.cellBuf } },
-        { binding: 2, resource: this.lowTex.createView() },
-        { binding: 3, resource: { buffer: this.entBuf } },
-        { binding: 4, resource: { buffer: this.propBuf } },
-        { binding: 5, resource: this.signTex.createView() },
-        { binding: 6, resource: this.signSamp },
+        { binding: 1, resource: this.lowTex.createView() },
+        { binding: 2, resource: { buffer: this.entBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -1915,13 +1249,14 @@ const GPURenderer = {
     u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];
     u[7] = (Player.z || 0) + CFG.EYE;
     u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
-    u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.WORLD;
+    u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.SEED;
     u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
-    u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
+    u[20] = tanX; u[21] = tanY; u[22] = CFG.TERRAIN_MAX;
+    u[23] = Math.min(Entities.list.length, CFG.MAX_ENTS);
     u[24] = CFG.SUN_ANGLE; u[25] = CFG.SUN_SAMPLES;
     u[26] = CFG.AO_SAMPLES; u[27] = CFG.AO_RADIUS;
     u[28] = CFG.TREE_REACH;
-    u[29] = this.signCount;
+    u[29] = CFG.SEA_LEVEL;
     u[30] = (performance.now() / 1000) % 3600;
     u.set(CFG.SUN_COL, 32);      u[35] = CFG.SUN_I;
     u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
@@ -1932,26 +1267,19 @@ const GPURenderer = {
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
       CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
-    // --- entities: position, heading, per-instance dimensions, ground z ---
+    // --- entities: (x, y, heading, kind) + kind extras, e1[0] = ground z ---
     let k = 0;
-    for (const c of Entities.cars) {
-      this.entData[k++] = c.x; this.entData[k++] = c.y;
-      this.entData[k++] = Math.atan2(c.dy, c.dx); this.entData[k++] = 0; // car
-      this.entData[k++] = 0.46; this.entData[k++] = 0.24;
-      this.entData[k++] = World.groundZ(c.x, c.y);   // e1.z = ground
-      this.entData[k++] = (c.col % 5) / 5;
+    const live = Math.min(Entities.list.length, CFG.MAX_ENTS);
+    for (let i = 0; i < live; i++) {
+      const e = Entities.list[i];
+      this.entData[k++] = e.x; this.entData[k++] = e.y;
+      this.entData[k++] = e.heading || 0; this.entData[k++] = e.kind || 0;
+      this.entData[k++] = World.groundZ(e.x, e.y);
+      this.entData[k++] = e.e1 ? e.e1[1] : 0;
+      this.entData[k++] = e.e1 ? e.e1[2] : 0;
+      this.entData[k++] = e.e1 ? e.e1[3] : 0;
     }
-    for (const pd of Entities.peds) {
-      const dx = pd.tx - pd.x, dy = pd.ty - pd.y;
-      const ang = (dx * dx + dy * dy) > 1e-6 ? Math.atan2(dy, dx) : 0;
-      this.entData[k++] = pd.x; this.entData[k++] = pd.y;
-      this.entData[k++] = ang;  this.entData[k++] = 1; // pedestrian
-      this.entData[k++] = World.groundZ(pd.x, pd.y);  // e1.x = ground
-      this.entData[k++] = 0.0;
-      this.entData[k++] = 1.55 + pd.shade * 0.25;
-      this.entData[k++] = pd.shade;
-    }
-    dev.queue.writeBuffer(this.entBuf, 0, this.entData);
+    if (live > 0) dev.queue.writeBuffer(this.entBuf, 0, this.entData);
 
     const enc = dev.createCommandEncoder();
     const cpass = enc.beginComputePass();
@@ -2012,13 +1340,10 @@ const GPURenderer = {
 </script>
 <script>
 // ---- js/main.js ----
-// Bootstrap + frame loop. WebGPU is the only renderer; without it there is
-// nothing to fall back on, so say so plainly instead of showing black.
+// Bootstrap + frame loop. The world is procedural in the shader; nothing to
+// generate up front beyond finding a spawn point.
 (async function () {
-  World.generate(CFG.SEED);
-  World.placeProps(CFG.SEED);
-  Light.bake();
-  Entities.init(CFG.SEED);
+  Entities.init();
   Player.init();
 
   let ready = false;
@@ -2034,7 +1359,7 @@ const GPURenderer = {
       '<p>This renderer runs entirely on the GPU. Try a current Chrome, Edge, ' +
       'Firefox or Safari on a machine with a working GPU driver.</p>';
     document.body.appendChild(msg);
-    console.error('[ASCII City] ' + GPURenderer.reason);
+    console.error('[ASCII World] ' + GPURenderer.reason);
     return;
   }
 
@@ -2055,7 +1380,8 @@ const GPURenderer = {
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' +
-        GPURenderer.cols + '×' + GPURenderer.rows;
+        GPURenderer.cols + '×' + GPURenderer.rows + ' · ' +
+        Player.x.toFixed(0) + ',' + Player.y.toFixed(0);
       fpsAcc = 0; fpsN = 0;
     }
     requestAnimationFrame(frame);

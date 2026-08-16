@@ -140,31 +140,9 @@ function cmp(name, decl, ent) {
 cmp('compute', compDecl, compEnt);
 cmp('render', rendDecl, rendEnt);
 
-// ---- 5. JS <-> WGSL constant parity ----
-function jsConst(name) {
-  const m = configSrc.match(new RegExp(name + '\\s*=\\s*(\\d+)'));
-  return m ? +m[1] : null;
-}
-function wgslConst(name) {
-  const m = wgsl.WGSL_COMPUTE.match(new RegExp('const ' + name + '\\s*:\\s*u32\\s*=\\s*(\\d+)u'));
-  return m ? +m[1] : null;
-}
-for (const c of ['T_ROAD', 'T_WALK', 'T_BLDG', 'T_TREE', 'T_WATER']) {
-  const j = jsConst(c), w = wgslConst(c);
-  if (j === null) fail(`config: ${c} missing`);
-  else if (w === null) fail(`WGSL: ${c} missing`);
-  else if (j !== w) fail(`${c}: JS ${j} != WGSL ${w}`);
-  else ok(`${c}: ${j}`);
-}
-for (const [jsName, wgslName] of [['P_LIGHT', 'P_LIGHT'], ['P_BIN', 'P_BIN'], ['P_BOARD', 'P_BOARD']]) {
-  const j = jsConst(jsName), w = wgslConst(wgslName);
-  if (j !== null && w !== null && j !== w) fail(`${jsName}: JS ${j} != WGSL ${w}`);
-  else if (j !== null && w !== null) ok(`${jsName}: ${j}`);
-}
-
-// ---- 6. all modules parse ----
+// ---- 5. all modules parse ----
 const vm = require('vm');
-const modules = ['config', 'util', 'world', 'light', 'entities', 'player',
+const modules = ['config', 'util', 'world', 'entities', 'player',
   'webgpu/atlas', 'webgpu/shaders', 'webgpu/gpu-renderer', 'main'];
 for (const f of modules) {
   const p = path.join(root, 'js', f + '.js');

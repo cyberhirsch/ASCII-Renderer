@@ -1,17 +1,11 @@
 // Global configuration. Plain script, shared global scope (inlined at build time).
 const CFG = {
   PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
-  MAX_DIST: 60,       // ray cutoff (world cells)
+  MAX_DIST: 90,       // ray cutoff (world units); beyond fades to haze
   EYE: 1.55,          // camera height above ground
-  WORLD: 192,         // world grid size (cells per side)
-  CITY: 96,           // city core size, centered; the rest is open ground
-  SEED: 20260815,
-  CAR_COUNT: 42,
-  PED_COUNT: 70,
+  SEED: 20260815,     // world seed; integral so it survives the f32 uniform
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
-  // palette: hard yellow sun against a deep blue sky, with the ambient term
-  // kept low so shadows go dark and the sunlight reads as the only real light
   SUN_COL: [1.00, 0.86, 0.46],
   SUN_I: 1.55,
   AMB_COL: [0.20, 0.31, 0.55],
@@ -20,39 +14,24 @@ const CFG = {
   SKY_ZENITH: [0.04, 0.10, 0.32],
   GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
   // Tone curve applied before glyph selection. White sits at the luminance
-  // sunlit surfaces actually reach (~0.79 here); above that the brightest
-  // glyphs go unused, below it they clip and the highlights flatten.
+  // sunlit surfaces actually reach; above that the brightest glyphs go
+  // unused, below it they clip and the highlights flatten.
   TONE_BLACK: 0.0,
   TONE_WHITE: 0.90,
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
-  SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
-  // Near zero: a shadowed point receives sky light, not sunlight. Leaving a
-  // slice of the warm sun in shadow tints it yellow instead of blue.
-  SHADOW: 0.04,
-  // Angular radius of the sun disc, which sets penumbra width. The real sun
-  // is 0.0047 rad; 0.05 was eleven times that and smeared every shadow edge.
-  // This keeps penumbrae that widen with distance, but with a crisp contact.
-  SUN_ANGLE: 0.018,
-  // stratified, so these go a lot further than the same count of random rays.
-  // ~20k cells x 48 rays is small work for a GPU; raise if grain remains.
+  SUN_EL: 0.7,        // sun elevation (rad)
+  SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
+  SUN_ANGLE: 0.018,   // angular radius of the sun disc -> penumbra softness
   SUN_SAMPLES: 16,    // shadow rays per pixel
   AO_SAMPLES: 32,     // hemisphere rays per pixel
-  AO_RADIUS: 9,       // AO ray length, in world cells
+  AO_RADIUS: 9,       // AO ray length, world units
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
-  // terrain: elevation is stored per cell in 0.5-unit steps (elev 0..63),
-  // packed into cell-word bits 25..31. The city sits on one flat level.
-  ELEV_STEP: 0.5,
-  ELEV_MAX: 63,
-  CITY_ELEV: 6,       // city plateau, in elev steps (z = 3.0)
-  TERRAIN_AMP: 26,    // noise amplitude, elev steps
-  MOUNTAIN_AMP: 30,   // additional rise toward the world edges
+  // terrain: a continuous, infinite heightfield evaluated in the shader and
+  // mirrored in js/util.js. No stored grid, no world bounds.
+  TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units
+  SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
+  // entities (future creatures); buffer capacity fixed, live count per frame
+  MAX_ENTS: 64,
 };
-
-// Cell types
-const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4, T_WATER = 5;
-// Prop kinds (street furniture), must match the shader constants
-const P_NONE = 0, P_LIGHT = 1, P_BIN = 2, P_BOARD = 3;
-// Cell flags
-const F_LANE = 1, F_ROAD_V = 2, F_ROAD_H = 4;
