@@ -567,7 +567,7 @@ fn isTree(k : u32) -> bool { return k == T_TREE; }
 // Integer hash. sin()-based hashes repeat and correlate across neighbouring
 // pixels, which shows up as structure in the sampling noise.
 fn uhash(a : u32, b : u32) -> u32 {
-  var n = a * 73856093u ^ b * 19349663u;
+  var n = (a * 73856093u) ^ (b * 19349663u);
   n = n ^ (n >> 13u);
   n = n * 1274126177u;
   return n ^ (n >> 16u);
