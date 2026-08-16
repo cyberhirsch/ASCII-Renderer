@@ -58,11 +58,29 @@ fn cellAt(x : i32, y : i32) -> Cell {
   return c;
 }
 
-fn isSolid(k : u32) -> bool { return k == T_BLDG || k == T_TREE; }
+// Trees are no longer part of the height field: they are traced as a trunk
+// cylinder plus a semi-transparent canopy sphere.
+fn isSolid(k : u32) -> bool { return k == T_BLDG; }
+fn isTree(k : u32) -> bool { return k == T_TREE; }
+
+// Integer hash. sin()-based hashes repeat and correlate across neighbouring
+// pixels, which shows up as structure in the sampling noise.
+fn uhash(a : u32, b : u32) -> u32 {
+  var n = a * 73856093u ^ b * 19349663u;
+  n = n ^ (n >> 13u);
+  n = n * 1274126177u;
+  return n ^ (n >> 16u);
+}
+
+fn hash1(p : vec2f) -> f32 {
+  let ip = vec2i(floor(p));
+  return f32(uhash(bitcast<u32>(ip.x), bitcast<u32>(ip.y))) * (1.0 / 4294967296.0);
+}
 
 fn hash2(p : vec2f) -> vec2f {
-  let q = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
-  return fract(sin(q) * 43758.5453);
+  let ip = vec2i(floor(p));
+  let h = uhash(bitcast<u32>(ip.x), bitcast<u32>(ip.y));
+  return vec2f(f32(h & 0xffffu), f32((h >> 16u) & 0xffffu)) * (1.0 / 65536.0);
 }
 
 // Exact height-field occlusion test: walks cell boundaries with DDA rather
@@ -96,6 +114,18 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
       // lowest point of the ray segment crossing this cell
       let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
       if (zLo < c.h) { return true; }
+    } else if (isTree(c.kind)) {
+      // canopies only partly block: shadow rays are stochastic across the
+      // sample set, so a stand of trees casts dappled shade rather than a
+      // hard silhouette. The trunk blocks outright.
+      let tp = treeParams(mapX, mapY);
+      if (hitCylinder(ro, rd, tp.xy, 0.10, trunkHeightOf(tp)) > 0.0) { return true; }
+      let sph = hitSphere(ro, rd, tp.xyz, tp.w);
+      if (sph.y > 0.001) {
+        let chord = max(sph.y - max(sph.x, 0.0), 0.0);
+        let opacity = clamp(1.0 - exp(-chord * 1.15), 0.0, 0.92);
+        if (hash1(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
+      }
     }
     if (dExit >= maxD) { return false; }
     if (zs > 0.0 && ro.z + zs * dEnter > U.maxHeight) { return false; }
@@ -114,12 +144,17 @@ fn softShadow(p : vec3f, seed : vec2f) -> f32 {
   let b1 = normalize(cross(t, U.sunDir));
   let b2 = cross(U.sunDir, b1);
 
+  // Stratified disc sampling on a golden-angle spiral, rotated per pixel.
+  // Independent random samples clump and leave gaps, so each pixel gets a
+  // different estimate — that is the visible grain. An evenly spread set
+  // cuts the variance dramatically for the same number of rays.
   let n = i32(U.sunSamples);
+  let rot = hash1(seed) * 6.2831853;
   var lit = 0.0;
   for (var i = 0; i < n; i = i + 1) {
-    let r = hash2(seed + vec2f(f32(i) * 1.618, f32(i) * 0.577));
-    let ang = r.x * 6.2831853;
-    let rad = sqrt(r.y) * U.sunAngle;
+    let u = (f32(i) + 0.5) / f32(n);
+    let rad = sqrt(u) * U.sunAngle;
+    let ang = rot + f32(i) * 2.39996323;   // golden angle
     let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
     if (!occluded(p, d, 90.0)) { lit = lit + 1.0; }
   }
@@ -133,13 +168,17 @@ fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f) -> f32 {
   let b1 = normalize(cross(t, nrm));
   let b2 = cross(nrm, b1);
 
+  // Same stratification: radius steps through the strata in order while the
+  // golden angle spreads the azimuth, giving a cosine-weighted set with far
+  // lower variance than independent random directions.
   let n = i32(U.aoSamples);
+  let rot = hash1(seed + vec2f(17.0, 5.0)) * 6.2831853;
   var vis = 0.0;
   for (var i = 0; i < n; i = i + 1) {
-    let r = hash2(seed + vec2f(f32(i) * 0.7548 + 3.1, f32(i) * 0.5698 + 7.7));
-    let ang = r.x * 6.2831853;
-    let rr = sqrt(r.y);
-    let zz = sqrt(max(0.0, 1.0 - r.y));
+    let u = (f32(i) + 0.5) / f32(n);
+    let rr = sqrt(u);
+    let zz = sqrt(max(0.0, 1.0 - u));
+    let ang = rot + f32(i) * 2.39996323;
     let d = b1 * (cos(ang) * rr) + b2 * (sin(ang) * rr) + nrm * zz;
     if (!occluded(p, normalize(d), U.aoRadius)) { vis = vis + 1.0; }
   }
@@ -147,10 +186,13 @@ fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f) -> f32 {
 }
 
 struct Hit {
-  t     : f32,      // distance along the ray
-  n     : vec3f,    // surface normal
-  albedo: vec3f,
-  ok    : bool,
+  t      : f32,     // distance along the ray
+  n      : vec3f,   // surface normal
+  albedo : vec3f,
+  ok     : bool,
+  canopy : bool,    // semi-transparent: composite and continue behind it
+  tExit  : f32,     // where to resume the ray past a canopy
+  alpha  : f32,     // canopy coverage for this ray
 };
 
 fn shadeSky(rd : vec3f) -> vec3f {
@@ -169,6 +211,47 @@ fn shadeSky(rd : vec3f) -> vec3f {
   return col;
 }
 
+// ray vs sphere; returns (entry, exit) distances, or x < 0 on a miss.
+// the exit is needed to resume the ray after a semi-transparent canopy.
+fn hitSphere(ro : vec3f, rd : vec3f, c : vec3f, r : f32) -> vec2f {
+  let oc = ro - c;
+  let b = dot(oc, rd);
+  let cc = dot(oc, oc) - r * r;
+  let disc = b * b - cc;
+  if (disc < 0.0) { return vec2f(-1.0, -1.0); }
+  let s = sqrt(disc);
+  return vec2f(-b - s, -b + s);
+}
+
+// ray vs vertical cylinder (trunk); returns near distance or -1
+fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, h : f32) -> f32 {
+  let oc = ro.xy - c;
+  let a = dot(rd.xy, rd.xy);
+  if (a < 1e-8) { return -1.0; }
+  let b = dot(oc, rd.xy);
+  let cc = dot(oc, oc) - r * r;
+  let disc = b * b - a * cc;
+  if (disc < 0.0) { return -1.0; }
+  let s = sqrt(disc);
+  var t = (-b - s) / a;
+  if (t <= 0.001) { t = (-b + s) / a; }
+  if (t <= 0.001) { return -1.0; }
+  let z = ro.z + rd.z * t;
+  if (z < 0.0 || z > h) { return -1.0; }
+  return t;
+}
+
+// Deterministic canopy geometry for the tree in cell (cx, cy): the grid only
+// stores that a tree is there, so its size and lean are derived from position.
+// returns (centreX, centreY, centreZ, radius); trunk height is centreZ - r*0.6
+fn treeParams(cx : i32, cy : i32) -> vec4f {
+  let h = hash2(vec2f(f32(cx), f32(cy)));
+  let radius = 0.55 + h.x * 0.25;      // kept under a cell to limit overhang
+  let trunkH = 1.0 + h.y * 0.8;
+  return vec4f(f32(cx) + 0.5, f32(cy) + 0.5, trunkH + radius * 0.6, radius);
+}
+fn trunkHeightOf(tp : vec4f) -> f32 { return tp.z - tp.w * 0.6; }
+
 // ray vs axis-aligned entity box; returns distance or -1
 fn hitBox(ro : vec3f, rd : vec3f, lo : vec3f, hi : vec3f) -> f32 {
   let inv = 1.0 / rd;
@@ -185,6 +268,9 @@ fn hitBox(ro : vec3f, rd : vec3f, lo : vec3f, hi : vec3f) -> f32 {
 fn trace(ro : vec3f, rd : vec3f) -> Hit {
   var hit : Hit;
   hit.ok = false;
+  hit.canopy = false;
+  hit.tExit = 0.0;
+  hit.alpha = 1.0;
   hit.t = U.maxDist;
 
   // --- height field: DDA in xy, z is linear in horizontal distance ---
@@ -235,6 +321,42 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
             hit.ok = true;
             break;
           }
+        }
+      } else if (isTree(c.kind)) {
+        // trunk (opaque) and canopy (semi-transparent), whichever is nearer
+        let tp = treeParams(mapX, mapY);
+        let tTrunk = hitCylinder(ro, rd, tp.xy, 0.10, trunkHeightOf(tp));
+        let sph = hitSphere(ro, rd, tp.xyz, tp.w);
+        let tCan = select(sph.x, 0.0, sph.x < 0.0 && sph.y > 0.0);
+        let canValid = sph.y > 0.001;
+
+        if (tTrunk > 0.0 && (!canValid || tTrunk <= tCan)) {
+          hit.t = tTrunk;
+          let hp = ro + rd * tTrunk;
+          hit.n = normalize(vec3f(hp.xy - tp.xy, 0.0));
+          hit.albedo = vec3f(0.34, 0.26, 0.19);
+          hit.ok = true;
+          break;
+        }
+        if (canValid) {
+          hit.t = max(tCan, 0.001);
+          hit.tExit = sph.y;
+          let hp = ro + rd * hit.t;
+          hit.n = normalize(hp - tp.xyz);
+          hit.albedo = vec3f(0.42, 0.62, 0.34);
+          // thicker through the middle of the sphere than at the rim
+          let chord = max(sph.y - max(sph.x, 0.0), 0.0);
+          hit.alpha = clamp(1.0 - exp(-chord * 1.15), 0.0, 0.92);
+          hit.canopy = true;
+          hit.ok = true;
+          break;
+        }
+        if (dGround > 0.0 && dGround >= dEnter && dGround <= dExit) {
+          hit.t = dGround / hlen;
+          hit.n = vec3f(0.0, 0.0, 1.0);
+          hit.albedo = vec3f(0.5, 0.66, 0.42);
+          hit.ok = true;
+          break;
         }
       } else if (dGround > 0.0 && dGround >= dEnter && dGround <= dExit) {
         hit.t = dGround / hlen;
@@ -299,32 +421,51 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   let rd = normalize(U.fwd + U.right * (ndc.x * U.tanX) + U.up * (ndc.y * U.tanY));
   let ro = vec3f(U.camPos, U.eye);
 
-  var col : vec3f;
-  let h = trace(ro, rd);
+  var col = vec3f(0.0);
+  var throughput = 1.0;
+  var org = ro;
+
+  // Composite through up to four semi-transparent canopies before giving up.
+  for (var bounce = 0; bounce < 4; bounce = bounce + 1) {
+  let h = trace(org, rd);
 
   if (!h.ok) {
-    col = shadeSky(rd);
+    col = col + throughput * shadeSky(rd);
+    break;
   } else {
-    let p = ro + rd * h.t + h.n * 0.015;
+    let p = org + rd * h.t + h.n * 0.015;
     let seed = vec2f(px) + vec2f(0.37, 0.11);
     let sun = softShadow(p, seed);
     let ao = tracedAO(p, h.n, seed);
-    let ndl = max(dot(h.n, U.sunDir), 0.0);
+    // foliage is lit from both sides: light scatters through the canopy
+    let ndl = select(max(dot(h.n, U.sunDir), 0.0),
+                     mix(abs(dot(h.n, U.sunDir)), 1.0, 0.35), h.canopy);
 
-    // ambient is sky light: modulated by how much sky the point can see
     let amb = mix(0.30, 0.55, h.n.z * 0.5 + 0.5) * ao;
     var lit = h.albedo * (amb + ndl * mix(U.shadowK, 1.0, sun) * 0.9);
 
-    // specular scaled by the visible fraction of the sun
-    if (sun > 0.0) {
+    if (sun > 0.0 && !h.canopy) {
       let r = reflect(-U.sunDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 24.0);
       lit = lit + vec3f(1.0, 0.98, 0.92) * spec * 0.45 * sun;
     }
 
     // aerial perspective toward the horizon sky colour
-    let fog = clamp(h.t / U.maxDist, 0.0, 1.0);
-    col = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
+    let dTotal = h.t + (length(org - ro));
+    let fog = clamp(dTotal / U.maxDist, 0.0, 1.0);
+    let shaded = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
+
+    if (h.canopy) {
+      // composite the canopy over whatever lies behind it, then resume
+      col = col + throughput * h.alpha * shaded;
+      throughput = throughput * (1.0 - h.alpha);
+      if (throughput < 0.02) { break; }
+      org = org + rd * (h.tExit + 0.01);
+      continue;
+    }
+    col = col + throughput * shaded;
+    break;
+  }
   }
 
   let lum = clamp(dot(col, vec3f(0.30, 0.59, 0.11)), 0.0, 1.0);

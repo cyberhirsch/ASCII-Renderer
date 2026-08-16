@@ -23,8 +23,10 @@ const CFG = {
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
   SHADOW: 0.18,       // sun contribution inside full shadow (sky light only)
   SUN_ANGLE: 0.05,    // angular radius of the sun disc -> penumbra softness
-  SUN_SAMPLES: 6,     // shadow rays per pixel
-  AO_SAMPLES: 10,     // hemisphere rays per pixel
+  // stratified, so these go a lot further than the same count of random rays.
+  // ~20k cells x 48 rays is small work for a GPU; raise if grain remains.
+  SUN_SAMPLES: 16,    // shadow rays per pixel
+  AO_SAMPLES: 32,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, in world cells
 };
 
