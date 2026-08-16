@@ -364,6 +364,19 @@ struct RParams {
 @group(0) @binding(2) var samp   : sampler;
 @group(0) @binding(3) var<uniform> R : RParams;
 
+// 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
+// step count, which shows as banding across smooth gradients; offsetting by
+// under one step turns each band edge into a stipple instead.
+fn bayer4(p : vec2i) -> f32 {
+  var m = array<f32, 16>(
+     0.0,  8.0,  2.0, 10.0,
+    12.0,  4.0, 14.0,  6.0,
+     3.0, 11.0,  1.0,  9.0,
+    15.0,  7.0, 13.0,  5.0);
+  let i = (p.y & 3) * 4 + (p.x & 3);
+  return m[i] / 16.0 - 0.5;
+}
+
 @fragment
 fn fs(in : VSOut) -> @location(0) vec4f {
   let cellF = in.uv * R.gridRes;
@@ -380,13 +393,17 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     return vec4f(c, 1.0);
   }
 
-  // glyph chosen by luminance; atlas is a horizontal strip of glyphs
-  let gi = floor(clamp(lum, 0.0, 0.9999) * R.levels);
+  // glyph chosen by luminance, dithered by just under one ramp step
+  let dith = bayer4(vec2i(cell)) / R.levels;
+  let gi = floor(clamp(lum + dith, 0.0, 0.9999) * R.levels);
   let au = (gi + inCell.x) / R.levels;
   let cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
 
-  var tint = texel.rgb;
-  if (R.mono > 0.5) { tint = vec3f(lum); }
-  return vec4f(tint * cov, 1.0);
+  // Glyph density already encodes brightness — the glyph was picked by
+  // luminance. Tinting by luminance as well would apply it twice and squash
+  // the tonal range, so ink goes down at full intensity and only carries hue.
+  var ink = vec3f(1.0);
+  if (R.mono < 0.5) { ink = texel.rgb / max(lum, 0.001); }
+  return vec4f(clamp(ink, vec3f(0.0), vec3f(1.0)) * cov, 1.0);
 }
 `;
