@@ -42,7 +42,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -101,11 +101,22 @@ const GPURenderer = {
 
   uploadWorld() {
     const N = CFG.WORLD * CFG.WORLD;
-    // AO is traced per pixel now, so cells only carry type and height
+    // type | height<<8 | baseGround<<16 | treeNearby<<24.
+    // Canopies overhang their own cell, so a ray must test trees in a
+    // neighbourhood; the flag marks where that search is worth doing.
+    const W = CFG.WORLD, R = CFG.TREE_REACH;
     const packed = new Uint32Array(N);
     for (let i = 0; i < N; i++) {
       packed[i] = (World.type[i] & 0xff) |
-                  ((Math.min(World.height[i], 255) & 0xff) << 8);
+                  ((Math.min(World.height[i], 255) & 0xff) << 8) |
+                  ((World.base[i] & 0xff) << 16);
+    }
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      if (World.type[y * W + x] !== T_TREE) continue;
+      const y0 = Math.max(0, y - R), y1 = Math.min(W - 1, y + R);
+      const x0 = Math.max(0, x - R), x1 = Math.min(W - 1, x + R);
+      for (let ny = y0; ny <= y1; ny++)
+        for (let nx = x0; nx <= x1; nx++) packed[ny * W + nx] |= (1 << 24);
     }
     this.cellBuf = this.device.createBuffer({
       size: packed.byteLength,
@@ -193,7 +204,7 @@ const GPURenderer = {
     const tanX = CFG.PLANE_LEN;
     const tanY = tanX * (this.rows / this.cols);
 
-    const u = new Float32Array(28);
+    const u = new Float32Array(32);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];   u[7] = CFG.EYE;
@@ -203,6 +214,7 @@ const GPURenderer = {
     u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
     u[24] = CFG.SUN_ANGLE; u[25] = CFG.SUN_SAMPLES;
     u[26] = CFG.AO_SAMPLES; u[27] = CFG.AO_RADIUS;
+    u[28] = CFG.TREE_REACH;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

@@ -30,6 +30,10 @@ struct Uniforms {
   sunSamples: f32,
   aoSamples : f32,
   aoRadius  : f32,
+  treeReach : f32,   // cells to search for overhanging canopies
+  pad0      : f32,
+  pad1      : f32,
+  pad2      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -43,19 +47,46 @@ const T_WALK : u32 = 2u;
 const T_BLDG : u32 = 3u;
 const T_TREE : u32 = 4u;
 
-struct Cell { kind : u32, h : f32 };
+struct Cell { kind : u32, h : f32, base : u32, nearTree : bool };
 
 fn cellAt(x : i32, y : i32) -> Cell {
   let g = i32(U.gridSize);
   var c : Cell;
   if (x < 0 || y < 0 || x >= g || y >= g) {
-    c.kind = 0u; c.h = 0.0;
+    c.kind = 0u; c.h = 0.0; c.base = 0u; c.nearTree = false;
     return c;
   }
   let p = cells[u32(y * g + x)];
   c.kind = p & 0xffu;
   c.h = f32((p >> 8u) & 0xffu);
+  c.base = (p >> 16u) & 0xffu;
+  c.nearTree = ((p >> 24u) & 1u) != 0u;
   return c;
+}
+
+// value noise, for breaking the canopy up so it reads as leaves not a balloon
+fn uhash3(x : i32, y : i32, z : i32) -> u32 {
+  return uhash(uhash(bitcast<u32>(x), bitcast<u32>(y)), bitcast<u32>(z));
+}
+fn vnoise(p : vec3f) -> f32 {
+  let i = floor(p);
+  let f = p - i;
+  let u = f * f * (3.0 - 2.0 * f);
+  let ix = i32(i.x); let iy = i32(i.y); let iz = i32(i.z);
+  let s = 1.0 / 4294967296.0;
+  let c000 = f32(uhash3(ix,   iy,   iz  )) * s;
+  let c100 = f32(uhash3(ix+1, iy,   iz  )) * s;
+  let c010 = f32(uhash3(ix,   iy+1, iz  )) * s;
+  let c110 = f32(uhash3(ix+1, iy+1, iz  )) * s;
+  let c001 = f32(uhash3(ix,   iy,   iz+1)) * s;
+  let c101 = f32(uhash3(ix+1, iy,   iz+1)) * s;
+  let c011 = f32(uhash3(ix,   iy+1, iz+1)) * s;
+  let c111 = f32(uhash3(ix+1, iy+1, iz+1)) * s;
+  let x00 = mix(c000, c100, u.x);
+  let x10 = mix(c010, c110, u.x);
+  let x01 = mix(c001, c101, u.x);
+  let x11 = mix(c011, c111, u.x);
+  return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
 }
 
 // Trees are no longer part of the height field: they are traced as a trunk
@@ -114,17 +145,32 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
       // lowest point of the ray segment crossing this cell
       let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
       if (zLo < c.h) { return true; }
-    } else if (isTree(c.kind)) {
-      // canopies only partly block: shadow rays are stochastic across the
-      // sample set, so a stand of trees casts dappled shade rather than a
-      // hard silhouette. The trunk blocks outright.
-      let tp = treeParams(mapX, mapY);
-      if (hitCylinder(ro, rd, tp.xy, 0.10, trunkHeightOf(tp)) > 0.0) { return true; }
-      let sph = hitSphere(ro, rd, tp.xyz, tp.w);
-      if (sph.y > 0.001) {
-        let chord = max(sph.y - max(sph.x, 0.0), 0.0);
-        let opacity = clamp(1.0 - exp(-chord * 1.15), 0.0, 0.92);
-        if (hash1(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
+    } else if (c.nearTree) {
+      // Canopies only partly block: the test is stochastic across the sample
+      // set, so a stand of trees casts dappled shade rather than a hard
+      // silhouette. Trunks block outright. Neighbourhood again, or shadows
+      // would be clipped at cell walls just as the canopies were.
+      let reach = i32(U.treeReach);
+      for (var oy = -reach; oy <= reach; oy = oy + 1) {
+        for (var ox = -reach; ox <= reach; ox = ox + 1) {
+          let tx = mapX + ox;
+          let ty = mapY + oy;
+          if (!isTree(cellAt(tx, ty).kind)) { continue; }
+          let tp = treeParams(tx, ty);
+          if (hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp), trunkHeightOf(tp)) > 0.0) {
+            return true;
+          }
+          let sph = hitSphere(ro, rd, tp.xyz, tp.w);
+          if (sph.y > 0.001) {
+            let tEnter = max(sph.x, 0.0);
+            let hp = ro + rd * tEnter;
+            let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
+            let chord = max(sph.y - tEnter, 0.0);
+            let opacity = clamp(1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens)),
+                                0.0, 0.94);
+            if (hash1(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
+          }
+        }
       }
     }
     if (dExit >= maxD) { return false; }
@@ -243,14 +289,17 @@ fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, h : f32) -> f32 {
 
 // Deterministic canopy geometry for the tree in cell (cx, cy): the grid only
 // stores that a tree is there, so its size and lean are derived from position.
-// returns (centreX, centreY, centreZ, radius); trunk height is centreZ - r*0.6
+// returns (centreX, centreY, centreZ, radius); trunk height is centreZ - r*0.6.
+// The canopy clears eye height (1.55) so you walk under trees instead of
+// standing inside one; overhang is bounded by TREE_REACH on the JS side.
 fn treeParams(cx : i32, cy : i32) -> vec4f {
   let h = hash2(vec2f(f32(cx), f32(cy)));
-  let radius = 0.55 + h.x * 0.25;      // kept under a cell to limit overhang
-  let trunkH = 1.0 + h.y * 0.8;
-  return vec4f(f32(cx) + 0.5, f32(cy) + 0.5, trunkH + radius * 0.6, radius);
+  let radius = 1.05 + h.x * 0.45;
+  let trunkH = 2.7 + h.y * 1.1;
+  return vec4f(f32(cx) + 0.5, f32(cy) + 0.5, trunkH + radius * 0.55, radius);
 }
-fn trunkHeightOf(tp : vec4f) -> f32 { return tp.z - tp.w * 0.6; }
+fn trunkHeightOf(tp : vec4f) -> f32 { return tp.z - tp.w * 0.55; }
+fn trunkRadiusOf(tp : vec4f) -> f32 { return 0.085 + tp.w * 0.055; }
 
 // ray vs axis-aligned entity box; returns distance or -1
 fn hitBox(ro : vec3f, rd : vec3f, lo : vec3f, hi : vec3f) -> f32 {
@@ -322,51 +371,78 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
             break;
           }
         }
-      } else if (isTree(c.kind)) {
-        // trunk (opaque) and canopy (semi-transparent), whichever is nearer
-        let tp = treeParams(mapX, mapY);
-        let tTrunk = hitCylinder(ro, rd, tp.xy, 0.10, trunkHeightOf(tp));
-        let sph = hitSphere(ro, rd, tp.xyz, tp.w);
-        let tCan = select(sph.x, 0.0, sph.x < 0.0 && sph.y > 0.0);
-        let canValid = sph.y > 0.001;
+      } else {
+        // Trees are tested over a neighbourhood, not just the current cell:
+        // a canopy overhangs its own cell, and testing only the cell the ray
+        // is inside slices the overhang off along the cell walls.
+        var found = false;
+        if (c.nearTree) {
+          let reach = i32(U.treeReach);
+          let tLo = dEnter / hlen;
+          let tHi = dExit / hlen;
+          var bestT = tHi;
+          for (var oy = -reach; oy <= reach; oy = oy + 1) {
+            for (var ox = -reach; ox <= reach; ox = ox + 1) {
+              let tx = mapX + ox;
+              let ty = mapY + oy;
+              if (!isTree(cellAt(tx, ty).kind)) { continue; }
+              let tp = treeParams(tx, ty);
 
-        if (tTrunk > 0.0 && (!canValid || tTrunk <= tCan)) {
-          hit.t = tTrunk;
-          let hp = ro + rd * tTrunk;
-          hit.n = normalize(vec3f(hp.xy - tp.xy, 0.0));
-          hit.albedo = vec3f(0.34, 0.26, 0.19);
-          hit.ok = true;
-          break;
+              let tTrunk = hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp),
+                                       trunkHeightOf(tp));
+              if (tTrunk > tLo && tTrunk < bestT) {
+                bestT = tTrunk;
+                let hp = ro + rd * tTrunk;
+                hit.t = tTrunk;
+                hit.n = normalize(vec3f(hp.xy - tp.xy, 0.0));
+                hit.albedo = vec3f(0.30, 0.23, 0.17);
+                hit.canopy = false;
+                hit.alpha = 1.0;
+                hit.ok = true;
+                found = true;
+              }
+
+              let sph = hitSphere(ro, rd, tp.xyz, tp.w);
+              if (sph.y > tLo) {
+                let tEnter = max(sph.x, tLo);
+                if (tEnter < bestT) {
+                  let hp = ro + rd * tEnter;
+                  // erode the silhouette with noise so it reads as foliage
+                  let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
+                  let chord = max(sph.y - tEnter, 0.0);
+                  let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
+                  if (a > 0.03) {
+                    bestT = tEnter;
+                    hit.t = max(tEnter, 0.001);
+                    hit.tExit = sph.y;
+                    hit.n = normalize(normalize(hp - tp.xyz) +
+                      (vec3f(vnoise(hp * 5.1 + 11.0), vnoise(hp * 5.1 + 23.0),
+                             vnoise(hp * 5.1 + 37.0)) - 0.5) * 0.55);
+                    hit.albedo = vec3f(0.40, 0.60, 0.32);
+                    hit.alpha = clamp(a, 0.0, 0.94);
+                    hit.canopy = true;
+                    hit.ok = true;
+                    found = true;
+                  }
+                }
+              }
+            }
+          }
         }
-        if (canValid) {
-          hit.t = max(tCan, 0.001);
-          hit.tExit = sph.y;
-          let hp = ro + rd * hit.t;
-          hit.n = normalize(hp - tp.xyz);
-          hit.albedo = vec3f(0.42, 0.62, 0.34);
-          // thicker through the middle of the sphere than at the rim
-          let chord = max(sph.y - max(sph.x, 0.0), 0.0);
-          hit.alpha = clamp(1.0 - exp(-chord * 1.15), 0.0, 0.92);
-          hit.canopy = true;
-          hit.ok = true;
-          break;
-        }
+        if (found) { break; }
+
         if (dGround > 0.0 && dGround >= dEnter && dGround <= dExit) {
           hit.t = dGround / hlen;
           hit.n = vec3f(0.0, 0.0, 1.0);
-          hit.albedo = vec3f(0.5, 0.66, 0.42);
+          // a tree cell keeps whatever it was paved with underneath
+          let g = select(c.kind, c.base, isTree(c.kind));
+          var a = vec3f(0.55, 0.72, 0.45);            // grass
+          if (g == T_ROAD) { a = vec3f(0.42, 0.43, 0.46); }
+          if (g == T_WALK) { a = vec3f(0.68, 0.68, 0.70); }
+          hit.albedo = a;
           hit.ok = true;
           break;
         }
-      } else if (dGround > 0.0 && dGround >= dEnter && dGround <= dExit) {
-        hit.t = dGround / hlen;
-        hit.n = vec3f(0.0, 0.0, 1.0);
-        var a = vec3f(0.55, 0.72, 0.45);            // grass
-        if (c.kind == T_ROAD) { a = vec3f(0.42, 0.43, 0.46); }
-        if (c.kind == T_WALK) { a = vec3f(0.68, 0.68, 0.70); }
-        hit.albedo = a;
-        hit.ok = true;
-        break;
       }
 
       if (dEnter > U.maxDist) { break; }

@@ -28,6 +28,7 @@ const CFG = {
   SUN_SAMPLES: 16,    // shadow rays per pixel
   AO_SAMPLES: 32,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, in world cells
+  TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
 };
 
 // Cell types

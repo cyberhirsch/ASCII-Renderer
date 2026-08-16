@@ -3,6 +3,8 @@ const World = {
   type: null, height: null, flags: null, bcol: null, bseed: null,
   roadX: [], roadY: [],
 
+  base: null,   // ground type beneath a tree cell, so trees keep their paving
+
   idx(x, y) { return y * CFG.WORLD + x; },
 
   inBounds(x, y) { return x >= 0 && y >= 0 && x < CFG.WORLD && y < CFG.WORLD; },
@@ -21,6 +23,7 @@ const World = {
     const W = CFG.WORLD, rng = mulberry32(seed);
     const N = W * W;
     this.type = new Uint8Array(N);
+    this.base = new Uint8Array(N);
     this.height = new Uint8Array(N);
     this.flags = new Uint8Array(N);
     this.bcol = new Uint8Array(N);
@@ -76,6 +79,7 @@ const World = {
       if (this.type[i] !== T_GRASS) continue;
       if (x < c0 || y < c0 || x >= c1 || y >= c1) {
         if (hash3(x, y, seed ^ 0x7777) < 0.015) {
+          this.base[i] = this.type[i];
           this.type[i] = T_TREE;
           this.height[i] = 2 + ((hash3(x, y, seed ^ 0x78) * 2) | 0);
         }
@@ -86,6 +90,7 @@ const World = {
       if (hzone < 0.16) {
         // plaza: grass, scattered trees
         if (hash3(x, y, seed ^ 0x5111) < 0.18) {
+          this.base[i] = this.type[i];
           this.type[i] = T_TREE;
           this.height[i] = 2 + ((hash3(x, y, seed ^ 0x77) * 2) | 0);
         }
@@ -104,6 +109,7 @@ const World = {
     for (let y = 1; y < W - 1; y++) for (let x = 1; x < W - 1; x++) {
       const i = this.idx(x, y);
       if (this.type[i] === T_WALK && hash3(x, y, seed ^ 0x1234) < 0.045) {
+        this.base[i] = this.type[i];
         this.type[i] = T_TREE;
         this.height[i] = 2 + ((hash3(x, y, seed ^ 0x88) * 2) | 0);
       }
