@@ -706,13 +706,17 @@ fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
   return o;
 }
 
+// all scalars after the vec2: a vec3 here would align to 16 and silently
+// grow the struct to 48 bytes
 struct RParams {
-  gridRes : vec2f,
-  levels  : f32,
-  mono    : f32,
-  raw     : f32,
-  _pad    : vec3f,
-};
+  gridRes : vec2f,   // 0
+  levels  : f32,     // 8
+  mono    : f32,     // 12
+  raw     : f32,     // 16
+  pad0    : f32,     // 20
+  pad1    : f32,     // 24
+  pad2    : f32,     // 28
+};                   // size 32
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
 @group(0) @binding(1) var atlas  : texture_2d<f32>;
