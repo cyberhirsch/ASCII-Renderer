@@ -1,12 +1,13 @@
 // First-person player: WASD move, arrows/mouse turn, collision vs solid cells.
 const Player = {
-  x: 0, y: 0, angle: 0.6,
+  x: 0, y: 0, z: 0, angle: 0.6,
   pitch: 0, // vertical look, radians; ±90° is straight up/down
   keys: {},
 
   init() {
     const [sx, sy] = World.findSpawn();
     this.x = sx; this.y = sy;
+    this.z = World.groundZ(sx, sy);
 
     addEventListener('keydown', e => {
       this.keys[e.code] = true;
@@ -46,8 +47,13 @@ const Player = {
 
   blocked(x, y) {
     const R = 0.22;
-    for (const [ox, oy] of [[-R, -R], [R, -R], [-R, R], [R, R]])
-      if (World.isSolid(Math.floor(x + ox), Math.floor(y + oy))) return true;
+    for (const [ox, oy] of [[-R, -R], [R, -R], [-R, R], [R, R]]) {
+      const cx = Math.floor(x + ox), cy = Math.floor(y + oy);
+      if (World.isSolid(cx, cy)) return true;
+      if (World.cellType(cx, cy) === T_WATER) return true;     // no swimming
+      // terrain step limit: refuse climbs or drops steeper than 1.0 units
+      if (Math.abs(World.groundZ(cx + 0.5, cy + 0.5) - this.z) > 1.0) return true;
+    }
     return false;
   },
 
@@ -74,5 +80,8 @@ const Player = {
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
     }
+    // ride the terrain, smoothed so cell steps read as a walk not a jolt
+    const gz = World.groundZ(this.x, this.y);
+    this.z += (gz - this.z) * Math.min(1, dt * 10);
   },
 };

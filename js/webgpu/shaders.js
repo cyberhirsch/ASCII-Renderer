@@ -58,21 +58,25 @@ const T_ROAD : u32 = 1u;
 const T_WALK : u32 = 2u;
 const T_BLDG : u32 = 3u;
 const T_TREE : u32 = 4u;
+const T_WATER : u32 = 5u;
+const ELEV_STEP : f32 = 0.5;   // world units per elevation step (bits 25..31)
 
-struct Cell { kind : u32, h : f32, base : u32, nearObj : bool };
+// g is the cell's ground elevation in world units; buildings span g .. g+h
+struct Cell { kind : u32, h : f32, base : u32, nearObj : bool, g : f32 };
 
 fn cellAt(x : i32, y : i32) -> Cell {
-  let g = i32(U.gridSize);
+  let gs = i32(U.gridSize);
   var c : Cell;
-  if (x < 0 || y < 0 || x >= g || y >= g) {
-    c.kind = 0u; c.h = 0.0; c.base = 0u; c.nearObj = false;
+  if (x < 0 || y < 0 || x >= gs || y >= gs) {
+    c.kind = 0u; c.h = 0.0; c.base = 0u; c.nearObj = false; c.g = 0.0;
     return c;
   }
-  let p = cells[u32(y * g + x)];
+  let p = cells[u32(y * gs + x)];
   c.kind = p & 0xffu;
   c.h = f32((p >> 8u) & 0xffu);
   c.base = (p >> 16u) & 0xffu;
   c.nearObj = ((p >> 24u) & 1u) != 0u;
+  c.g = f32((p >> 25u) & 0x7fu) * ELEV_STEP;
   return c;
 }
 
@@ -133,7 +137,7 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
   let hlen = length(rd.xy);
   if (hlen < 1e-6) {
     let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
-    return rd.z > 0.0 && isSolid(c.kind) && c.h > ro.z;
+    return rd.z > 0.0 && isSolid(c.kind) && c.g + c.h > ro.z;
   }
   let rd2 = rd.xy / hlen;
   let zs = rd.z / hlen;
@@ -153,10 +157,13 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
   for (var i = 0; i < 256; i = i + 1) {
     let dExit = min(min(side.x, side.y), maxD);
     let c = cellAt(mapX, mapY);
+    // lowest point of the ray segment crossing this cell
+    let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
     if (isSolid(c.kind)) {
-      // lowest point of the ray segment crossing this cell
-      let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
-      if (zLo < c.h) { return true; }
+      if (zLo < c.g + c.h) { return true; }
+    } else if (zLo < c.g) {
+      // the segment dips below this cell's terrain
+      return true;
     } else if (c.nearObj) {
       // Trunks, poles and signage block outright; canopies only partly, tested
       // stochastically across the sample set so a stand of trees casts dappled
@@ -391,12 +398,15 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
     let tx = cx + ox;
     let ty = cy + oy;
     let cen = vec2f(f32(tx) + 0.5, f32(ty) + 0.5);
+    let oc = cellAt(tx, ty);
+    let og = oc.g;                 // objects stand on their cell's terrain
 
     // ---- trees ----
-    if (isTree(cellAt(tx, ty).kind)) {
-      let tp = treeParams(tx, ty);
-      let tTrunk = hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp), 0.0,
-                               trunkHeightOf(tp));
+    if (isTree(oc.kind)) {
+      var tp = treeParams(tx, ty);
+      let trunkTop = og + trunkHeightOf(tp);
+      tp.z = tp.z + og;
+      let tTrunk = hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp), og, trunkTop);
       if (tTrunk > tLo && tTrunk < best) {
         best = tTrunk;
         let hp = ro + rd * tTrunk;
@@ -437,7 +447,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
 
     if (pr.x == P_LIGHT) {
       // pole, arm reaching over the kerb, and a lamp head
-      let tPole = hitCylinder(ro, rd, cen, 0.055, 0.0, 3.15);
+      let tPole = hitCylinder(ro, rd, cen, 0.055, og, og + 3.15);
       if (tPole > tLo && tPole < best) {
         best = tPole;
         let hp = ro + rd * tPole;
@@ -446,7 +456,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
         o.albedo = vec3f(0.22, 0.23, 0.25);
         o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
       }
-      let armC = vec3f(cen + f * 0.42, 3.18);
+      let armC = vec3f(cen + f * 0.42, og + 3.18);
       let hArm = hitOBB(ro, rd, armC, vec3f(0.42, 0.045, 0.045), ca, sa);
       if (hArm.x > tLo && hArm.x < best) {
         best = hArm.x;
@@ -454,7 +464,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
         o.albedo = vec3f(0.22, 0.23, 0.25);
         o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
       }
-      let lampC = vec3f(cen + f * 0.80, 3.06);
+      let lampC = vec3f(cen + f * 0.80, og + 3.06);
       let hLamp = hitOBB(ro, rd, lampC, vec3f(0.20, 0.11, 0.07), ca, sa);
       if (hLamp.x > tLo && hLamp.x < best) {
         best = hLamp.x;
@@ -465,7 +475,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
         o.ok = true;
       }
     } else if (pr.x == P_BIN) {
-      let tBin = hitCylinder(ro, rd, cen, 0.23, 0.0, 0.62);
+      let tBin = hitCylinder(ro, rd, cen, 0.23, og, og + 0.62);
       if (tBin > tLo && tBin < best) {
         best = tBin;
         let hp = ro + rd * tBin;
@@ -474,7 +484,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
         o.albedo = vec3f(0.26, 0.28, 0.27);
         o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
       }
-      let hLid = hitOBB(ro, rd, vec3f(cen, 0.655), vec3f(0.25, 0.25, 0.035),
+      let hLid = hitOBB(ro, rd, vec3f(cen, og + 0.655), vec3f(0.25, 0.25, 0.035),
                         1.0, 0.0);
       if (hLid.x > tLo && hLid.x < best) {
         best = hLid.x;
@@ -486,7 +496,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
       let per = vec2f(-f.y, f.x);              // along the panel's width
       for (var s = 0; s < 2; s = s + 1) {
         let side = select(-1.0, 1.0, s == 1);
-        let postC = vec3f(cen + per * (side * 1.25), 1.55);
+        let postC = vec3f(cen + per * (side * 1.25), og + 1.55);
         let hPost = hitOBB(ro, rd, postC, vec3f(0.075, 0.075, 1.55), ca, sa);
         if (hPost.x > tLo && hPost.x < best) {
           best = hPost.x;
@@ -495,7 +505,7 @@ fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
           o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
         }
       }
-      let panelC = vec3f(cen, 4.05);
+      let panelC = vec3f(cen, og + 4.05);
       let he = vec3f(1.55, 0.09, 1.05);
       let hP = hitOBB(ro, rd, panelC, he, ca, sa);
       if (hP.x > tLo && hP.x < best) {
@@ -552,42 +562,59 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
 
     var dEnter = 0.0;
     var axis = 0;
-    let dGround = select(-1.0, -ro.z / zs, zs < -1e-6);  // horiz dist to z=0
 
     for (var i = 0; i < 768; i = i + 1) {
       let dExit = min(side.x, side.y);
       let c = cellAt(mapX, mapY);
       let zEnter = ro.z + zs * dEnter;
 
+      // Terrain riser: entering a cell below its ground level means the ray
+      // struck the vertical earth face at the cell boundary.
+      if (dEnter > 0.0 && zEnter < c.g) {
+        hit.t = dEnter / hlen;
+        var rn = vec3f(0.0);
+        if (axis == 0) { rn.x = -f32(sgn.x); } else { rn.y = -f32(sgn.y); }
+        hit.n = rn;
+        hit.albedo = vec3f(0.48, 0.42, 0.34);          // earth / rock face
+        hit.ok = true;
+        break;
+      }
+
       if (isSolid(c.kind)) {
-        if (zEnter < c.h && zEnter >= 0.0 && dEnter > 0.0) {
-          // side face. DDA distances are horizontal; the ray parameter needs
-          // them divided by the ray's horizontal length.
+        // building spans c.g .. c.g + c.h
+        if (zEnter < c.g + c.h && dEnter > 0.0) {
           hit.t = dEnter / hlen;
           var n = vec3f(0.0);
           if (axis == 0) { n.x = -f32(sgn.x); } else { n.y = -f32(sgn.y); }
           hit.n = n;
-          hit.albedo = select(vec3f(0.80, 0.81, 0.83), vec3f(0.45, 0.75, 0.5),
-                              c.kind == T_TREE);
+          hit.albedo = vec3f(0.80, 0.81, 0.83);
           hit.ok = true;
           break;
         }
         if (zs < -1e-6) {
           // descending: may land on the roof inside this cell
-          let dRoof = (c.h - ro.z) / zs;
+          let dRoof = (c.g + c.h - ro.z) / zs;
           if (dRoof >= dEnter && dRoof <= dExit) {
             hit.t = dRoof / hlen;
             hit.n = vec3f(0.0, 0.0, 1.0);
-            hit.albedo = select(vec3f(0.86, 0.87, 0.89), vec3f(0.5, 0.8, 0.55),
-                                c.kind == T_TREE);
+            hit.albedo = vec3f(0.86, 0.87, 0.89);
             hit.ok = true;
             break;
           }
         }
       } else {
+        // ground top of this cell, if the ray crosses it here
+        var groundT = -1.0;
+        if (zs < -1e-6) {
+          let dTop = (c.g - ro.z) / zs;
+          if (dTop >= dEnter && dTop <= dExit) { groundT = dTop / hlen; }
+        }
+
         var found = false;
         if (c.nearObj) {
-          let ob = traceObjects(ro, rd, mapX, mapY, dEnter / hlen, dExit / hlen);
+          var tHiObj = dExit / hlen;
+          if (groundT > 0.0) { tHiObj = groundT; }   // nothing stands below ground
+          let ob = traceObjects(ro, rd, mapX, mapY, dEnter / hlen, tHiObj);
           if (ob.ok) {
             hit.t = ob.t;
             hit.n = ob.n;
@@ -602,14 +629,21 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         }
         if (found) { break; }
 
-        if (dGround > 0.0 && dGround >= dEnter && dGround <= dExit) {
-          hit.t = dGround / hlen;
+        if (groundT > 0.0) {
+          hit.t = groundT;
           hit.n = vec3f(0.0, 0.0, 1.0);
           // a tree cell keeps whatever it was paved with underneath
           let g = select(c.kind, c.base, isTree(c.kind));
           var a = vec3f(0.55, 0.72, 0.45);            // grass
           if (g == T_ROAD) { a = vec3f(0.42, 0.43, 0.46); }
           if (g == T_WALK) { a = vec3f(0.68, 0.68, 0.70); }
+          if (g == T_WATER) {
+            // water: dark surface with a moving shimmer
+            let wp = ro.xy + rd.xy * groundT;
+            let ripple = vnoise(vec3f(wp.x * 1.7, wp.y * 1.7, U.time * 0.6));
+            a = mix(vec3f(0.10, 0.16, 0.26), vec3f(0.35, 0.48, 0.62), ripple);
+            hit.emissive = 0.10 + ripple * 0.12;
+          }
           hit.albedo = a;
           hit.ok = true;
           break;
@@ -624,10 +658,10 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       else { side.y = side.y + dD.y; mapY = mapY + sgn.y; axis = 1; }
     }
   } else if (rd.z < 0.0) {
-    // straight down
-    hit.t = -ro.z / rd.z;
-    hit.n = vec3f(0.0, 0.0, 1.0);
+    // straight down: ground of the cell we are in
     let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
+    hit.t = (c.g - ro.z) / rd.z;
+    hit.n = vec3f(0.0, 0.0, 1.0);
     hit.albedo = vec3f(0.5, 0.5, 0.52);
     hit.ok = true;
   }
@@ -644,16 +678,17 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
     let side2 = vec2f(-sa, ca);
 
     if (e0.w < 0.5) {
-      // car: body, glasshouse set back, four wheels
+      // car: body, glasshouse set back, four wheels; e1.z carries ground z
       let L = e1.x;
       let W = e1.y;
-      let hB = hitOBB(ro, rd, vec3f(pos, 0.52), vec3f(L, W, 0.22), ca, sa);
+      let gz = e1.z;
+      let hB = hitOBB(ro, rd, vec3f(pos, gz + 0.52), vec3f(L, W, 0.22), ca, sa);
       if (hB.x > 0.0 && hB.x < hit.t) {
         hit.t = hB.x; hit.n = hB.yzw;
         hit.albedo = vec3f(0.28 + e1.w * 0.5);
         hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
       }
-      let hC = hitOBB(ro, rd, vec3f(pos - fwd2 * (L * 0.12), 0.86),
+      let hC = hitOBB(ro, rd, vec3f(pos - fwd2 * (L * 0.12), gz + 0.86),
                       vec3f(L * 0.46, W * 0.86, 0.20), ca, sa);
       if (hC.x > 0.0 && hC.x < hit.t) {
         hit.t = hC.x; hit.n = hC.yzw;
@@ -664,7 +699,7 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         let fx = select(-0.62, 0.62, (w & 1) == 1);
         let fy = select(-1.0, 1.0, (w & 2) == 2);
         let off = fwd2 * (L * fx) + side2 * (W * fy);
-        let hW = hitOBB(ro, rd, vec3f(pos + off, 0.18),
+        let hW = hitOBB(ro, rd, vec3f(pos + off, gz + 0.18),
                         vec3f(0.18, 0.055, 0.18), ca, sa);
         if (hW.x > 0.0 && hW.x < hit.t) {
           hit.t = hW.x; hit.n = hW.yzw;
@@ -673,10 +708,12 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         }
       }
     } else {
-      // pedestrian: head, torso, two legs swinging out of phase
+      // pedestrian: head, torso, two legs swinging out of phase.
+      // e1.x carries ground z, e1.z the body height.
       let hgt = e1.z;
+      let gz = e1.x;
       let swing = sin(U.time * 5.0 + e1.w * 6.283) * 0.15;
-      let headC = vec3f(pos, hgt - 0.13);
+      let headC = vec3f(pos, gz + hgt - 0.13);
       let hd = hitSphere(ro, rd, headC, 0.125);
       if (hd.x > 0.001 && hd.x < hit.t) {
         hit.t = hd.x;
@@ -684,7 +721,7 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         hit.albedo = vec3f(0.60, 0.53, 0.46);
         hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
       }
-      let hT = hitOBB(ro, rd, vec3f(pos, hgt * 0.63),
+      let hT = hitOBB(ro, rd, vec3f(pos, gz + hgt * 0.63),
                       vec3f(0.115, 0.16, hgt * 0.20), ca, sa);
       if (hT.x > 0.0 && hT.x < hit.t) {
         hit.t = hT.x; hit.n = hT.yzw;
@@ -694,7 +731,7 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       for (var l = 0; l < 2; l = l + 1) {
         let sd = select(-1.0, 1.0, l == 1);
         let off = side2 * (0.072 * sd) + fwd2 * (swing * sd);
-        let hL = hitOBB(ro, rd, vec3f(pos + off, hgt * 0.22),
+        let hL = hitOBB(ro, rd, vec3f(pos + off, gz + hgt * 0.22),
                         vec3f(0.058, 0.058, hgt * 0.22), ca, sa);
         if (hL.x > 0.0 && hL.x < hit.t) {
           hit.t = hL.x; hit.n = hL.yzw;

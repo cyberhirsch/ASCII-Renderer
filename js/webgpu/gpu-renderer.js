@@ -256,7 +256,9 @@ const GPURenderer = {
     const u = new Float32Array(48);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
-    u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];   u[7] = CFG.EYE;
+    // eye rides on the terrain; Player.z is kept current by Player.update
+    u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];
+    u[7] = (Player.z || 0) + CFG.EYE;
     u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
     u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.WORLD;
     u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
@@ -275,20 +277,22 @@ const GPURenderer = {
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
       CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
-    // --- entities: position, heading, and per-instance dimensions ---
+    // --- entities: position, heading, per-instance dimensions, ground z ---
     let k = 0;
     for (const c of Entities.cars) {
       this.entData[k++] = c.x; this.entData[k++] = c.y;
       this.entData[k++] = Math.atan2(c.dy, c.dx); this.entData[k++] = 0; // car
       this.entData[k++] = 0.46; this.entData[k++] = 0.24;
-      this.entData[k++] = 0.0;  this.entData[k++] = (c.col % 5) / 5;
+      this.entData[k++] = World.groundZ(c.x, c.y);   // e1.z = ground
+      this.entData[k++] = (c.col % 5) / 5;
     }
     for (const pd of Entities.peds) {
       const dx = pd.tx - pd.x, dy = pd.ty - pd.y;
       const ang = (dx * dx + dy * dy) > 1e-6 ? Math.atan2(dy, dx) : 0;
       this.entData[k++] = pd.x; this.entData[k++] = pd.y;
       this.entData[k++] = ang;  this.entData[k++] = 1; // pedestrian
-      this.entData[k++] = 0.0;  this.entData[k++] = 0.0;
+      this.entData[k++] = World.groundZ(pd.x, pd.y);  // e1.x = ground
+      this.entData[k++] = 0.0;
       this.entData[k++] = 1.55 + pd.shade * 0.25;
       this.entData[k++] = pd.shade;
     }

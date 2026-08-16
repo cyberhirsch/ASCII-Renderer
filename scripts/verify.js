@@ -149,7 +149,7 @@ function wgslConst(name) {
   const m = wgsl.WGSL_COMPUTE.match(new RegExp('const ' + name + '\\s*:\\s*u32\\s*=\\s*(\\d+)u'));
   return m ? +m[1] : null;
 }
-for (const c of ['T_ROAD', 'T_WALK', 'T_BLDG', 'T_TREE']) {
+for (const c of ['T_ROAD', 'T_WALK', 'T_BLDG', 'T_TREE', 'T_WATER']) {
   const j = jsConst(c), w = wgslConst(c);
   if (j === null) fail(`config: ${c} missing`);
   else if (w === null) fail(`WGSL: ${c} missing`);

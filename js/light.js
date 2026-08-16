@@ -9,9 +9,11 @@ const Light = {
     this.sunX = Math.cos(CFG.SUN_AZ);
     this.sunY = Math.sin(CFG.SUN_AZ);
     this.tanEl = Math.tan(CFG.SUN_EL);
+    // bound for shadow-ray early-out: highest point of terrain + building
     this.maxH = 0;
     for (let i = 0; i < World.height.length; i++) {
-      if (World.height[i] > this.maxH) this.maxH = World.height[i];
+      const top = World.elev[i] * CFG.ELEV_STEP + World.height[i];
+      if (top > this.maxH) this.maxH = top;
     }
   },
 };
