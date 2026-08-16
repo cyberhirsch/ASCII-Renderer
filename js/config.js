@@ -13,7 +13,11 @@ const CFG = {
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
-  SHADOW: 0.35,       // brightness factor inside cast shadows
+  SHADOW: 0.18,       // sun contribution inside full shadow (sky light only)
+  SUN_ANGLE: 0.05,    // angular radius of the sun disc -> penumbra softness
+  SUN_SAMPLES: 6,     // shadow rays per pixel
+  AO_SAMPLES: 10,     // hemisphere rays per pixel
+  AO_RADIUS: 9,       // AO ray length, in world cells
 };
 
 // Cell types

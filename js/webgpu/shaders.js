@@ -26,6 +26,10 @@ struct Uniforms {
   tanY      : f32,
   maxHeight : f32,
   entCount  : f32,
+  sunAngle  : f32,   // angular radius of the sun disc -> penumbra width
+  sunSamples: f32,
+  aoSamples : f32,
+  aoRadius  : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -39,41 +43,113 @@ const T_WALK : u32 = 2u;
 const T_BLDG : u32 = 3u;
 const T_TREE : u32 = 4u;
 
-struct Cell { kind : u32, h : f32, ao : f32 };
+struct Cell { kind : u32, h : f32 };
 
 fn cellAt(x : i32, y : i32) -> Cell {
   let g = i32(U.gridSize);
   var c : Cell;
   if (x < 0 || y < 0 || x >= g || y >= g) {
-    c.kind = 0u; c.h = 0.0; c.ao = 1.0;
+    c.kind = 0u; c.h = 0.0;
     return c;
   }
   let p = cells[u32(y * g + x)];
   c.kind = p & 0xffu;
   c.h = f32((p >> 8u) & 0xffu);
-  c.ao = f32((p >> 16u) & 0xffu) / 255.0;
   return c;
 }
 
 fn isSolid(k : u32) -> bool { return k == T_BLDG || k == T_TREE; }
 
-// Real shadow ray: march toward the sun until blocked or clear of all geometry.
-fn traceShadow(p : vec3f) -> f32 {
-  var q = p + U.sunDir * 0.06;
-  for (var i = 0; i < 96; i = i + 1) {
-    q = q + U.sunDir * 0.7;
-    if (q.z >= U.maxHeight) { return 1.0; }
-    let c = cellAt(i32(floor(q.x)), i32(floor(q.y)));
-    if (isSolid(c.kind) && c.h > q.z) { return U.shadowK; }
+fn hash2(p : vec2f) -> vec2f {
+  let q = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
+  return fract(sin(q) * 43758.5453);
+}
+
+// Exact height-field occlusion test: walks cell boundaries with DDA rather
+// than sampling at fixed intervals, so nothing is stepped over and shadow
+// edges land on real geometry instead of on step boundaries.
+fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
+  let hlen = length(rd.xy);
+  if (hlen < 1e-6) {
+    let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
+    return rd.z > 0.0 && isSolid(c.kind) && c.h > ro.z;
   }
-  return 1.0;
+  let rd2 = rd.xy / hlen;
+  let zs = rd.z / hlen;
+  let maxD = maxT * hlen;
+
+  var mapX = i32(floor(ro.x));
+  var mapY = i32(floor(ro.y));
+  let dD = abs(1.0 / max(abs(rd2), vec2f(1e-9)));
+  var sgn = vec2i(1, 1);
+  var side = vec2f(0.0);
+  if (rd2.x < 0.0) { sgn.x = -1; side.x = (ro.x - f32(mapX)) * dD.x; }
+  else { side.x = (f32(mapX) + 1.0 - ro.x) * dD.x; }
+  if (rd2.y < 0.0) { sgn.y = -1; side.y = (ro.y - f32(mapY)) * dD.y; }
+  else { side.y = (f32(mapY) + 1.0 - ro.y) * dD.y; }
+
+  var dEnter = 0.0;
+  for (var i = 0; i < 256; i = i + 1) {
+    let dExit = min(min(side.x, side.y), maxD);
+    let c = cellAt(mapX, mapY);
+    if (isSolid(c.kind)) {
+      // lowest point of the ray segment crossing this cell
+      let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
+      if (zLo < c.h) { return true; }
+    }
+    if (dExit >= maxD) { return false; }
+    if (zs > 0.0 && ro.z + zs * dEnter > U.maxHeight) { return false; }
+    dEnter = dExit;
+    if (side.x < side.y) { side.x = side.x + dD.x; mapX = mapX + sgn.x; }
+    else { side.y = side.y + dD.y; mapY = mapY + sgn.y; }
+  }
+  return false;
+}
+
+// Area-light shadow: sample directions across the sun's disc, so penumbrae
+// widen with distance from the occluder instead of being hard everywhere.
+fn softShadow(p : vec3f, seed : vec2f) -> f32 {
+  var t = vec3f(0.0, 0.0, 1.0);
+  if (abs(U.sunDir.z) > 0.9) { t = vec3f(1.0, 0.0, 0.0); }
+  let b1 = normalize(cross(t, U.sunDir));
+  let b2 = cross(U.sunDir, b1);
+
+  let n = i32(U.sunSamples);
+  var lit = 0.0;
+  for (var i = 0; i < n; i = i + 1) {
+    let r = hash2(seed + vec2f(f32(i) * 1.618, f32(i) * 0.577));
+    let ang = r.x * 6.2831853;
+    let rad = sqrt(r.y) * U.sunAngle;
+    let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
+    if (!occluded(p, d, 90.0)) { lit = lit + 1.0; }
+  }
+  return lit / f32(n);
+}
+
+// Traced ambient occlusion: cosine-weighted hemisphere rays, actual visibility.
+fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f) -> f32 {
+  var t = vec3f(0.0, 0.0, 1.0);
+  if (abs(nrm.z) > 0.9) { t = vec3f(1.0, 0.0, 0.0); }
+  let b1 = normalize(cross(t, nrm));
+  let b2 = cross(nrm, b1);
+
+  let n = i32(U.aoSamples);
+  var vis = 0.0;
+  for (var i = 0; i < n; i = i + 1) {
+    let r = hash2(seed + vec2f(f32(i) * 0.7548 + 3.1, f32(i) * 0.5698 + 7.7));
+    let ang = r.x * 6.2831853;
+    let rr = sqrt(r.y);
+    let zz = sqrt(max(0.0, 1.0 - r.y));
+    let d = b1 * (cos(ang) * rr) + b2 * (sin(ang) * rr) + nrm * zz;
+    if (!occluded(p, normalize(d), U.aoRadius)) { vis = vis + 1.0; }
+  }
+  return vis / f32(n);
 }
 
 struct Hit {
   t     : f32,      // distance along the ray
   n     : vec3f,    // surface normal
   albedo: vec3f,
-  ao    : f32,
   ok    : bool,
 };
 
@@ -145,7 +221,6 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
           hit.n = n;
           hit.albedo = select(vec3f(0.80, 0.81, 0.83), vec3f(0.45, 0.75, 0.5),
                               c.kind == T_TREE);
-          hit.ao = c.ao;
           hit.ok = true;
           break;
         }
@@ -157,7 +232,6 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
             hit.n = vec3f(0.0, 0.0, 1.0);
             hit.albedo = select(vec3f(0.86, 0.87, 0.89), vec3f(0.5, 0.8, 0.55),
                                 c.kind == T_TREE);
-            hit.ao = c.ao;
             hit.ok = true;
             break;
           }
@@ -169,7 +243,6 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         if (c.kind == T_ROAD) { a = vec3f(0.42, 0.43, 0.46); }
         if (c.kind == T_WALK) { a = vec3f(0.68, 0.68, 0.70); }
         hit.albedo = a;
-        hit.ao = c.ao;
         hit.ok = true;
         break;
       }
@@ -187,7 +260,6 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
     hit.n = vec3f(0.0, 0.0, 1.0);
     let c = cellAt(i32(floor(ro.x)), i32(floor(ro.y)));
     hit.albedo = vec3f(0.5, 0.5, 0.52);
-    hit.ao = c.ao;
     hit.ok = true;
   }
 
@@ -209,7 +281,6 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       hit.t = t;
       hit.n = nn;
       hit.albedo = select(vec3f(0.75, 0.76, 0.8), vec3f(0.6, 0.62, 0.68), e.w < 1.2);
-      hit.ao = 0.9;
       hit.ok = true;
     }
   }
@@ -234,19 +305,21 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   if (!h.ok) {
     col = shadeSky(rd);
   } else {
-    let p = ro + rd * h.t + h.n * 0.02;
-    let sun = traceShadow(p);
+    let p = ro + rd * h.t + h.n * 0.015;
+    let seed = vec2f(px) + vec2f(0.37, 0.11);
+    let sun = softShadow(p, seed);
+    let ao = tracedAO(p, h.n, seed);
     let ndl = max(dot(h.n, U.sunDir), 0.0);
 
-    // ambient: sky above, bounce below, scaled by baked occlusion
-    let amb = mix(0.28, 0.5, h.n.z * 0.5 + 0.5) * h.ao;
-    var lit = h.albedo * (amb + ndl * sun * 0.85);
+    // ambient is sky light: modulated by how much sky the point can see
+    let amb = mix(0.30, 0.55, h.n.z * 0.5 + 0.5) * ao;
+    var lit = h.albedo * (amb + ndl * mix(U.shadowK, 1.0, sun) * 0.9);
 
-    // specular, only where the sun actually reaches
-    if (sun > 0.9) {
+    // specular scaled by the visible fraction of the sun
+    if (sun > 0.0) {
       let r = reflect(-U.sunDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 24.0);
-      lit = lit + vec3f(1.0, 0.98, 0.92) * spec * 0.45;
+      lit = lit + vec3f(1.0, 0.98, 0.92) * spec * 0.45 * sun;
     }
 
     // aerial perspective toward the horizon sky colour
