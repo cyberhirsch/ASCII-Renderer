@@ -13,9 +13,9 @@ const CFG = {
   // palette: hard yellow sun against a deep blue sky, with the ambient term
   // kept low so shadows go dark and the sunlight reads as the only real light
   SUN_COL: [1.00, 0.86, 0.46],
-  SUN_I: 1.30,
+  SUN_I: 1.55,
   AMB_COL: [0.20, 0.31, 0.55],
-  AMB_I: 0.55,
+  AMB_I: 0.45,
   SKY_HORIZON: [0.34, 0.46, 0.66],
   SKY_ZENITH: [0.04, 0.10, 0.32],
   GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
@@ -23,7 +23,7 @@ const CFG = {
   // sunlit surfaces actually reach (~0.79 here); above that the brightest
   // glyphs go unused, below it they clip and the highlights flatten.
   TONE_BLACK: 0.0,
-  TONE_WHITE: 0.82,
+  TONE_WHITE: 0.90,
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
@@ -31,7 +31,10 @@ const CFG = {
   // Near zero: a shadowed point receives sky light, not sunlight. Leaving a
   // slice of the warm sun in shadow tints it yellow instead of blue.
   SHADOW: 0.04,
-  SUN_ANGLE: 0.05,    // angular radius of the sun disc -> penumbra softness
+  // Angular radius of the sun disc, which sets penumbra width. The real sun
+  // is 0.0047 rad; 0.05 was eleven times that and smeared every shadow edge.
+  // This keeps penumbrae that widen with distance, but with a crisp contact.
+  SUN_ANGLE: 0.018,
   // stratified, so these go a lot further than the same count of random rays.
   // ~20k cells x 48 rays is small work for a GPU; raise if grain remains.
   SUN_SAMPLES: 16,    // shadow rays per pixel

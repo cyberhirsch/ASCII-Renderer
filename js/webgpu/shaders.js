@@ -748,10 +748,11 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     // self-lit surfaces (lamp glass, backlit signage) ignore shadowing
     lit = lit + h.albedo * U.sunCol * h.emissive;
 
+    // tight, strong highlight: a broad soft one reads as overcast light
     if (sun > 0.0 && !h.canopy) {
       let r = reflect(-U.sunDir, h.n);
-      let spec = pow(max(dot(r, -rd), 0.0), 24.0);
-      lit = lit + U.sunCol * spec * 0.5 * sun;
+      let spec = pow(max(dot(r, -rd), 0.0), 48.0);
+      lit = lit + U.sunCol * spec * 0.75 * sun;
     }
 
     // aerial perspective toward the horizon sky colour
