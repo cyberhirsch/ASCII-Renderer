@@ -3,7 +3,8 @@ const CFG = {
   PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
   MAX_DIST: 90,       // ray cutoff (world units); beyond fades to haze
   EYE: 1.55,          // camera height above ground
-  SEED: 20260815,     // world seed; integral so it survives the f32 uniform
+  SEED: 8151623,      // world seed; MUST stay below 2^24 so the f32 uniform
+                      // carries it exactly and CPU and GPU agree on the world
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
   SUN_COL: [1.00, 0.86, 0.46],
@@ -24,8 +25,8 @@ const CFG = {
   SUN_EL: 0.7,        // sun elevation (rad)
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   SUN_ANGLE: 0.018,   // angular radius of the sun disc -> penumbra softness
-  SUN_SAMPLES: 16,    // shadow rays per pixel
-  AO_SAMPLES: 32,     // hemisphere rays per pixel
+  SUN_SAMPLES: 8,     // shadow rays per pixel
+  AO_SAMPLES: 12,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, world units
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
   // terrain: a continuous, infinite heightfield evaluated in the shader and

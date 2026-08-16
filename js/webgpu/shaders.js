@@ -326,25 +326,49 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
 }
 
 // -------- occlusion for shadows and AO --------
+// This runs for every one of the dozens of shadow/AO rays per pixel, so it is
+// strictly budgeted: a short coarse terrain march and a small tree walk that
+// tests only the cells the ray actually crosses. The full-fidelity search
+// (neighbourhood reach, exact canopies) is reserved for primary rays —
+// occlusion rays trade a slightly loose canopy for two orders of magnitude
+// less hashing, which is the difference between 60fps and a device timeout.
 
 fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
-  // terrain: coarse march
+  // terrain: coarse march, few steps
   if (!(ro.z >= U.maxHeight && rd.z >= 0.0)) {
-    var t = 0.15;
-    for (var i = 0; i < 48; i = i + 1) {
+    var t = 0.2;
+    for (var i = 0; i < 22; i = i + 1) {
       if (t > maxT) { break; }
       let p = ro + rd * t;
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
       let d = p.z - terrainH(p.xy);
       if (d < 0.0) { return true; }
-      t = t + clamp(d * 0.6, 0.25, 1.6);
+      t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
-  // trees: stochastic canopy, solid trunk
-  let ob = traceTrees(ro, rd, min(maxT, 22.0));
-  if (ob.ok) {
-    if (!ob.canopy) { return true; }
-    if (hash1f(ro.xy * 37.0 + rd.xy * 91.0) < ob.alpha) { return true; }
+
+  // trees: walk at cell pitch along the ray, testing one cell per step with
+  // a radius-inflated sphere so overhang from neighbours still registers
+  let hlen = length(rd.xy);
+  if (hlen > 1e-4) {
+    let treeRange = min(maxT, 14.0);
+    let steps = i32(min(treeRange * hlen, 14.0));
+    for (var i = 0; i < steps; i = i + 1) {
+      let p = ro + rd * (f32(i) + 0.5) / hlen;
+      let tr = treeAt(i32(floor(p.x)), i32(floor(p.y)));
+      if (!tr.present) { continue; }
+      let g = terrainH(vec2f(tr.cx, tr.cy));
+      let canZ = g + tr.trunkH + tr.r * 0.55;
+      // trunk: 2D point-to-segment shortcut at this sample
+      if (p.z > g && p.z < g + tr.trunkH &&
+          length(p.xy - vec2f(tr.cx, tr.cy)) < 0.14) { return true; }
+      let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
+      if (sph.y > 0.001 && sph.x < treeRange) {
+        let chord = max(sph.y - max(sph.x, 0.0), 0.0);
+        let opacity = clamp(1.0 - exp(-chord * 1.1), 0.0, 0.9);
+        if (hash1f(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
+      }
+    }
   }
   return false;
 }

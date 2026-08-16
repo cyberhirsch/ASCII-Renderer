@@ -22,6 +22,14 @@ const GPURenderer = {
     device.lost.then(info => {
       this.ok = false;
       console.error('[WebGPU] device lost: ' + info.message);
+      // a lost device otherwise looks like a freeze on the last frame —
+      // say so on screen, because it usually means a shader ran over budget
+      const d = document.createElement('div');
+      d.id = 'fail';
+      d.innerHTML = '<h1>GPU device lost</h1><p>' + (info.message || '') +
+        '</p><p>The render exceeded the driver watchdog (or the GPU reset). ' +
+        'Reload to restart; if it recurs, lower SUN_SAMPLES / AO_SAMPLES in js/config.js.</p>';
+      document.body.appendChild(d);
     });
 
     this.resize();

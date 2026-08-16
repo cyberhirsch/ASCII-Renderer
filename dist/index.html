@@ -36,7 +36,8 @@ const CFG = {
   PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
   MAX_DIST: 90,       // ray cutoff (world units); beyond fades to haze
   EYE: 1.55,          // camera height above ground
-  SEED: 20260815,     // world seed; integral so it survives the f32 uniform
+  SEED: 8151623,      // world seed; MUST stay below 2^24 so the f32 uniform
+                      // carries it exactly and CPU and GPU agree on the world
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
   SUN_COL: [1.00, 0.86, 0.46],
@@ -57,8 +58,8 @@ const CFG = {
   SUN_EL: 0.7,        // sun elevation (rad)
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   SUN_ANGLE: 0.018,   // angular radius of the sun disc -> penumbra softness
-  SUN_SAMPLES: 16,    // shadow rays per pixel
-  AO_SAMPLES: 32,     // hemisphere rays per pixel
+  SUN_SAMPLES: 8,     // shadow rays per pixel
+  AO_SAMPLES: 12,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, world units
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
   // terrain: a continuous, infinite heightfield evaluated in the shader and
@@ -745,25 +746,49 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
 }
 
 // -------- occlusion for shadows and AO --------
+// This runs for every one of the dozens of shadow/AO rays per pixel, so it is
+// strictly budgeted: a short coarse terrain march and a small tree walk that
+// tests only the cells the ray actually crosses. The full-fidelity search
+// (neighbourhood reach, exact canopies) is reserved for primary rays —
+// occlusion rays trade a slightly loose canopy for two orders of magnitude
+// less hashing, which is the difference between 60fps and a device timeout.
 
 fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
-  // terrain: coarse march
+  // terrain: coarse march, few steps
   if (!(ro.z >= U.maxHeight && rd.z >= 0.0)) {
-    var t = 0.15;
-    for (var i = 0; i < 48; i = i + 1) {
+    var t = 0.2;
+    for (var i = 0; i < 22; i = i + 1) {
       if (t > maxT) { break; }
       let p = ro + rd * t;
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
       let d = p.z - terrainH(p.xy);
       if (d < 0.0) { return true; }
-      t = t + clamp(d * 0.6, 0.25, 1.6);
+      t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
-  // trees: stochastic canopy, solid trunk
-  let ob = traceTrees(ro, rd, min(maxT, 22.0));
-  if (ob.ok) {
-    if (!ob.canopy) { return true; }
-    if (hash1f(ro.xy * 37.0 + rd.xy * 91.0) < ob.alpha) { return true; }
+
+  // trees: walk at cell pitch along the ray, testing one cell per step with
+  // a radius-inflated sphere so overhang from neighbours still registers
+  let hlen = length(rd.xy);
+  if (hlen > 1e-4) {
+    let treeRange = min(maxT, 14.0);
+    let steps = i32(min(treeRange * hlen, 14.0));
+    for (var i = 0; i < steps; i = i + 1) {
+      let p = ro + rd * (f32(i) + 0.5) / hlen;
+      let tr = treeAt(i32(floor(p.x)), i32(floor(p.y)));
+      if (!tr.present) { continue; }
+      let g = terrainH(vec2f(tr.cx, tr.cy));
+      let canZ = g + tr.trunkH + tr.r * 0.55;
+      // trunk: 2D point-to-segment shortcut at this sample
+      if (p.z > g && p.z < g + tr.trunkH &&
+          length(p.xy - vec2f(tr.cx, tr.cy)) < 0.14) { return true; }
+      let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
+      if (sph.y > 0.001 && sph.x < treeRange) {
+        let chord = max(sph.y - max(sph.x, 0.0), 0.0);
+        let opacity = clamp(1.0 - exp(-chord * 1.1), 0.0, 0.9);
+        if (hash1f(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
+      }
+    }
   }
   return false;
 }
@@ -1073,6 +1098,14 @@ const GPURenderer = {
     device.lost.then(info => {
       this.ok = false;
       console.error('[WebGPU] device lost: ' + info.message);
+      // a lost device otherwise looks like a freeze on the last frame —
+      // say so on screen, because it usually means a shader ran over budget
+      const d = document.createElement('div');
+      d.id = 'fail';
+      d.innerHTML = '<h1>GPU device lost</h1><p>' + (info.message || '') +
+        '</p><p>The render exceeded the driver watchdog (or the GPU reset). ' +
+        'Reload to restart; if it recurs, lower SUN_SAMPLES / AO_SAMPLES in js/config.js.</p>';
+      document.body.appendChild(d);
     });
 
     this.resize();
