@@ -59,7 +59,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -233,7 +233,7 @@ const GPURenderer = {
     const tanX = CFG.PLANE_LEN;
     const tanY = tanX * (this.rows / this.cols);
 
-    const u = new Float32Array(32);
+    const u = new Float32Array(48);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     u[4] = fwd[0]; u[5] = fwd[1]; u[6] = fwd[2];   u[7] = CFG.EYE;
@@ -246,6 +246,10 @@ const GPURenderer = {
     u[28] = CFG.TREE_REACH;
     u[29] = this.signCount;
     u[30] = (performance.now() / 1000) % 3600;
+    u.set(CFG.SUN_COL, 32);      u[35] = CFG.SUN_I;
+    u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
+    u.set(CFG.SKY_HORIZON, 40);
+    u.set(CFG.SKY_ZENITH, 44);
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

@@ -34,6 +34,14 @@ struct Uniforms {
   signCount : f32,   // rows in the billboard sign atlas
   time      : f32,
   pad1      : f32,
+  sunCol    : vec3f,
+  sunI      : f32,
+  ambCol    : vec3f,
+  ambI      : f32,
+  skyLo     : vec3f,   // horizon
+  pad2      : f32,
+  skyHi     : vec3f,   // zenith
+  pad3      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -229,17 +237,17 @@ struct Hit {
 };
 
 fn shadeSky(rd : vec3f) -> vec3f {
-  // spherical gradient: white at the horizon, blue at the zenith
+  // spherical gradient, pale at the horizon deepening to blue overhead
   let t = clamp(rd.z, 0.0, 1.0);
-  var col = mix(vec3f(0.95, 0.96, 1.0), vec3f(0.30, 0.50, 0.92), pow(t, 0.65));
-  // sun disc and glare, at its true direction
+  var col = mix(U.skyLo, U.skyHi, pow(t, 0.55));
+  // sun disc and its glare, at the sun's true direction
   let d = dot(normalize(rd), U.sunDir);
-  if (d > 0.9995) { return vec3f(1.0, 1.0, 0.96); }
-  col = col + vec3f(1.0, 0.92, 0.72) * pow(max(d, 0.0), 220.0) * 0.9;
-  col = col + vec3f(1.0, 0.95, 0.85) * pow(max(d, 0.0), 18.0) * 0.18;
+  if (d > 0.9995) { return U.sunCol * 1.6; }
+  col = col + U.sunCol * pow(max(d, 0.0), 220.0) * 1.1;
+  col = col + U.sunCol * pow(max(d, 0.0), 18.0) * 0.22;
   if (rd.z < 0.0) {
-    // below the horizon and beyond everything: ground haze
-    col = mix(vec3f(0.82, 0.84, 0.88), col, exp(rd.z * 6.0));
+    // below the horizon and beyond everything: haze off the ground
+    col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
   }
   return col;
 }
@@ -731,15 +739,19 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     let ndl = select(max(dot(h.n, U.sunDir), 0.0),
                      mix(abs(dot(h.n, U.sunDir)), 1.0, 0.35), h.canopy);
 
-    let amb = mix(0.30, 0.55, h.n.z * 0.5 + 0.5) * ao;
-    var lit = h.albedo * (amb + ndl * mix(U.shadowK, 1.0, sun) * 0.9);
+    // ambient is sky light: blue, weak, and gated by how much sky is visible
+    let skyAmt = mix(0.55, 1.0, h.n.z * 0.5 + 0.5) * ao;
+    var lit = h.albedo * U.ambCol * (U.ambI * skyAmt);
+    // direct sunlight: warm, strong, the only light that casts
+    lit = lit + h.albedo * U.sunCol *
+          (U.sunI * ndl * mix(U.shadowK, 1.0, sun));
     // self-lit surfaces (lamp glass, backlit signage) ignore shadowing
-    lit = lit + h.albedo * h.emissive;
+    lit = lit + h.albedo * U.sunCol * h.emissive;
 
     if (sun > 0.0 && !h.canopy) {
       let r = reflect(-U.sunDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 24.0);
-      lit = lit + vec3f(1.0, 0.98, 0.92) * spec * 0.45 * sun;
+      lit = lit + U.sunCol * spec * 0.5 * sun;
     }
 
     // aerial perspective toward the horizon sky colour
@@ -840,8 +852,14 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   // Glyph density already encodes brightness — the glyph was picked by
   // luminance. Tinting by luminance as well would apply it twice and squash
   // the tonal range, so ink goes down at full intensity and only carries hue.
+  // Normalise by the brightest channel, not by luminance: dividing a deep
+  // blue by its (low) luminance overshoots and clamps the hue away, while
+  // this keeps the colour and lets glyph density carry the brightness.
   var ink = vec3f(1.0);
-  if (R.mono < 0.5) { ink = texel.rgb / max(lum, 0.001); }
+  if (R.mono < 0.5) {
+    let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
+    ink = texel.rgb / m;
+  }
   return vec4f(clamp(ink, vec3f(0.0), vec3f(1.0)) * cov, 1.0);
 }
 `;

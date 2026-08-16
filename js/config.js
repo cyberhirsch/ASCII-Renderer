@@ -9,19 +9,28 @@ const CFG = {
   CAR_COUNT: 42,
   PED_COUNT: 70,
   // rendering
-  MONO: true,         // uniform grayscale (M toggles)
+  MONO: false,        // uniform grayscale (M toggles)
+  // palette: hard yellow sun against a deep blue sky, with the ambient term
+  // kept low so shadows go dark and the sunlight reads as the only real light
+  SUN_COL: [1.00, 0.86, 0.46],
+  SUN_I: 1.30,
+  AMB_COL: [0.20, 0.31, 0.55],
+  AMB_I: 0.55,
+  SKY_HORIZON: [0.34, 0.46, 0.66],
+  SKY_ZENITH: [0.04, 0.10, 0.32],
   GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
-  // tone curve applied before glyph selection: maps the scene's useful
-  // brightness range onto the ramp so bright areas don't clip at the top
-  // white must stay above the sky's own luminance (~0.96 at the horizon) or
-  // the sky clips to one glyph and loses its gradient entirely
-  TONE_BLACK: 0.02,
-  TONE_WHITE: 1.0,
+  // Tone curve applied before glyph selection. White sits at the luminance
+  // sunlit surfaces actually reach (~0.79 here); above that the brightest
+  // glyphs go unused, below it they clip and the highlights flatten.
+  TONE_BLACK: 0.0,
+  TONE_WHITE: 0.82,
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
-  SHADOW: 0.18,       // sun contribution inside full shadow (sky light only)
+  // Near zero: a shadowed point receives sky light, not sunlight. Leaving a
+  // slice of the warm sun in shadow tints it yellow instead of blue.
+  SHADOW: 0.04,
   SUN_ANGLE: 0.05,    // angular radius of the sun disc -> penumbra softness
   // stratified, so these go a lot further than the same count of random rays.
   // ~20k cells x 48 rays is small work for a GPU; raise if grain remains.
