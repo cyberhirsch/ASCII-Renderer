@@ -278,6 +278,8 @@ struct RParams {
   gridRes : vec2f,
   levels  : f32,
   mono    : f32,
+  raw     : f32,
+  _pad    : vec3f,
 };
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
@@ -293,6 +295,13 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 
   let texel = textureLoad(lowTex, vec2i(cell), 0);
   let lum = texel.a;
+
+  // debug: the shaded raymarch output as-is, no glyph mapping
+  if (R.raw > 0.5) {
+    var c = texel.rgb;
+    if (R.mono > 0.5) { c = vec3f(lum); }
+    return vec4f(c, 1.0);
+  }
 
   // glyph chosen by luminance; atlas is a horizontal strip of glyphs
   let gi = floor(clamp(lum, 0.0, 0.9999) * R.levels);

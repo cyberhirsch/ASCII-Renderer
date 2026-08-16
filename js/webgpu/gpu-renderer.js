@@ -54,7 +54,7 @@ const GPURenderer = {
     this.uniBuf = device.createBuffer({
       size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
-      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     device.pushErrorScope('validation');
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
@@ -187,8 +187,9 @@ const GPURenderer = {
     u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
     u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
-    dev.queue.writeBuffer(this.rparBuf, 0,
-      new Float32Array([this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0]));
+    dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
+      this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
+      CFG.RAW ? 1 : 0, 0, 0, 0]));
 
     // --- entities ---
     let k = 0;

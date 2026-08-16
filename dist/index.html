@@ -25,7 +25,7 @@
 </head>
 <body>
 <canvas id="screen"></canvas>
-<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; M mono/colour &middot; F fullscreen</div>
+<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; M mono/colour &middot; X raw view &middot; F fullscreen</div>
 <div id="fps"></div>
 <script>
 // ---- js/config.js ----
@@ -41,6 +41,7 @@ const CFG = {
   PED_COUNT: 70,
   // rendering
   MONO: true,         // uniform grayscale (M toggles)
+  RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad) — low enough for long, readable shadows
   SHADOW: 0.35,       // brightness factor inside cast shadows
@@ -338,6 +339,7 @@ const Player = {
     addEventListener('keydown', e => {
       this.keys[e.code] = true;
       if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
+      if (e.code === 'KeyX') CFG.RAW = !CFG.RAW;
       if (e.code === 'KeyF') {
         if (document.fullscreenElement) document.exitFullscreen();
         else document.documentElement.requestFullscreen();
@@ -708,6 +710,8 @@ struct RParams {
   gridRes : vec2f,
   levels  : f32,
   mono    : f32,
+  raw     : f32,
+  _pad    : vec3f,
 };
 
 @group(0) @binding(0) var lowTex : texture_2d<f32>;
@@ -723,6 +727,13 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 
   let texel = textureLoad(lowTex, vec2i(cell), 0);
   let lum = texel.a;
+
+  // debug: the shaded raymarch output as-is, no glyph mapping
+  if (R.raw > 0.5) {
+    var c = texel.rgb;
+    if (R.mono > 0.5) { c = vec3f(lum); }
+    return vec4f(c, 1.0);
+  }
 
   // glyph chosen by luminance; atlas is a horizontal strip of glyphs
   let gi = floor(clamp(lum, 0.0, 0.9999) * R.levels);
@@ -793,7 +804,7 @@ const GPURenderer = {
     this.uniBuf = device.createBuffer({
       size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
-      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     device.pushErrorScope('validation');
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
@@ -926,8 +937,9 @@ const GPURenderer = {
     u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
     u[20] = tanX; u[21] = tanY; u[22] = Light.maxH || 32; u[23] = this.entCount;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
-    dev.queue.writeBuffer(this.rparBuf, 0,
-      new Float32Array([this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0]));
+    dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
+      this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
+      CFG.RAW ? 1 : 0, 0, 0, 0]));
 
     // --- entities ---
     let k = 0;
