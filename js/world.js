@@ -116,6 +116,49 @@ const World = {
     }
   },
 
+  // Street furniture on kerbside pavement, facing the road it serves.
+  // Stored per cell as kind | variant<<8, where the variant's low two bits
+  // are the facing and the rest selects a billboard sign.
+  placeProps(seed) {
+    const W = CFG.WORLD, N = W * W;
+    this.prop = new Uint32Array(N);
+    const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+
+    for (let y = 2; y < W - 2; y++) for (let x = 2; x < W - 2; x++) {
+      const i = this.idx(x, y);
+      if (this.type[i] !== T_WALK) continue;
+
+      // face whichever side the carriageway is on
+      let q = -1;
+      for (let d = 0; d < 4; d++) {
+        if (this.cellType(x + DIRS[d][0], y + DIRS[d][1]) === T_ROAD) { q = d; break; }
+      }
+      if (q < 0) continue;
+
+      if ((x * 3 + y * 5) % 17 === 0) {
+        this.prop[i] = P_LIGHT | (q << 8);
+        continue;
+      }
+      if (hash3(x, y, seed ^ 0xB2) < 0.035) {
+        this.prop[i] = P_BIN | (q << 8);
+        continue;
+      }
+      if (hash3(x, y, seed ^ 0xC3) < 0.022) {
+        // the panel is wide, so keep the span along the kerb clear; a building
+        // directly behind it is fine and in fact typical
+        const [px, py] = [-DIRS[q][1], DIRS[q][0]];
+        let clear = true;
+        for (let s = -1; s <= 1; s++) {
+          const t = this.cellType(x + px * s, y + py * s);
+          if (t === T_BLDG) { clear = false; break; }
+        }
+        if (!clear) continue;
+        const sign = (hash3(x, y, seed ^ 0xD4) * 8) | 0;
+        this.prop[i] = P_BOARD | ((q | (sign << 2)) << 8);
+      }
+    }
+  },
+
   // A road intersection near the world center, for player spawn
   findSpawn() {
     const cx = CFG.WORLD / 2;

@@ -2,6 +2,7 @@
 // nothing to fall back on, so say so plainly instead of showing black.
 (async function () {
   World.generate(CFG.SEED);
+  World.placeProps(CFG.SEED);
   Light.bake();
   Entities.init(CFG.SEED);
   Player.init();

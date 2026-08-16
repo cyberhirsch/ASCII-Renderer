@@ -30,37 +30,41 @@ struct Uniforms {
   sunSamples: f32,
   aoSamples : f32,
   aoRadius  : f32,
-  treeReach : f32,   // cells to search for overhanging canopies
-  pad0      : f32,
+  treeReach : f32,   // cells to search for overhanging canopies and props
+  signCount : f32,   // rows in the billboard sign atlas
+  time      : f32,
   pad1      : f32,
-  pad2      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
 @group(0) @binding(1) var<storage, read> cells : array<u32>;
 @group(0) @binding(2) var outTex : texture_storage_2d<rgba8unorm, write>;
-// each entity: xy = position, z = half width, w = height
+// two vec4 per entity: (x, y, heading, kind) and (halfLen, halfWid, height, phase)
 @group(0) @binding(3) var<storage, read> ents : array<vec4f>;
+// per cell: propKind | variant<<8
+@group(0) @binding(4) var<storage, read> props : array<u32>;
+@group(0) @binding(5) var signTex : texture_2d<f32>;
+@group(0) @binding(6) var signSamp : sampler;
 
 const T_ROAD : u32 = 1u;
 const T_WALK : u32 = 2u;
 const T_BLDG : u32 = 3u;
 const T_TREE : u32 = 4u;
 
-struct Cell { kind : u32, h : f32, base : u32, nearTree : bool };
+struct Cell { kind : u32, h : f32, base : u32, nearObj : bool };
 
 fn cellAt(x : i32, y : i32) -> Cell {
   let g = i32(U.gridSize);
   var c : Cell;
   if (x < 0 || y < 0 || x >= g || y >= g) {
-    c.kind = 0u; c.h = 0.0; c.base = 0u; c.nearTree = false;
+    c.kind = 0u; c.h = 0.0; c.base = 0u; c.nearObj = false;
     return c;
   }
   let p = cells[u32(y * g + x)];
   c.kind = p & 0xffu;
   c.h = f32((p >> 8u) & 0xffu);
   c.base = (p >> 16u) & 0xffu;
-  c.nearTree = ((p >> 24u) & 1u) != 0u;
+  c.nearObj = ((p >> 24u) & 1u) != 0u;
   return c;
 }
 
@@ -145,32 +149,14 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
       // lowest point of the ray segment crossing this cell
       let zLo = min(ro.z + zs * dEnter, ro.z + zs * dExit);
       if (zLo < c.h) { return true; }
-    } else if (c.nearTree) {
-      // Canopies only partly block: the test is stochastic across the sample
-      // set, so a stand of trees casts dappled shade rather than a hard
-      // silhouette. Trunks block outright. Neighbourhood again, or shadows
-      // would be clipped at cell walls just as the canopies were.
-      let reach = i32(U.treeReach);
-      for (var oy = -reach; oy <= reach; oy = oy + 1) {
-        for (var ox = -reach; ox <= reach; ox = ox + 1) {
-          let tx = mapX + ox;
-          let ty = mapY + oy;
-          if (!isTree(cellAt(tx, ty).kind)) { continue; }
-          let tp = treeParams(tx, ty);
-          if (hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp), trunkHeightOf(tp)) > 0.0) {
-            return true;
-          }
-          let sph = hitSphere(ro, rd, tp.xyz, tp.w);
-          if (sph.y > 0.001) {
-            let tEnter = max(sph.x, 0.0);
-            let hp = ro + rd * tEnter;
-            let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
-            let chord = max(sph.y - tEnter, 0.0);
-            let opacity = clamp(1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens)),
-                                0.0, 0.94);
-            if (hash1(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
-          }
-        }
+    } else if (c.nearObj) {
+      // Trunks, poles and signage block outright; canopies only partly, tested
+      // stochastically across the sample set so a stand of trees casts dappled
+      // shade rather than a hard silhouette.
+      let ob = traceObjects(ro, rd, mapX, mapY, dEnter / hlen, dExit / hlen);
+      if (ob.ok) {
+        if (!ob.canopy) { return true; }
+        if (hash1(ro.xy * 37.0 + rd.xy * 91.0) < ob.alpha) { return true; }
       }
     }
     if (dExit >= maxD) { return false; }
@@ -239,6 +225,7 @@ struct Hit {
   canopy : bool,    // semi-transparent: composite and continue behind it
   tExit  : f32,     // where to resume the ray past a canopy
   alpha  : f32,     // canopy coverage for this ray
+  emissive : f32,   // self-lit fraction (lamp glass, backlit signage)
 };
 
 fn shadeSky(rd : vec3f) -> vec3f {
@@ -269,8 +256,8 @@ fn hitSphere(ro : vec3f, rd : vec3f, c : vec3f, r : f32) -> vec2f {
   return vec2f(-b - s, -b + s);
 }
 
-// ray vs vertical cylinder (trunk); returns near distance or -1
-fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, h : f32) -> f32 {
+// ray vs vertical cylinder spanning z0..z1; returns near distance or -1
+fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, z0 : f32, z1 : f32) -> f32 {
   let oc = ro.xy - c;
   let a = dot(rd.xy, rd.xy);
   if (a < 1e-8) { return -1.0; }
@@ -283,8 +270,43 @@ fn hitCylinder(ro : vec3f, rd : vec3f, c : vec2f, r : f32, h : f32) -> f32 {
   if (t <= 0.001) { t = (-b + s) / a; }
   if (t <= 0.001) { return -1.0; }
   let z = ro.z + rd.z * t;
-  if (z < 0.0 || z > h) { return -1.0; }
+  if (z < z0 || z > z1) { return -1.0; }
   return t;
+}
+
+// Ray vs box rotated about Z. Returns (t, normal); t < 0 on a miss. Almost
+// every prop is built from these, so orientation lives here rather than in
+// each object.
+fn hitOBB(ro : vec3f, rd : vec3f, ctr : vec3f, he : vec3f,
+          ca : f32, sa : f32) -> vec4f {
+  let p = ro - ctr;
+  let lo = vec3f(p.x * ca + p.y * sa, -p.x * sa + p.y * ca, p.z);
+  let ld = vec3f(rd.x * ca + rd.y * sa, -rd.x * sa + rd.y * ca, rd.z);
+  let safe = select(ld, vec3f(1e-9, 1e-9, 1e-9), abs(ld) < vec3f(1e-9));
+  let inv = 1.0 / safe;
+  let t0 = (-he - lo) * inv;
+  let t1 = (he - lo) * inv;
+  let tmin3 = min(t0, t1);
+  let tmax3 = max(t0, t1);
+  let tn = max(max(tmin3.x, tmin3.y), tmin3.z);
+  let tf = min(min(tmax3.x, tmax3.y), tmax3.z);
+  if (tf < max(tn, 0.001)) { return vec4f(-1.0, 0.0, 0.0, 0.0); }
+  var nl = vec3f(0.0, 0.0, 1.0);
+  if (tmin3.x >= tmin3.y && tmin3.x >= tmin3.z) {
+    nl = vec3f(-sign(ld.x), 0.0, 0.0);
+  } else if (tmin3.y >= tmin3.z) {
+    nl = vec3f(0.0, -sign(ld.y), 0.0);
+  } else {
+    nl = vec3f(0.0, 0.0, -sign(ld.z));
+  }
+  let nw = vec3f(nl.x * ca - nl.y * sa, nl.x * sa + nl.y * ca, nl.z);
+  return vec4f(max(tn, 0.001), nw.x, nw.y, nw.z);
+}
+
+// local coordinates of a point on a Z-rotated box, for billboard text lookup
+fn obbLocal(p : vec3f, ctr : vec3f, ca : f32, sa : f32) -> vec3f {
+  let d = p - ctr;
+  return vec3f(d.x * ca + d.y * sa, -d.x * sa + d.y * ca, d.z);
 }
 
 // Deterministic canopy geometry for the tree in cell (cx, cy): the grid only
@@ -314,12 +336,195 @@ fn hitBox(ro : vec3f, rd : vec3f, lo : vec3f, hi : vec3f) -> f32 {
   return select(a, 0.0, a < 0.0);
 }
 
+const P_LIGHT : u32 = 1u;
+const P_BIN   : u32 = 2u;
+const P_BOARD : u32 = 3u;
+
+fn propAt(x : i32, y : i32) -> vec2u {
+  let g = i32(U.gridSize);
+  if (x < 0 || y < 0 || x >= g || y >= g) { return vec2u(0u, 0u); }
+  let p = props[u32(y * g + x)];
+  return vec2u(p & 0xffu, (p >> 8u) & 0xffu);   // kind, variant
+}
+
+// facing of a prop, quantised to the four cardinal directions
+fn propFacing(variant : u32) -> vec2f {
+  let q = variant & 3u;
+  if (q == 0u) { return vec2f(1.0, 0.0); }
+  if (q == 1u) { return vec2f(0.0, 1.0); }
+  if (q == 2u) { return vec2f(-1.0, 0.0); }
+  return vec2f(0.0, -1.0);
+}
+
+struct Obj {
+  t        : f32,
+  n        : vec3f,
+  albedo   : vec3f,
+  emissive : f32,
+  canopy   : bool,
+  tExit    : f32,
+  alpha    : f32,
+  ok       : bool,
+};
+
+// Every grid-anchored object in the neighbourhood of a cell. Trees and props
+// overhang their own cell, so testing only the cell a ray is crossing would
+// slice them off at the cell walls.
+fn traceObjects(ro : vec3f, rd : vec3f, cx : i32, cy : i32,
+                tLo : f32, tHi : f32) -> Obj {
+  var o : Obj;
+  o.ok = false; o.canopy = false; o.alpha = 1.0;
+  o.emissive = 0.0; o.tExit = 0.0;
+  var best = tHi;
+  let reach = i32(U.treeReach);
+
+  for (var oy = -reach; oy <= reach; oy = oy + 1) {
+  for (var ox = -reach; ox <= reach; ox = ox + 1) {
+    let tx = cx + ox;
+    let ty = cy + oy;
+    let cen = vec2f(f32(tx) + 0.5, f32(ty) + 0.5);
+
+    // ---- trees ----
+    if (isTree(cellAt(tx, ty).kind)) {
+      let tp = treeParams(tx, ty);
+      let tTrunk = hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp), 0.0,
+                               trunkHeightOf(tp));
+      if (tTrunk > tLo && tTrunk < best) {
+        best = tTrunk;
+        let hp = ro + rd * tTrunk;
+        o.t = tTrunk;
+        o.n = normalize(vec3f(hp.xy - tp.xy, 0.0));
+        o.albedo = vec3f(0.30, 0.23, 0.17);
+        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+      }
+      let sph = hitSphere(ro, rd, tp.xyz, tp.w);
+      if (sph.y > tLo) {
+        let tEnter = max(sph.x, tLo);
+        if (tEnter < best) {
+          let hp = ro + rd * tEnter;
+          let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
+          let chord = max(sph.y - tEnter, 0.0);
+          let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
+          if (a > 0.03) {
+            best = tEnter;
+            o.t = max(tEnter, 0.001);
+            o.tExit = sph.y;
+            o.n = normalize(normalize(hp - tp.xyz) +
+              (vec3f(vnoise(hp * 5.1 + 11.0), vnoise(hp * 5.1 + 23.0),
+                     vnoise(hp * 5.1 + 37.0)) - 0.5) * 0.55);
+            o.albedo = vec3f(0.40, 0.60, 0.32);
+            o.alpha = clamp(a, 0.0, 0.94);
+            o.canopy = true; o.emissive = 0.0; o.ok = true;
+          }
+        }
+      }
+    }
+
+    // ---- props ----
+    let pr = propAt(tx, ty);
+    if (pr.x == 0u) { continue; }
+    let f = propFacing(pr.y);
+    let ca = f.x;
+    let sa = f.y;
+
+    if (pr.x == P_LIGHT) {
+      // pole, arm reaching over the kerb, and a lamp head
+      let tPole = hitCylinder(ro, rd, cen, 0.055, 0.0, 3.15);
+      if (tPole > tLo && tPole < best) {
+        best = tPole;
+        let hp = ro + rd * tPole;
+        o.t = tPole;
+        o.n = normalize(vec3f(hp.xy - cen, 0.0));
+        o.albedo = vec3f(0.22, 0.23, 0.25);
+        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+      }
+      let armC = vec3f(cen + f * 0.42, 3.18);
+      let hArm = hitOBB(ro, rd, armC, vec3f(0.42, 0.045, 0.045), ca, sa);
+      if (hArm.x > tLo && hArm.x < best) {
+        best = hArm.x;
+        o.t = hArm.x; o.n = hArm.yzw;
+        o.albedo = vec3f(0.22, 0.23, 0.25);
+        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+      }
+      let lampC = vec3f(cen + f * 0.80, 3.06);
+      let hLamp = hitOBB(ro, rd, lampC, vec3f(0.20, 0.11, 0.07), ca, sa);
+      if (hLamp.x > tLo && hLamp.x < best) {
+        best = hLamp.x;
+        o.t = hLamp.x; o.n = hLamp.yzw;
+        o.albedo = vec3f(0.85, 0.84, 0.78);
+        o.canopy = false; o.alpha = 1.0;
+        o.emissive = select(0.0, 0.55, hLamp.w < -0.3); // glass underside
+        o.ok = true;
+      }
+    } else if (pr.x == P_BIN) {
+      let tBin = hitCylinder(ro, rd, cen, 0.23, 0.0, 0.62);
+      if (tBin > tLo && tBin < best) {
+        best = tBin;
+        let hp = ro + rd * tBin;
+        o.t = tBin;
+        o.n = normalize(vec3f(hp.xy - cen, 0.0));
+        o.albedo = vec3f(0.26, 0.28, 0.27);
+        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+      }
+      let hLid = hitOBB(ro, rd, vec3f(cen, 0.655), vec3f(0.25, 0.25, 0.035),
+                        1.0, 0.0);
+      if (hLid.x > tLo && hLid.x < best) {
+        best = hLid.x;
+        o.t = hLid.x; o.n = hLid.yzw;
+        o.albedo = vec3f(0.19, 0.20, 0.20);
+        o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+      }
+    } else if (pr.x == P_BOARD) {
+      let per = vec2f(-f.y, f.x);              // along the panel's width
+      for (var s = 0; s < 2; s = s + 1) {
+        let side = select(-1.0, 1.0, s == 1);
+        let postC = vec3f(cen + per * (side * 1.25), 1.55);
+        let hPost = hitOBB(ro, rd, postC, vec3f(0.075, 0.075, 1.55), ca, sa);
+        if (hPost.x > tLo && hPost.x < best) {
+          best = hPost.x;
+          o.t = hPost.x; o.n = hPost.yzw;
+          o.albedo = vec3f(0.20, 0.21, 0.22);
+          o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+        }
+      }
+      let panelC = vec3f(cen, 4.05);
+      let he = vec3f(1.55, 0.09, 1.05);
+      let hP = hitOBB(ro, rd, panelC, he, ca, sa);
+      if (hP.x > tLo && hP.x < best) {
+        best = hP.x;
+        o.t = hP.x; o.n = hP.yzw;
+        o.canopy = false; o.alpha = 1.0;
+        let lp = obbLocal(ro + rd * hP.x, panelC, ca, sa);
+        if (abs(hP.z) > 0.5 || abs(hP.y) > 0.5) {
+          // a face carrying artwork: sample the sign atlas
+          let sign = f32(pr.y >> 2u);
+          var u = lp.x / he.x * 0.5 + 0.5;
+          if (dot(vec2f(hP.y, hP.z), f) > 0.0) { u = 1.0 - u; }
+          let v = 0.5 - lp.z / he.z * 0.5;
+          let texel = textureSampleLevel(signTex, signSamp,
+            vec2f(clamp(u, 0.0, 1.0), (sign + clamp(v, 0.0, 1.0)) / U.signCount),
+            0.0).r;
+          o.albedo = mix(vec3f(0.10, 0.11, 0.13), vec3f(0.95, 0.93, 0.85), texel);
+          o.emissive = texel * 0.35;
+        } else {
+          o.albedo = vec3f(0.17, 0.18, 0.19);   // frame edge
+          o.emissive = 0.0;
+        }
+        o.ok = true;
+      }
+    }
+  }
+  }
+  return o;
+}
+
 fn trace(ro : vec3f, rd : vec3f) -> Hit {
   var hit : Hit;
   hit.ok = false;
   hit.canopy = false;
   hit.tExit = 0.0;
   hit.alpha = 1.0;
+  hit.emissive = 0.0;
   hit.t = U.maxDist;
 
   // --- height field: DDA in xy, z is linear in horizontal distance ---
@@ -372,61 +577,19 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
           }
         }
       } else {
-        // Trees are tested over a neighbourhood, not just the current cell:
-        // a canopy overhangs its own cell, and testing only the cell the ray
-        // is inside slices the overhang off along the cell walls.
         var found = false;
-        if (c.nearTree) {
-          let reach = i32(U.treeReach);
-          let tLo = dEnter / hlen;
-          let tHi = dExit / hlen;
-          var bestT = tHi;
-          for (var oy = -reach; oy <= reach; oy = oy + 1) {
-            for (var ox = -reach; ox <= reach; ox = ox + 1) {
-              let tx = mapX + ox;
-              let ty = mapY + oy;
-              if (!isTree(cellAt(tx, ty).kind)) { continue; }
-              let tp = treeParams(tx, ty);
-
-              let tTrunk = hitCylinder(ro, rd, tp.xy, trunkRadiusOf(tp),
-                                       trunkHeightOf(tp));
-              if (tTrunk > tLo && tTrunk < bestT) {
-                bestT = tTrunk;
-                let hp = ro + rd * tTrunk;
-                hit.t = tTrunk;
-                hit.n = normalize(vec3f(hp.xy - tp.xy, 0.0));
-                hit.albedo = vec3f(0.30, 0.23, 0.17);
-                hit.canopy = false;
-                hit.alpha = 1.0;
-                hit.ok = true;
-                found = true;
-              }
-
-              let sph = hitSphere(ro, rd, tp.xyz, tp.w);
-              if (sph.y > tLo) {
-                let tEnter = max(sph.x, tLo);
-                if (tEnter < bestT) {
-                  let hp = ro + rd * tEnter;
-                  // erode the silhouette with noise so it reads as foliage
-                  let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
-                  let chord = max(sph.y - tEnter, 0.0);
-                  let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
-                  if (a > 0.03) {
-                    bestT = tEnter;
-                    hit.t = max(tEnter, 0.001);
-                    hit.tExit = sph.y;
-                    hit.n = normalize(normalize(hp - tp.xyz) +
-                      (vec3f(vnoise(hp * 5.1 + 11.0), vnoise(hp * 5.1 + 23.0),
-                             vnoise(hp * 5.1 + 37.0)) - 0.5) * 0.55);
-                    hit.albedo = vec3f(0.40, 0.60, 0.32);
-                    hit.alpha = clamp(a, 0.0, 0.94);
-                    hit.canopy = true;
-                    hit.ok = true;
-                    found = true;
-                  }
-                }
-              }
-            }
+        if (c.nearObj) {
+          let ob = traceObjects(ro, rd, mapX, mapY, dEnter / hlen, dExit / hlen);
+          if (ob.ok) {
+            hit.t = ob.t;
+            hit.n = ob.n;
+            hit.albedo = ob.albedo;
+            hit.canopy = ob.canopy;
+            hit.tExit = ob.tExit;
+            hit.alpha = ob.alpha;
+            hit.emissive = ob.emissive;
+            hit.ok = true;
+            found = true;
           }
         }
         if (found) { break; }
@@ -461,25 +624,76 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
     hit.ok = true;
   }
 
-  // --- entities (cars, pedestrians) as small boxes ---
+  // --- entities: cars and pedestrians, assembled from oriented parts ---
   let n = i32(U.entCount);
   for (var i = 0; i < n; i = i + 1) {
-    let e = ents[i];
-    let lo = vec3f(e.x - e.z, e.y - e.z, 0.0);
-    let hi = vec3f(e.x + e.z, e.y + e.z, e.w);
-    let t = hitBox(ro, rd, lo, hi);
-    if (t >= 0.0 && t < hit.t) {
-      let p = ro + rd * t;
-      // normal from whichever face the point sits on
-      let c = (lo + hi) * 0.5;
-      let d = (p - c) / max((hi - lo) * 0.5, vec3f(1e-4));
-      var nn = vec3f(0.0, 0.0, 1.0);
-      if (abs(d.x) > abs(d.y) && abs(d.x) > abs(d.z)) { nn = vec3f(sign(d.x), 0.0, 0.0); }
-      else if (abs(d.y) > abs(d.z)) { nn = vec3f(0.0, sign(d.y), 0.0); }
-      hit.t = t;
-      hit.n = nn;
-      hit.albedo = select(vec3f(0.75, 0.76, 0.8), vec3f(0.6, 0.62, 0.68), e.w < 1.2);
-      hit.ok = true;
+    let e0 = ents[i * 2];
+    let e1 = ents[i * 2 + 1];
+    let pos = e0.xy;
+    let ca = cos(e0.z);
+    let sa = sin(e0.z);
+    let fwd2 = vec2f(ca, sa);
+    let side2 = vec2f(-sa, ca);
+
+    if (e0.w < 0.5) {
+      // car: body, glasshouse set back, four wheels
+      let L = e1.x;
+      let W = e1.y;
+      let hB = hitOBB(ro, rd, vec3f(pos, 0.52), vec3f(L, W, 0.22), ca, sa);
+      if (hB.x > 0.0 && hB.x < hit.t) {
+        hit.t = hB.x; hit.n = hB.yzw;
+        hit.albedo = vec3f(0.28 + e1.w * 0.5);
+        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+      }
+      let hC = hitOBB(ro, rd, vec3f(pos - fwd2 * (L * 0.12), 0.86),
+                      vec3f(L * 0.46, W * 0.86, 0.20), ca, sa);
+      if (hC.x > 0.0 && hC.x < hit.t) {
+        hit.t = hC.x; hit.n = hC.yzw;
+        hit.albedo = vec3f(0.15, 0.17, 0.20);
+        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+      }
+      for (var w = 0; w < 4; w = w + 1) {
+        let fx = select(-0.62, 0.62, (w & 1) == 1);
+        let fy = select(-1.0, 1.0, (w & 2) == 2);
+        let off = fwd2 * (L * fx) + side2 * (W * fy);
+        let hW = hitOBB(ro, rd, vec3f(pos + off, 0.18),
+                        vec3f(0.18, 0.055, 0.18), ca, sa);
+        if (hW.x > 0.0 && hW.x < hit.t) {
+          hit.t = hW.x; hit.n = hW.yzw;
+          hit.albedo = vec3f(0.08, 0.08, 0.09);
+          hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+        }
+      }
+    } else {
+      // pedestrian: head, torso, two legs swinging out of phase
+      let hgt = e1.z;
+      let swing = sin(U.time * 5.0 + e1.w * 6.283) * 0.15;
+      let headC = vec3f(pos, hgt - 0.13);
+      let hd = hitSphere(ro, rd, headC, 0.125);
+      if (hd.x > 0.001 && hd.x < hit.t) {
+        hit.t = hd.x;
+        hit.n = normalize(ro + rd * hd.x - headC);
+        hit.albedo = vec3f(0.60, 0.53, 0.46);
+        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+      }
+      let hT = hitOBB(ro, rd, vec3f(pos, hgt * 0.63),
+                      vec3f(0.115, 0.16, hgt * 0.20), ca, sa);
+      if (hT.x > 0.0 && hT.x < hit.t) {
+        hit.t = hT.x; hit.n = hT.yzw;
+        hit.albedo = vec3f(0.26 + e1.w * 0.34, 0.30, 0.38);
+        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+      }
+      for (var l = 0; l < 2; l = l + 1) {
+        let sd = select(-1.0, 1.0, l == 1);
+        let off = side2 * (0.072 * sd) + fwd2 * (swing * sd);
+        let hL = hitOBB(ro, rd, vec3f(pos + off, hgt * 0.22),
+                        vec3f(0.058, 0.058, hgt * 0.22), ca, sa);
+        if (hL.x > 0.0 && hL.x < hit.t) {
+          hit.t = hL.x; hit.n = hL.yzw;
+          hit.albedo = vec3f(0.19, 0.20, 0.24);
+          hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+        }
+      }
     }
   }
   return hit;
@@ -519,6 +733,8 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 
     let amb = mix(0.30, 0.55, h.n.z * 0.5 + 0.5) * ao;
     var lit = h.albedo * (amb + ndl * mix(U.shadowK, 1.0, sun) * 0.9);
+    // self-lit surfaces (lamp glass, backlit signage) ignore shadowing
+    lit = lit + h.albedo * h.emissive;
 
     if (sun > 0.0 && !h.canopy) {
       let r = reflect(-U.sunDir, h.n);

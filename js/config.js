@@ -33,5 +33,7 @@ const CFG = {
 
 // Cell types
 const T_GRASS = 0, T_ROAD = 1, T_WALK = 2, T_BLDG = 3, T_TREE = 4;
+// Prop kinds (street furniture), must match the shader constants
+const P_NONE = 0, P_LIGHT = 1, P_BIN = 2, P_BOARD = 3;
 // Cell flags
 const F_LANE = 1, F_ROAD_V = 2, F_ROAD_H = 4;

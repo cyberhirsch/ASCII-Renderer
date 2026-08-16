@@ -30,12 +30,29 @@ const GPURenderer = {
     // world cells: type | height<<8 | ao<<16
     this.uploadWorld();
 
-    // entity buffer: vec4(x, y, halfWidth, height)
+    // two vec4 per entity: (x, y, heading, kind), (halfLen, halfWid, height, phase)
     this.entCount = Entities.cars.length + Entities.peds.length;
-    this.entData = new Float32Array(Math.max(this.entCount, 1) * 4);
+    this.entData = new Float32Array(Math.max(this.entCount, 1) * 8);
     this.entBuf = device.createBuffer({
       size: this.entData.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // billboard signage
+    const signs = SignAtlas.build();
+    this.signCount = signs.count;
+    this.signTex = device.createTexture({
+      size: [signs.canvas.width, signs.canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+             GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    device.queue.copyExternalImageToTexture(
+      { source: signs.canvas }, { texture: this.signTex },
+      [signs.canvas.width, signs.canvas.height]);
+    this.signSamp = device.createSampler({
+      magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
     });
 
     this.buildAtlas(CFG.GLYPH_SET);
@@ -111,8 +128,11 @@ const GPURenderer = {
                   ((Math.min(World.height[i], 255) & 0xff) << 8) |
                   ((World.base[i] & 0xff) << 16);
     }
+    // flag cells whose neighbourhood holds a tree or a prop, so rays only pay
+    // for the object search where something can actually be hit
     for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-      if (World.type[y * W + x] !== T_TREE) continue;
+      const i = y * W + x;
+      if (World.type[i] !== T_TREE && !World.prop[i]) continue;
       const y0 = Math.max(0, y - R), y1 = Math.min(W - 1, y + R);
       const x0 = Math.max(0, x - R), x1 = Math.min(W - 1, x + R);
       for (let ny = y0; ny <= y1; ny++)
@@ -123,6 +143,12 @@ const GPURenderer = {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.device.queue.writeBuffer(this.cellBuf, 0, packed);
+
+    this.propBuf = this.device.createBuffer({
+      size: World.prop.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.propBuf, 0, World.prop);
   },
 
   async checkShader(mod, label) {
@@ -165,6 +191,9 @@ const GPURenderer = {
         { binding: 1, resource: { buffer: this.cellBuf } },
         { binding: 2, resource: this.lowTex.createView() },
         { binding: 3, resource: { buffer: this.entBuf } },
+        { binding: 4, resource: { buffer: this.propBuf } },
+        { binding: 5, resource: this.signTex.createView() },
+        { binding: 6, resource: this.signSamp },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -215,20 +244,29 @@ const GPURenderer = {
     u[24] = CFG.SUN_ANGLE; u[25] = CFG.SUN_SAMPLES;
     u[26] = CFG.AO_SAMPLES; u[27] = CFG.AO_RADIUS;
     u[28] = CFG.TREE_REACH;
+    u[29] = this.signCount;
+    u[30] = (performance.now() / 1000) % 3600;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
       CFG.RAW ? 1 : 0, CFG.TONE_BLACK, CFG.TONE_WHITE, CFG.TONE_GAMMA]));
 
-    // --- entities ---
+    // --- entities: position, heading, and per-instance dimensions ---
     let k = 0;
     for (const c of Entities.cars) {
       this.entData[k++] = c.x; this.entData[k++] = c.y;
-      this.entData[k++] = 0.42; this.entData[k++] = 0.85;
+      this.entData[k++] = Math.atan2(c.dy, c.dx); this.entData[k++] = 0; // car
+      this.entData[k++] = 0.46; this.entData[k++] = 0.24;
+      this.entData[k++] = 0.0;  this.entData[k++] = (c.col % 5) / 5;
     }
     for (const pd of Entities.peds) {
+      const dx = pd.tx - pd.x, dy = pd.ty - pd.y;
+      const ang = (dx * dx + dy * dy) > 1e-6 ? Math.atan2(dy, dx) : 0;
       this.entData[k++] = pd.x; this.entData[k++] = pd.y;
-      this.entData[k++] = 0.16; this.entData[k++] = 1.7;
+      this.entData[k++] = ang;  this.entData[k++] = 1; // pedestrian
+      this.entData[k++] = 0.0;  this.entData[k++] = 0.0;
+      this.entData[k++] = 1.55 + pd.shade * 0.25;
+      this.entData[k++] = pd.shade;
     }
     dev.queue.writeBuffer(this.entBuf, 0, this.entData);
 
