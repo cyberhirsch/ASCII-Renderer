@@ -6,7 +6,9 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  /* size is set in JS to an exact multiple of the glyph cell; stretching it
+     here to the viewport would reintroduce fractional scaling */
+  canvas { display: block; image-rendering: pixelated; }
   canvas[hidden] { display: none; }
   #fail {
     color: #c8d2dc; font: 14px/1.6 "Consolas", monospace;

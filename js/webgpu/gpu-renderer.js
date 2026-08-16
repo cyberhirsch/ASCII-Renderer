@@ -93,7 +93,8 @@ const GPURenderer = {
   // (Re)build the glyph atlas texture. Safe to call at runtime; the render
   // bind group is recreated because the texture object changes.
   buildAtlas(setName) {
-    const atlas = GlyphAtlas.build(setName);
+    const atlas = GlyphAtlas.build(setName, this.cellDev);
+    this.atlasCell = atlas.cell;
     this.levels = atlas.levels;
     this.rampChars = atlas.chars;
     if (this.atlasTex) this.atlasTex.destroy();
@@ -167,13 +168,26 @@ const GPURenderer = {
     return true;
   },
 
+  // Glyphs alias badly unless one atlas texel maps to exactly one device
+  // pixel. Two things break that: a backing store that does not match the
+  // display's pixel ratio, and a canvas whose size is not a whole number of
+  // cells. Both leave the browser resampling at a fractional ratio, which
+  // beats against the glyph strokes as moire.
   resize() {
     const canvas = document.getElementById('screen');
-    const dpr = 1; // glyph cells are the pixels that matter here
-    canvas.width = Math.max(320, Math.floor(innerWidth * dpr));
-    canvas.height = Math.max(240, Math.floor(innerHeight * dpr));
-    this.cols = Math.max(40, Math.floor(canvas.width / this.cellPx));
-    this.rows = Math.max(24, Math.floor(canvas.height / this.cellPx));
+    const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
+    this.dpr = dpr;
+    this.cellDev = Math.max(4, Math.round(this.cellPx * dpr));
+
+    this.cols = Math.max(40, Math.floor((innerWidth * dpr) / this.cellDev));
+    this.rows = Math.max(24, Math.floor((innerHeight * dpr) / this.cellDev));
+
+    // exact whole number of cells, then displayed at exactly that many
+    // device pixels so nothing is rescaled
+    canvas.width = this.cols * this.cellDev;
+    canvas.height = this.rows * this.cellDev;
+    canvas.style.width = (canvas.width / dpr) + 'px';
+    canvas.style.height = (canvas.height / dpr) + 'px';
   },
 
   allocTargets() {
@@ -208,9 +222,12 @@ const GPURenderer = {
   },
 
   handleResize() {
-    const oc = this.cols, or = this.rows;
+    const oc = this.cols, or = this.rows, ocell = this.cellDev;
     this.resize();
-    if (this.ok && (this.cols !== oc || this.rows !== or)) this.allocTargets();
+    if (!this.ok) return;
+    // a changed cell size means the atlas is no longer 1:1 with the display
+    if (this.cellDev !== ocell) { this.buildAtlas(CFG.GLYPH_SET); return; }
+    if (this.cols !== oc || this.rows !== or) this.allocTargets();
   },
 
   render() {

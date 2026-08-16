@@ -100,24 +100,28 @@ const GlyphAtlas = {
     return ramp;
   },
 
-  build(setName) {
+  // cell is the on-screen size of a glyph in device pixels; rendering the
+  // atlas at exactly that size keeps texel-to-pixel mapping 1:1, which is
+  // what stops the glyphs from aliasing into moire
+  build(setName, cell) {
     const ramp = this.buildRamp(setName || CFG.GLYPH_SET);
     this.ramp = ramp;
+    const C = Math.max(4, Math.round(cell || this.CELL));
     const n = ramp.length;
     const cv = document.createElement('canvas');
-    cv.width = this.CELL * n;
-    cv.height = this.CELL;
+    cv.width = C * n;
+    cv.height = C;
     const ctx = cv.getContext('2d');
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.fillStyle = '#fff';
-    ctx.font = `bold ${this.CELL * 0.8}px "Consolas", "Courier New", monospace`;
+    ctx.font = `bold ${Math.max(4, Math.round(C * 0.92))}px "Consolas", "Courier New", monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (let i = 0; i < n; i++) {
-      ctx.fillText(ramp[i].ch, i * this.CELL + this.CELL / 2, this.CELL / 2 + 1);
+      ctx.fillText(ramp[i].ch, i * C + C / 2, C / 2);
     }
-    return { canvas: cv, levels: n, cell: this.CELL,
+    return { canvas: cv, levels: n, cell: C,
              chars: ramp.map(g => g.ch).join('') };
   },
 };
