@@ -51,6 +51,10 @@ struct Uniforms {
   editCount : f32,   // keeps the untouched world paying two comparisons
   editMax   : vec3f,
   pad4      : f32,
+  lampI     : f32,   // headlamp intensity (a carried torch raises it)
+  fellCount : f32,   // felled tree cells in the fells buffer
+  pad5      : f32,
+  pad6      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -61,6 +65,8 @@ struct Uniforms {
 // their voxel deltas as packed signed bytes, four to a word
 @group(0) @binding(3) var<storage, read> editHead : array<vec4f>;
 @group(0) @binding(4) var<storage, read> editData : array<u32>;
+// felled tree cells (ix, iy), nearest the player first
+@group(0) @binding(5) var<storage, read> fells : array<vec2f>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -126,7 +132,6 @@ const CAVE_TSTEP : f32 = ${CAVES.TSTEP};    // occlusion march step in cave air
 const CAVE_BAND : f32 = ${CAVES.BAND};      // depth-band height
 const CAVE_TOP : f32 = ${CAVES.TOP};        // no natural void above this z
 const CAVE_BOT : f32 = ${CAVES.BOT};        // deepest band floor
-const CAVE_LAMP : f32 = ${CFG.LAMP};        // camera headlamp for cave hits
 
 // band floor: low-frequency ramp, slope bounded by construction
 fn caveFloor(k : i32, q : vec2f) -> f32 {
@@ -476,6 +481,18 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32, startCave : bool) -> f32 {
 
 struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32 };
 
+// Chopped trees are removed by a small list of felled cells. Checked only
+// after a tree's presence hash passes - a few scans per ray, never per cell,
+// so the hot DDA walks stay hot.
+fn isFelled(ix : i32, iy : i32) -> bool {
+  let n = i32(U.fellCount);
+  for (var i = 0; i < n; i = i + 1) {
+    let f = fells[i];
+    if (i32(f.x) == ix && i32(f.y) == iy) { return true; }
+  }
+  return false;
+}
+
 fn treeAt(ix : i32, iy : i32) -> Tree {
   var tr : Tree;
   tr.present = false;
@@ -613,6 +630,7 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       let ty = mapY + oy;
       let tr = treeAt(tx, ty);
       if (!tr.present) { continue; }
+      if (isFelled(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
       let g = terrainH(cen);
       let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -748,6 +766,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (!tr.present) { continue; }
         // remember this anchor whether or not the ray hits its canopy
         h3 = h2; h2 = h1; h1 = h0; h0 = tc;
+        if (isFelled(tx, ty)) { continue; }
 
         let g = terrainH(vec2f(tr.cx, tr.cy));
         let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -990,7 +1009,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     // camera headlamp, cave hits only: sunless passages stay explorable
     if (h.cave) {
       lit = lit + h.albedo *
-            (CAVE_LAMP * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
+            (U.lampI * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
     }
 
     // fog: outdoors fades to sky; underground fades to darkness over the

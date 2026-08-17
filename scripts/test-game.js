@@ -10,7 +10,7 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
-const src = ['config', 'util', 'world', 'overlay', 'edits', 'items', 'game']
+const src = ['config', 'util', 'world', 'overlay', 'edits', 'fells', 'items', 'game']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
@@ -192,6 +192,64 @@ if (c.treeSpecies) {
   G.chop(t, c.SPECIES[c.treeSpecies(tix, tiy)]);
   (G.count('wood') === woodBefore && G.toastMsg.includes('axe'))
     ? ok('chop gated on the axe') : fail('chop worked without an axe');
+}
+
+// ---- 8. felling ----
+if (c.Fells) {
+  const { Fells, Game: G } = c;
+  Fells.init();
+  let tix = 0, tiy = 0, T = null;
+  outer4:
+  for (let ix = 100; ix < 500; ix++) {
+    for (let iy = 100; iy < 500; iy++) {
+      const tr = c.treeAt(ix, iy);
+      if (tr) { T = tr; tix = ix; tiy = iy; break outer4; }
+    }
+  }
+  // collision knows the trunk before, forgets it after
+  const nearBefore = c.World.trunkNear(T.cx, T.cy, 1);
+  Fells.add(tix, tiy);
+  const nearAfter = c.World.trunkNear(T.cx, T.cy, 1);
+  (nearBefore && nearBefore.tree.cx === T.cx &&
+   (!nearAfter || nearAfter.tree.cx !== T.cx))
+    ? ok('felled trunk vanishes from collision')
+    : fail('collision still sees the felled trunk');
+  // examine skips it too
+  const g = c.terrainH(T.cx, T.cy);
+  const r = c.World.examineRay(T.cx - 2.5, T.cy, g + 1.2, 1, 0, 0);
+  (!r || r.kind !== 'tree' || r.ix !== tix || r.iy !== tiy)
+    ? ok('examine skips the felled tree')
+    : fail('examine still sees the felled tree');
+  // pack: nearest-first vec2 pairs
+  Fells.add(tix + 200, tiy + 200);
+  const n = Fells.pack(tix, tiy);
+  (n === 2 && Fells.data[0] === tix && Fells.data[1] === tiy)
+    ? ok('fells pack nearest-first')
+    : fail(`fells pack wrong: n=${n} first=${Fells.data[0]},${Fells.data[1]}`);
+  // serialize round-trip
+  const s1 = JSON.stringify([...Fells.set].sort());
+  Fells.set = new Set(JSON.parse(JSON.stringify([...Fells.set])));
+  const s2 = JSON.stringify([...Fells.set].sort());
+  s1 === s2 ? ok('fells persistence stable') : fail('fells round-trip diverged');
+
+  // chop with an axe fells and pays out
+  let cix = 0, ciy = 0, C = null;
+  outer5:
+  for (let ix = -500; ix < -100; ix++) {
+    for (let iy = 100; iy < 500; iy++) {
+      if (c.treeAt(ix, iy)) { cix = ix; ciy = iy; C = true; break outer5; }
+    }
+  }
+  if (C) {
+    G.give('axe', 1);
+    const sp = c.SPECIES[c.treeSpecies(cix, ciy)];
+    const wood0 = G.count('wood');
+    G.chop({ kind: 'tree', ix: cix, iy: ciy, point: [cix, ciy, 5] }, sp);
+    (Fells.has(cix, ciy) && G.count('wood') === wood0 + sp.chop)
+      ? ok(`chop fells a ${sp.name} for ${sp.chop} wood`)
+      : fail('chop with axe failed');
+    G.take('axe', 1);
+  }
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

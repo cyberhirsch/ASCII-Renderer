@@ -81,6 +81,9 @@ const CFG = {
   EDIT_MAX: 32,
   DIG_REACH: 3.5,
   DIG_R: 1.1,
+  // felled trees visible to the GPU (nearest the player); farther felled
+  // trees may visually reappear until this rises in a later phase
+  FELL_MAX: 64,
 };
 </script>
 <script>
@@ -494,6 +497,7 @@ const World = {
       for (let ox = -reach; ox <= reach; ox++) {
         const tr = treeAt(cx + ox, cy + oy);
         if (!tr) continue;
+        if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
         const d = Math.hypot(tr.cx - x, tr.cy - y);
         if (d < bestD) { bestD = d; best = tr; }
       }
@@ -866,6 +870,63 @@ const Edits = {
     if (!this.needSave) return;
     this.saveTimer += dt;
     if (this.saveTimer > 4) { this.saveTimer = 0; this.save(); }
+  },
+};
+</script>
+<script>
+// ---- js/fells.js ----
+// Felled trees: a sparse set of tree cells removed from the hash-placed
+// forest. CPU-authoritative like the dig edits - collision and examine skip
+// felled cells, and the GPU receives the FELL_MAX cells nearest the player
+// so the renderer stops drawing them. Felling is rare, so persistence is a
+// synchronous write on change, no debounce.
+const Fells = {
+  set: new Set(),      // "ix,iy"
+  gpuDirty: false,
+  data: null,          // packed vec2f cells for the GPU
+
+  init() {
+    this.data = new Float32Array(CFG.FELL_MAX * 2);
+    this.load();
+  },
+
+  has(ix, iy) { return this.set.has(ix + ',' + iy); },
+
+  add(ix, iy) {
+    this.set.add(ix + ',' + iy);
+    this.gpuDirty = true;
+    this.save();
+  },
+
+  // pack the FELL_MAX felled cells nearest the player; returns the count
+  pack(px, py) {
+    const cells = [...this.set].map(k => k.split(',').map(Number));
+    cells.sort((a, b) =>
+      ((a[0] - px) ** 2 + (a[1] - py) ** 2) -
+      ((b[0] - px) ** 2 + (b[1] - py) ** 2));
+    const n = Math.min(cells.length, CFG.FELL_MAX);
+    this.data.fill(0);
+    for (let i = 0; i < n; i++) {
+      this.data[i * 2] = cells[i][0];
+      this.data[i * 2 + 1] = cells[i][1];
+    }
+    return n;
+  },
+
+  save() {
+    if (typeof localStorage === 'undefined') return;
+    try { localStorage.setItem('ascii-fells-v1', JSON.stringify([...this.set])); }
+    catch (e) { console.warn('fell save failed: ' + e.message); }
+  },
+
+  load() {
+    if (typeof localStorage === 'undefined') return;
+    const s = localStorage.getItem('ascii-fells-v1');
+    if (!s) return;
+    try {
+      this.set = new Set(JSON.parse(s));
+      this.gpuDirty = this.set.size > 0;
+    } catch (e) { console.warn('fell load failed'); }
   },
 };
 </script>
@@ -1524,6 +1585,10 @@ struct Uniforms {
   editCount : f32,   // keeps the untouched world paying two comparisons
   editMax   : vec3f,
   pad4      : f32,
+  lampI     : f32,   // headlamp intensity (a carried torch raises it)
+  fellCount : f32,   // felled tree cells in the fells buffer
+  pad5      : f32,
+  pad6      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -1534,6 +1599,8 @@ struct Uniforms {
 // their voxel deltas as packed signed bytes, four to a word
 @group(0) @binding(3) var<storage, read> editHead : array<vec4f>;
 @group(0) @binding(4) var<storage, read> editData : array<u32>;
+// felled tree cells (ix, iy), nearest the player first
+@group(0) @binding(5) var<storage, read> fells : array<vec2f>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -1599,7 +1666,6 @@ const CAVE_TSTEP : f32 = ${CAVES.TSTEP};    // occlusion march step in cave air
 const CAVE_BAND : f32 = ${CAVES.BAND};      // depth-band height
 const CAVE_TOP : f32 = ${CAVES.TOP};        // no natural void above this z
 const CAVE_BOT : f32 = ${CAVES.BOT};        // deepest band floor
-const CAVE_LAMP : f32 = ${CFG.LAMP};        // camera headlamp for cave hits
 
 // band floor: low-frequency ramp, slope bounded by construction
 fn caveFloor(k : i32, q : vec2f) -> f32 {
@@ -1949,6 +2015,18 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32, startCave : bool) -> f32 {
 
 struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32 };
 
+// Chopped trees are removed by a small list of felled cells. Checked only
+// after a tree's presence hash passes - a few scans per ray, never per cell,
+// so the hot DDA walks stay hot.
+fn isFelled(ix : i32, iy : i32) -> bool {
+  let n = i32(U.fellCount);
+  for (var i = 0; i < n; i = i + 1) {
+    let f = fells[i];
+    if (i32(f.x) == ix && i32(f.y) == iy) { return true; }
+  }
+  return false;
+}
+
 fn treeAt(ix : i32, iy : i32) -> Tree {
   var tr : Tree;
   tr.present = false;
@@ -2086,6 +2164,7 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       let ty = mapY + oy;
       let tr = treeAt(tx, ty);
       if (!tr.present) { continue; }
+      if (isFelled(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
       let g = terrainH(cen);
       let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -2221,6 +2300,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (!tr.present) { continue; }
         // remember this anchor whether or not the ray hits its canopy
         h3 = h2; h2 = h1; h1 = h0; h0 = tc;
+        if (isFelled(tx, ty)) { continue; }
 
         let g = terrainH(vec2f(tr.cx, tr.cy));
         let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -2463,7 +2543,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     // camera headlamp, cave hits only: sunless passages stay explorable
     if (h.cave) {
       lit = lit + h.albedo *
-            (CAVE_LAMP * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
+            (U.lampI * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
     }
 
     // fog: outdoors fades to sky; underground fades to darkness over the
@@ -2651,11 +2731,18 @@ const GPURenderer = {
     this.editCount = 0;
     this.editBounds = null;
 
+    // felled trees: small list of removed cells (see js/fells.js)
+    this.fellBuf = device.createBuffer({
+      size: CFG.FELL_MAX * 8,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.fellCount = 0;
+
     this.buildAtlas(CFG.GLYPH_SET);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 224, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -2785,6 +2872,7 @@ const GPURenderer = {
         { binding: 2, resource: { buffer: this.entBuf } },
         { binding: 3, resource: { buffer: this.editHeadBuf } },
         { binding: 4, resource: { buffer: this.editDataBuf } },
+        { binding: 5, resource: { buffer: this.fellBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -2840,7 +2928,13 @@ const GPURenderer = {
       Edits.gpuDirty = false;
     }
 
-    const u = new Float32Array(56);
+    if (Fells.gpuDirty) {
+      this.fellCount = Fells.pack(Player.x, Player.y);
+      dev.queue.writeBuffer(this.fellBuf, 0, Fells.data);
+      Fells.gpuDirty = false;
+    }
+
+    const u = new Float32Array(60);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -2868,6 +2962,9 @@ const GPURenderer = {
       u[52] = this.editBounds[3]; u[53] = this.editBounds[4];
       u[54] = this.editBounds[5];
     }
+    // a carried torch brightens the headlamp
+    u[56] = CFG.LAMP * (Game.count('torch') > 0 ? 2.2 : 1);
+    u[57] = this.fellCount;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
@@ -2957,6 +3054,7 @@ const GPURenderer = {
 (async function () {
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
+  Fells.init();       // load persisted felled trees
   Game.init();        // load persisted inventory
   Player.init();
 

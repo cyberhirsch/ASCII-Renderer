@@ -46,6 +46,7 @@ const World = {
       for (let ox = -reach; ox <= reach; ox++) {
         const tr = treeAt(cx + ox, cy + oy);
         if (!tr) continue;
+        if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
         const d = Math.hypot(tr.cx - x, tr.cy - y);
         if (d < bestD) { bestD = d; best = tr; }
       }

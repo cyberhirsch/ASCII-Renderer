@@ -58,4 +58,7 @@ const CFG = {
   EDIT_MAX: 32,
   DIG_REACH: 3.5,
   DIG_R: 1.1,
+  // felled trees visible to the GPU (nearest the player); farther felled
+  // trees may visually reappear until this rises in a later phase
+  FELL_MAX: 64,
 };

@@ -56,11 +56,18 @@ const GPURenderer = {
     this.editCount = 0;
     this.editBounds = null;
 
+    // felled trees: small list of removed cells (see js/fells.js)
+    this.fellBuf = device.createBuffer({
+      size: CFG.FELL_MAX * 8,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.fellCount = 0;
+
     this.buildAtlas(CFG.GLYPH_SET);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 224, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -190,6 +197,7 @@ const GPURenderer = {
         { binding: 2, resource: { buffer: this.entBuf } },
         { binding: 3, resource: { buffer: this.editHeadBuf } },
         { binding: 4, resource: { buffer: this.editDataBuf } },
+        { binding: 5, resource: { buffer: this.fellBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -245,7 +253,13 @@ const GPURenderer = {
       Edits.gpuDirty = false;
     }
 
-    const u = new Float32Array(56);
+    if (Fells.gpuDirty) {
+      this.fellCount = Fells.pack(Player.x, Player.y);
+      dev.queue.writeBuffer(this.fellBuf, 0, Fells.data);
+      Fells.gpuDirty = false;
+    }
+
+    const u = new Float32Array(60);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -273,6 +287,9 @@ const GPURenderer = {
       u[52] = this.editBounds[3]; u[53] = this.editBounds[4];
       u[54] = this.editBounds[5];
     }
+    // a carried torch brightens the headlamp
+    u[56] = CFG.LAMP * (Game.count('torch') > 0 ? 2.2 : 1);
+    u[57] = this.fellCount;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

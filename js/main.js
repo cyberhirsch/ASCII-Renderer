@@ -3,6 +3,7 @@
 (async function () {
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
+  Fells.init();       // load persisted felled trees
   Game.init();        // load persisted inventory
   Player.init();
 
