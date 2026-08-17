@@ -37,9 +37,10 @@
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
+      const ms = (fpsAcc / fpsN) * 1000;
       fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' +
-        GPURenderer.cols + '×' + GPURenderer.rows + ' · ' +
-        Player.x.toFixed(0) + ',' + Player.y.toFixed(0);
+        ms.toFixed(1) + ' ms · ' + GPURenderer.cols + '×' + GPURenderer.rows +
+        ' · ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0);
       fpsAcc = 0; fpsN = 0;
     }
     requestAnimationFrame(frame);
