@@ -641,6 +641,9 @@ struct RParams {
 @group(0) @binding(1) var atlas  : texture_2d<f32>;
 @group(0) @binding(2) var samp   : sampler;
 @group(0) @binding(3) var<uniform> R : RParams;
+// text overlay: one u32 per cell, 0 = transparent, else printable ASCII code
+@group(0) @binding(4) var textAtlas : texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> overlay : array<u32>;
 
 // 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
 // step count, which shows as banding across smooth gradients; offsetting by
@@ -693,6 +696,16 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
     ink = texel.rgb / m;
   }
-  return vec4f(clamp(ink, vec3f(0.0), vec3f(1.0)) * cov, 1.0);
+  var col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
+
+  // text overlay: replaces the scene glyph in this cell, over a dark chip
+  let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
+  let code = overlay[ci];
+  if (code >= 32u && code < 127u) {
+    let au2 = (f32(code - 32u) + inCell.x) / 95.0;
+    let cov2 = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
+    col = mix(col * 0.15, vec3f(0.92, 0.96, 1.0), cov2);
+  }
+  return vec4f(col, 1.0);
 }
 `;

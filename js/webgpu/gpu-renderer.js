@@ -83,6 +83,17 @@ const GPURenderer = {
   buildAtlas(setName) {
     const atlas = GlyphAtlas.build(setName, this.cellDev);
     this.atlasCell = atlas.cell;
+    const text = TextAtlas.build(this.cellDev);
+    if (this.textTex) this.textTex.destroy();
+    this.textTex = this.device.createTexture({
+      size: [text.canvas.width, text.canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+             GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.device.queue.copyExternalImageToTexture(
+      { source: text.canvas }, { texture: this.textTex },
+      [text.canvas.width, text.canvas.height]);
     this.levels = atlas.levels;
     this.rampChars = atlas.chars;
     if (this.atlasTex) this.atlasTex.destroy();
@@ -145,6 +156,12 @@ const GPURenderer = {
 
   allocTargets() {
     if (this.lowTex) this.lowTex.destroy();
+    if (this.overlayBuf) this.overlayBuf.destroy();
+    this.overlayBuf = this.device.createBuffer({
+      size: this.cols * this.rows * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    Overlay.resize(this.cols, this.rows);
     this.lowTex = this.device.createTexture({
       size: [this.cols, this.rows],
       format: 'rgba8unorm',
@@ -166,6 +183,8 @@ const GPURenderer = {
         { binding: 1, resource: this.atlasTex.createView() },
         { binding: 2, resource: this.sampler },
         { binding: 3, resource: { buffer: this.rparBuf } },
+        { binding: 4, resource: this.textTex.createView() },
+        { binding: 5, resource: { buffer: this.overlayBuf } },
       ],
     });
   },
@@ -239,6 +258,12 @@ const GPURenderer = {
       this.entData[k++] = e.e1 ? e.e1[3] : 0;
     }
     if (live > 0) dev.queue.writeBuffer(this.entBuf, 0, this.entData);
+
+    if (Overlay.dirty && Overlay.data &&
+        Overlay.data.byteLength === this.cols * this.rows * 4) {
+      dev.queue.writeBuffer(this.overlayBuf, 0, Overlay.data);
+      Overlay.dirty = false;
+    }
 
     const enc = dev.createCommandEncoder();
     const cpass = enc.beginComputePass();

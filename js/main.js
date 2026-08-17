@@ -25,7 +25,7 @@
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0;
-  const fpsEl = document.getElementById('fps');
+  const HUD_LINE = 'wasd move · shift run · click mouse-look · M mono · C glyphs · X raw · F fullscreen';
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -38,9 +38,11 @@
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       const ms = (fpsAcc / fpsN) * 1000;
-      fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' +
-        ms.toFixed(1) + ' ms · ' + GPURenderer.cols + '×' + GPURenderer.rows +
-        ' · ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0);
+      Overlay.clear();
+      Overlay.writeRight(0, Math.round(fpsN / fpsAcc) + ' fps ' +
+        ms.toFixed(1) + ' ms ' + GPURenderer.cols + 'x' + GPURenderer.rows +
+        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ');
+      Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       fpsAcc = 0; fpsN = 0;
     }
     requestAnimationFrame(frame);

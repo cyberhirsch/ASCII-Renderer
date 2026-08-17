@@ -33,6 +33,30 @@ const SignAtlas = {
   },
 };
 
+// Full printable-ASCII strip (codes 32..126) for the text overlay, rendered
+// at the display cell size like the ramp atlas so texels stay 1:1 with pixels.
+const TextAtlas = {
+  FIRST: 32, COUNT: 95,
+
+  build(cell) {
+    const C = Math.max(4, Math.round(cell || 16));
+    const cv = document.createElement('canvas');
+    cv.width = C * this.COUNT;
+    cv.height = C;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.max(4, Math.round(C * 0.92))}px "Consolas", "Courier New", monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < this.COUNT; i++) {
+      ctx.fillText(String.fromCharCode(this.FIRST + i), i * C + C / 2, C / 2);
+    }
+    return { canvas: cv, cell: C };
+  },
+};
+
 const GlyphAtlas = {
   // Candidate pools, printable ASCII only — no block elements, which read as
   // pixels rather than as text. Both pools top out near 25% ink, so the tone

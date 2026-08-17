@@ -15,22 +15,10 @@
     max-width: 34em; padding: 2em; text-align: center;
   }
   #fail h1 { font-size: 1.4em; font-weight: 600; color: #e8eef4; }
-  #hud {
-    position: fixed; left: 10px; bottom: 8px;
-    font: 12px "Consolas", monospace; color: #9fb0bd; user-select: none;
-    background: rgba(10, 14, 18, 0.5); padding: 3px 8px; border-radius: 3px;
-  }
-  #fps {
-    position: fixed; right: 10px; top: 8px;
-    font: bold 13px "Consolas", monospace; color: #d8e4ee;
-    background: rgba(10, 14, 18, 0.65); padding: 3px 8px; border-radius: 3px;
-  }
 </style>
 </head>
 <body>
 <canvas id="screen"></canvas>
-<div id="hud">WASD move &middot; arrows turn &middot; shift run &middot; click for mouse-look &middot; M mono/colour &middot; C glyph set &middot; X raw view &middot; F fullscreen</div>
-<div id="fps"></div>
 <script>
 // ---- js/config.js ----
 // Global configuration. Plain script, shared global scope (inlined at build time).
@@ -193,6 +181,41 @@ const World = {
 };
 </script>
 <script>
+// ---- js/overlay.js ----
+// Text overlay composited into the ASCII grid by the glyph pass — the HUD is
+// made of the same character cells as the world, not a DOM layer floating
+// over it. Cell value 0 is transparent; any printable ASCII code (32..126)
+// renders that character over a dark backing chip.
+const Overlay = {
+  cols: 0, rows: 0, data: null, dirty: false,
+
+  resize(cols, rows) {
+    this.cols = cols; this.rows = rows;
+    this.data = new Uint32Array(cols * rows);
+    this.dirty = true;
+  },
+
+  clear() {
+    if (this.data) this.data.fill(0);
+    this.dirty = true;
+  },
+
+  write(x, y, str) {
+    if (!this.data || y < 0 || y >= this.rows) return;
+    for (let i = 0; i < str.length; i++) {
+      const cx = x + i;
+      if (cx < 0 || cx >= this.cols) continue;
+      const code = str.charCodeAt(i);
+      this.data[y * this.cols + cx] = (code >= 32 && code < 127) ? code : 32;
+    }
+    this.dirty = true;
+  },
+
+  writeRight(y, str) { this.write(this.cols - 1 - str.length, y, str); },
+  writeCentre(y, str) { this.write((this.cols - str.length) >> 1, y, str); },
+};
+</script>
+<script>
 // ---- js/entities.js ----
 // Creatures and other mobile things. The city traffic is gone with the city;
 // this list will hold wardens and NPCs from the creature phase onward.
@@ -328,6 +351,30 @@ const SignAtlas = {
       ctx.fillText(t, this.W / 2, this.H * i + this.H / 2);
     }
     return { canvas: cv, count: n };
+  },
+};
+
+// Full printable-ASCII strip (codes 32..126) for the text overlay, rendered
+// at the display cell size like the ramp atlas so texels stay 1:1 with pixels.
+const TextAtlas = {
+  FIRST: 32, COUNT: 95,
+
+  build(cell) {
+    const C = Math.max(4, Math.round(cell || 16));
+    const cv = document.createElement('canvas');
+    cv.width = C * this.COUNT;
+    cv.height = C;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.max(4, Math.round(C * 0.92))}px "Consolas", "Courier New", monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < this.COUNT; i++) {
+      ctx.fillText(String.fromCharCode(this.FIRST + i), i * C + C / 2, C / 2);
+    }
+    return { canvas: cv, cell: C };
   },
 };
 
@@ -1069,6 +1116,9 @@ struct RParams {
 @group(0) @binding(1) var atlas  : texture_2d<f32>;
 @group(0) @binding(2) var samp   : sampler;
 @group(0) @binding(3) var<uniform> R : RParams;
+// text overlay: one u32 per cell, 0 = transparent, else printable ASCII code
+@group(0) @binding(4) var textAtlas : texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> overlay : array<u32>;
 
 // 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
 // step count, which shows as banding across smooth gradients; offsetting by
@@ -1121,7 +1171,17 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
     ink = texel.rgb / m;
   }
-  return vec4f(clamp(ink, vec3f(0.0), vec3f(1.0)) * cov, 1.0);
+  var col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
+
+  // text overlay: replaces the scene glyph in this cell, over a dark chip
+  let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
+  let code = overlay[ci];
+  if (code >= 32u && code < 127u) {
+    let au2 = (f32(code - 32u) + inCell.x) / 95.0;
+    let cov2 = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
+    col = mix(col * 0.15, vec3f(0.92, 0.96, 1.0), cov2);
+  }
+  return vec4f(col, 1.0);
 }
 `;
 </script>
@@ -1212,6 +1272,17 @@ const GPURenderer = {
   buildAtlas(setName) {
     const atlas = GlyphAtlas.build(setName, this.cellDev);
     this.atlasCell = atlas.cell;
+    const text = TextAtlas.build(this.cellDev);
+    if (this.textTex) this.textTex.destroy();
+    this.textTex = this.device.createTexture({
+      size: [text.canvas.width, text.canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+             GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.device.queue.copyExternalImageToTexture(
+      { source: text.canvas }, { texture: this.textTex },
+      [text.canvas.width, text.canvas.height]);
     this.levels = atlas.levels;
     this.rampChars = atlas.chars;
     if (this.atlasTex) this.atlasTex.destroy();
@@ -1274,6 +1345,12 @@ const GPURenderer = {
 
   allocTargets() {
     if (this.lowTex) this.lowTex.destroy();
+    if (this.overlayBuf) this.overlayBuf.destroy();
+    this.overlayBuf = this.device.createBuffer({
+      size: this.cols * this.rows * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    Overlay.resize(this.cols, this.rows);
     this.lowTex = this.device.createTexture({
       size: [this.cols, this.rows],
       format: 'rgba8unorm',
@@ -1295,6 +1372,8 @@ const GPURenderer = {
         { binding: 1, resource: this.atlasTex.createView() },
         { binding: 2, resource: this.sampler },
         { binding: 3, resource: { buffer: this.rparBuf } },
+        { binding: 4, resource: this.textTex.createView() },
+        { binding: 5, resource: { buffer: this.overlayBuf } },
       ],
     });
   },
@@ -1368,6 +1447,12 @@ const GPURenderer = {
       this.entData[k++] = e.e1 ? e.e1[3] : 0;
     }
     if (live > 0) dev.queue.writeBuffer(this.entBuf, 0, this.entData);
+
+    if (Overlay.dirty && Overlay.data &&
+        Overlay.data.byteLength === this.cols * this.rows * 4) {
+      dev.queue.writeBuffer(this.overlayBuf, 0, Overlay.data);
+      Overlay.dirty = false;
+    }
 
     const enc = dev.createCommandEncoder();
     const cpass = enc.beginComputePass();
@@ -1455,7 +1540,7 @@ const GPURenderer = {
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0;
-  const fpsEl = document.getElementById('fps');
+  const HUD_LINE = 'wasd move · shift run · click mouse-look · M mono · C glyphs · X raw · F fullscreen';
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -1468,9 +1553,11 @@ const GPURenderer = {
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       const ms = (fpsAcc / fpsN) * 1000;
-      fpsEl.textContent = Math.round(fpsN / fpsAcc) + ' fps · ' +
-        ms.toFixed(1) + ' ms · ' + GPURenderer.cols + '×' + GPURenderer.rows +
-        ' · ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0);
+      Overlay.clear();
+      Overlay.writeRight(0, Math.round(fpsN / fpsAcc) + ' fps ' +
+        ms.toFixed(1) + ' ms ' + GPURenderer.cols + 'x' + GPURenderer.rows +
+        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ');
+      Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       fpsAcc = 0; fpsN = 0;
     }
     requestAnimationFrame(frame);
