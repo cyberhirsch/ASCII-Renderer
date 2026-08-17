@@ -1,7 +1,7 @@
 // Global configuration. Plain script, shared global scope (inlined at build time).
 const CFG = {
   PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
-  MAX_DIST: 90,       // ray cutoff (world units); beyond fades to haze
+  MAX_DIST: 140,      // ray cutoff (world units); beyond fades to haze
   EYE: 1.55,          // camera height above ground
   SEED: 8151623,      // world seed; MUST stay below 2^24 so the f32 uniform
                       // carries it exactly and CPU and GPU agree on the world
@@ -25,14 +25,14 @@ const CFG = {
   SUN_EL: 0.7,        // sun elevation (rad)
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   SUN_ANGLE: 0.018,   // angular radius of the sun disc -> penumbra softness
-  SUN_SAMPLES: 8,     // shadow rays per pixel
-  AO_SAMPLES: 12,     // hemisphere rays per pixel
+  SUN_SAMPLES: 16,    // shadow rays per pixel
+  AO_SAMPLES: 32,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, world units
   TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
-  // lighting LOD: full shadow/AO ray budgets inside SHADE_NEAR, tapering to a
-  // single hard shadow ray and constant ambient beyond SHADE_FAR
-  SHADE_NEAR: 16,
-  SHADE_FAR: 48,
+  // lighting LOD: full shadow/AO ray budgets inside SHADE_NEAR, tapering to
+  // nothing at SHADE_FAR - beyond it no shadow or AO rays are traced at all
+  SHADE_NEAR: 60,
+  SHADE_FAR: 100,
   // terrain: a continuous, infinite heightfield evaluated in the shader and
   // mirrored in js/util.js. No stored grid, no world bounds.
   TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units

@@ -38,13 +38,13 @@ struct Uniforms {
   treeReach : f32,   // cells to search for overhanging canopies
   seaLevel  : f32,
   time      : f32,
-  shadeNear : f32,   // full shadow/AO quality inside this distance
+  shadeNear : f32,   // full ray budgets inside this distance
   sunCol    : vec3f,
   sunI      : f32,
   ambCol    : vec3f,
   ambI      : f32,
   skyLo     : vec3f,
-  shadeFar  : f32,   // beyond this: 1 hard shadow ray, constant AO
+  shadeFar  : f32,   // beyond this: no shadow/AO rays at all
   skyHi     : vec3f,
   pad3      : f32,
 };
@@ -534,9 +534,11 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     let dHit = h.t + length(org - ro);
     let q = clamp(1.0 - (dHit - U.shadeNear) / max(U.shadeFar - U.shadeNear, 1e-3),
                   0.0, 1.0);
-    let nSun = max(1, i32(round(U.sunSamples * q)));
+    let nSun = i32(round(U.sunSamples * q));
     let nAO = i32(round(U.aoSamples * q));
-    let sun = softShadow(p, seed, nSun);
+    // beyond shadeFar nothing is traced: unshadowed sun, constant ambient
+    var sun = 1.0;
+    if (nSun > 0) { sun = softShadow(p, seed, nSun); }
     var ao = 0.88;
     if (nAO > 0) { ao = tracedAO(p, h.n, seed, nAO); }
     let ndl = select(max(dot(h.n, U.sunDir), 0.0),
