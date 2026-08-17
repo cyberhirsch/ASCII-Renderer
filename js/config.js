@@ -24,7 +24,9 @@ const CFG = {
   SUN_AZ: 0.9,        // sun azimuth (rad)
   SUN_EL: 0.7,        // sun elevation (rad)
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
-  SUN_ANGLE: 0.018,   // angular radius of the sun disc -> penumbra softness
+  // wide sun disc: broad, soft penumbrae that grow with distance from the
+  // occluder (0.05 rad is the "soft shadows" look; the real sun is 0.0047)
+  SUN_ANGLE: 0.05,
   SUN_SAMPLES: 16,    // shadow rays per pixel
   AO_SAMPLES: 32,     // hemisphere rays per pixel
   AO_RADIUS: 9,       // AO ray length, world units
