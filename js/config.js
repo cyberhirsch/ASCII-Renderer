@@ -33,6 +33,7 @@ const CFG = {
   MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii
   MOON_GLOW: 0.10,    // halo strength around the disc
   MOON_GLOW_P: 400,   // halo tightness; higher is a smaller halo
+  MOON_DARK: 0.04,    // earthshine lift on the unlit limb
   STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
   STAR_RARE: 0.976,   // hash above this is a star, at full night
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
@@ -70,7 +71,7 @@ const CFG = {
   EDIT_MAX: 32,
   DIG_REACH: 3.5,
   DIG_R: 1.1,
-  // felled trees visible to the GPU (nearest the player); farther felled
-  // trees may visually reappear until this rises in a later phase
-  FELL_MAX: 64,
+  // cleared cells visible to the GPU (nearest the player); farther cleared
+  // props may visually reappear until this rises in a later phase
+  REMOVED_MAX: 64,
 };

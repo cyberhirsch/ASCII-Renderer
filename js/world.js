@@ -46,7 +46,7 @@ const World = {
       for (let ox = -reach; ox <= reach; ox++) {
         const tr = treeAt(cx + ox, cy + oy);
         if (!tr) continue;
-        if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
+        if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
         const d = Math.hypot(tr.cx - x, tr.cy - y);
         if (d < bestD) { bestD = d; best = tr; }
       }
@@ -67,7 +67,7 @@ const World = {
         for (let ox = -2; ox <= 2; ox++) {
           const tr = treeAt(cx + ox, cy + oy);
           if (!tr) continue;
-          if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
+          if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
           const g = terrainH(tr.cx, tr.cy);
           const d2 = (px - tr.cx) ** 2 + (py - tr.cy) ** 2;
           const canZ = g + tr.trunkH + tr.r * 0.55;

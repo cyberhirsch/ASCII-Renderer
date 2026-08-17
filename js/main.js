@@ -6,7 +6,7 @@
 
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
-  Fells.init();       // load persisted felled trees
+  Removed.init();     // load persisted cleared cells
   Game.init();        // load persisted inventory
   Boot.set('finding a door');
   await breathe();

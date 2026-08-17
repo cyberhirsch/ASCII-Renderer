@@ -111,6 +111,7 @@ const CFG = {
   MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii
   MOON_GLOW: 0.10,    // halo strength around the disc
   MOON_GLOW_P: 400,   // halo tightness; higher is a smaller halo
+  MOON_DARK: 0.04,    // earthshine lift on the unlit limb
   STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
   STAR_RARE: 0.976,   // hash above this is a star, at full night
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
@@ -148,9 +149,9 @@ const CFG = {
   EDIT_MAX: 32,
   DIG_REACH: 3.5,
   DIG_R: 1.1,
-  // felled trees visible to the GPU (nearest the player); farther felled
-  // trees may visually reappear until this rises in a later phase
-  FELL_MAX: 64,
+  // cleared cells visible to the GPU (nearest the player); farther cleared
+  // props may visually reappear until this rises in a later phase
+  REMOVED_MAX: 64,
 };
 </script>
 <script>
@@ -631,7 +632,7 @@ const World = {
       for (let ox = -reach; ox <= reach; ox++) {
         const tr = treeAt(cx + ox, cy + oy);
         if (!tr) continue;
-        if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
+        if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
         const d = Math.hypot(tr.cx - x, tr.cy - y);
         if (d < bestD) { bestD = d; best = tr; }
       }
@@ -652,7 +653,7 @@ const World = {
         for (let ox = -2; ox <= 2; ox++) {
           const tr = treeAt(cx + ox, cy + oy);
           if (!tr) continue;
-          if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
+          if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
           const g = terrainH(tr.cx, tr.cy);
           const d2 = (px - tr.cx) ** 2 + (py - tr.cy) ** 2;
           const canZ = g + tr.trunkH + tr.r * 0.55;
@@ -1116,19 +1117,21 @@ const Edits = {
 };
 </script>
 <script>
-// ---- js/fells.js ----
-// Felled trees: a sparse set of tree cells removed from the hash-placed
-// forest. CPU-authoritative like the dig edits - collision and examine skip
-// felled cells, and the GPU receives the FELL_MAX cells nearest the player
-// so the renderer stops drawing them. Felling is rare, so persistence is a
+// ---- js/removed.js ----
+// Cleared cells: a sparse set of world cells whose hash-placed prop the
+// player has taken away - a felled tree, a pocketed stone, a broken rock.
+// One cell holds one prop, so a single set covers all of them.
+// CPU-authoritative like the dig edits: collision and examine skip cleared
+// cells, and the GPU receives the REMOVED_MAX cells nearest the player so the
+// renderer stops drawing them. Clearing is rare, so persistence is a
 // synchronous write on change, no debounce.
-const Fells = {
+const Removed = {
   set: new Set(),      // "ix,iy"
   gpuDirty: false,
   data: null,          // packed vec2f cells for the GPU
 
   init() {
-    this.data = new Float32Array(CFG.FELL_MAX * 2);
+    this.data = new Float32Array(CFG.REMOVED_MAX * 2);
     this.load();
   },
 
@@ -1140,13 +1143,13 @@ const Fells = {
     this.save();
   },
 
-  // pack the FELL_MAX felled cells nearest the player; returns the count
+  // pack the REMOVED_MAX cleared cells nearest the player; returns the count
   pack(px, py) {
     const cells = [...this.set].map(k => k.split(',').map(Number));
     cells.sort((a, b) =>
       ((a[0] - px) ** 2 + (a[1] - py) ** 2) -
       ((b[0] - px) ** 2 + (b[1] - py) ** 2));
-    const n = Math.min(cells.length, CFG.FELL_MAX);
+    const n = Math.min(cells.length, CFG.REMOVED_MAX);
     this.data.fill(0);
     for (let i = 0; i < n; i++) {
       this.data[i * 2] = cells[i][0];
@@ -1157,18 +1160,18 @@ const Fells = {
 
   save() {
     if (typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('ascii-fells-v1', JSON.stringify([...this.set])); }
-    catch (e) { console.warn('fell save failed: ' + e.message); }
+    try { localStorage.setItem('ascii-removed-v1', JSON.stringify([...this.set])); }
+    catch (e) { console.warn('cleared-cell save failed: ' + e.message); }
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-fells-v1');
+    const s = localStorage.getItem('ascii-removed-v1');
     if (!s) return;
     try {
       this.set = new Set(JSON.parse(s));
       this.gpuDirty = this.set.size > 0;
-    } catch (e) { console.warn('fell load failed'); }
+    } catch (e) { console.warn('cleared-cell load failed'); }
   },
 };
 </script>
@@ -1185,7 +1188,7 @@ const ITEMS = {
   copper: { name: 'copper ore',  desc: 'Green-crusted, soft, warm-toned.' },
   iron:   { name: 'iron ore',    desc: 'Heavy, dull, faintly magnetic.' },
   gem:    { name: 'gem',         desc: 'It holds the light a moment too long.' },
-  axe:    { name: 'stone axe',   desc: 'Fells trees.' },
+  axe:    { name: 'stone axe',   desc: 'Removed trees.' },
   pick:   { name: 'stone pickaxe', desc: 'Breaks stone and frees ore.' },
   shovel: { name: 'wooden shovel', desc: 'Moves soil. Useless on rock.' },
   torch:  { name: 'torch',       desc: 'Brightens your lamp while carried.' },
@@ -1471,8 +1474,8 @@ const Game = {
 
   chop(t, sp) {
     if (!this.count('axe')) { this.toast('you need an axe for that'); return; }
-    if (typeof Fells === 'undefined') { this.toast('the axe is not sharp yet'); return; }
-    Fells.add(t.ix, t.iy);
+    if (typeof Removed === 'undefined') { this.toast('the axe is not sharp yet'); return; }
+    Removed.add(t.ix, t.iy);
     this.give('wood', sp.chop);
     this.toast('the ' + sp.name + ' falls  (+' + sp.chop + ' wood)');
     this.close();
@@ -2015,7 +2018,7 @@ struct Uniforms {
   editMax   : vec3f,
   pad4      : f32,
   lampI     : f32,   // headlamp intensity (a carried torch raises it)
-  fellCount : f32,   // felled tree cells in the fells buffer
+  removedCount : f32,   // cleared cells in the removed buffer
   pad5      : f32,
   pad6      : f32,
   moonDir   : vec3f, // the moon runs opposite the sun
@@ -2030,8 +2033,8 @@ struct Uniforms {
 // their voxel deltas as packed signed bytes, four to a word
 @group(0) @binding(3) var<storage, read> editHead : array<vec4f>;
 @group(0) @binding(4) var<storage, read> editData : array<u32>;
-// felled tree cells (ix, iy), nearest the player first
-@group(0) @binding(5) var<storage, read> fells : array<vec2f>;
+// cleared cells (ix, iy), nearest the player first
+@group(0) @binding(5) var<storage, read> removed : array<vec2f>;
 // per-cell forced glyph for stars: 0 = none, else an ASCII code. Stars have
 // to be specific characters, and the glyph is otherwise chosen by luminance
 // in the render pass - so the compute pass names the character here.
@@ -2450,13 +2453,14 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32, startCave : bool) -> f32 {
 
 struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32 };
 
-// Chopped trees are removed by a small list of felled cells. Checked only
+// Props the player has taken away are listed in a small cleared-cell set.
+// Checked only
 // after a tree's presence hash passes - a few scans per ray, never per cell,
 // so the hot DDA walks stay hot.
-fn isFelled(ix : i32, iy : i32) -> bool {
-  let n = i32(U.fellCount);
+fn isRemoved(ix : i32, iy : i32) -> bool {
+  let n = i32(U.removedCount);
   for (var i = 0; i < n; i = i + 1) {
-    let f = fells[i];
+    let f = removed[i];
     if (i32(f.x) == ix && i32(f.y) == iy) { return true; }
   }
   return false;
@@ -2642,7 +2646,7 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       let ty = mapY + oy;
       let tr = treeAt(tx, ty);
       if (!tr.present) { continue; }
-      if (isFelled(tx, ty)) { continue; }
+      if (isRemoved(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
       let g = terrainH(cen);
       let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -2779,7 +2783,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (!tr.present) { continue; }
         // remember this anchor whether or not the ray hits its canopy
         h3 = h2; h2 = h1; h1 = h0; h0 = tc;
-        if (isFelled(tx, ty)) { continue; }
+        if (isRemoved(tx, ty)) { continue; }
 
         let g = terrainH(vec2f(tr.cx, tr.cy));
         let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -2902,7 +2906,13 @@ fn shadeSky(rd : vec3f) -> vec3f {
                             ${CFG.MOON_GLOW_P}) * ${CFG.MOON_GLOW} * U.night;
   let m = moonAt(nrd);
   if (m == 2) { col = moonCol * 1.7; }
-  else if (m == 1) { col = vec3f(0.02, 0.03, 0.07); }
+  else if (m == 1) {
+    // The unlit limb is not a hole in the sky - nothing up there is darker
+    // than the atmosphere in front of it. Earthshine keeps it a shade
+    // brighter than the surrounding blue, which is what makes it read as a
+    // sphere standing before the stars instead of a gap in them.
+    col = col * 1.25 + vec3f(${CFG.MOON_DARK});
+  }
   if (rd.z < 0.0) {
     col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
   }
@@ -3310,12 +3320,12 @@ const GPURenderer = {
     this.editCount = 0;
     this.editBounds = null;
 
-    // felled trees: small list of removed cells (see js/fells.js)
-    this.fellBuf = device.createBuffer({
-      size: CFG.FELL_MAX * 8,
+    // cleared cells: props the player has taken away (see js/removed.js)
+    this.removedBuf = device.createBuffer({
+      size: CFG.REMOVED_MAX * 8,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    this.fellCount = 0;
+    this.removedCount = 0;
 
     this.buildAtlas(CFG.GLYPH_SET);
 
@@ -3458,7 +3468,7 @@ const GPURenderer = {
         { binding: 2, resource: { buffer: this.entBuf } },
         { binding: 3, resource: { buffer: this.editHeadBuf } },
         { binding: 4, resource: { buffer: this.editDataBuf } },
-        { binding: 5, resource: { buffer: this.fellBuf } },
+        { binding: 5, resource: { buffer: this.removedBuf } },
         { binding: 6, resource: { buffer: this.starBuf } },
       ],
     });
@@ -3516,10 +3526,10 @@ const GPURenderer = {
       Edits.gpuDirty = false;
     }
 
-    if (Fells.gpuDirty) {
-      this.fellCount = Fells.pack(Player.x, Player.y);
-      dev.queue.writeBuffer(this.fellBuf, 0, Fells.data);
-      Fells.gpuDirty = false;
+    if (Removed.gpuDirty) {
+      this.removedCount = Removed.pack(Player.x, Player.y);
+      dev.queue.writeBuffer(this.removedBuf, 0, Removed.data);
+      Removed.gpuDirty = false;
     }
 
     const u = new Float32Array(64);
@@ -3553,7 +3563,7 @@ const GPURenderer = {
     // a carried light brightens the headlamp; the gem lantern beats a torch
     u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
                       : Game.count('torch') > 0 ? 2.2 : 1);
-    u[57] = this.fellCount;
+    u[57] = this.removedCount;
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
@@ -3648,7 +3658,7 @@ const GPURenderer = {
 
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
-  Fells.init();       // load persisted felled trees
+  Removed.init();     // load persisted cleared cells
   Game.init();        // load persisted inventory
   Boot.set('finding a door');
   await breathe();

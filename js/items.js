@@ -9,7 +9,7 @@ const ITEMS = {
   copper: { name: 'copper ore',  desc: 'Green-crusted, soft, warm-toned.' },
   iron:   { name: 'iron ore',    desc: 'Heavy, dull, faintly magnetic.' },
   gem:    { name: 'gem',         desc: 'It holds the light a moment too long.' },
-  axe:    { name: 'stone axe',   desc: 'Fells trees.' },
+  axe:    { name: 'stone axe',   desc: 'Removed trees.' },
   pick:   { name: 'stone pickaxe', desc: 'Breaks stone and frees ore.' },
   shovel: { name: 'wooden shovel', desc: 'Moves soil. Useless on rock.' },
   torch:  { name: 'torch',       desc: 'Brightens your lamp while carried.' },

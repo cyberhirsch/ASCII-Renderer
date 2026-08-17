@@ -52,7 +52,7 @@ struct Uniforms {
   editMax   : vec3f,
   pad4      : f32,
   lampI     : f32,   // headlamp intensity (a carried torch raises it)
-  fellCount : f32,   // felled tree cells in the fells buffer
+  removedCount : f32,   // cleared cells in the removed buffer
   pad5      : f32,
   pad6      : f32,
   moonDir   : vec3f, // the moon runs opposite the sun
@@ -67,8 +67,8 @@ struct Uniforms {
 // their voxel deltas as packed signed bytes, four to a word
 @group(0) @binding(3) var<storage, read> editHead : array<vec4f>;
 @group(0) @binding(4) var<storage, read> editData : array<u32>;
-// felled tree cells (ix, iy), nearest the player first
-@group(0) @binding(5) var<storage, read> fells : array<vec2f>;
+// cleared cells (ix, iy), nearest the player first
+@group(0) @binding(5) var<storage, read> removed : array<vec2f>;
 // per-cell forced glyph for stars: 0 = none, else an ASCII code. Stars have
 // to be specific characters, and the glyph is otherwise chosen by luminance
 // in the render pass - so the compute pass names the character here.
@@ -487,13 +487,14 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32, startCave : bool) -> f32 {
 
 struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32 };
 
-// Chopped trees are removed by a small list of felled cells. Checked only
+// Props the player has taken away are listed in a small cleared-cell set.
+// Checked only
 // after a tree's presence hash passes - a few scans per ray, never per cell,
 // so the hot DDA walks stay hot.
-fn isFelled(ix : i32, iy : i32) -> bool {
-  let n = i32(U.fellCount);
+fn isRemoved(ix : i32, iy : i32) -> bool {
+  let n = i32(U.removedCount);
   for (var i = 0; i < n; i = i + 1) {
-    let f = fells[i];
+    let f = removed[i];
     if (i32(f.x) == ix && i32(f.y) == iy) { return true; }
   }
   return false;
@@ -679,7 +680,7 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       let ty = mapY + oy;
       let tr = treeAt(tx, ty);
       if (!tr.present) { continue; }
-      if (isFelled(tx, ty)) { continue; }
+      if (isRemoved(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
       let g = terrainH(cen);
       let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -816,7 +817,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (!tr.present) { continue; }
         // remember this anchor whether or not the ray hits its canopy
         h3 = h2; h2 = h1; h1 = h0; h0 = tc;
-        if (isFelled(tx, ty)) { continue; }
+        if (isRemoved(tx, ty)) { continue; }
 
         let g = terrainH(vec2f(tr.cx, tr.cy));
         let canZ = g + tr.trunkH + tr.r * 0.55;
@@ -939,7 +940,13 @@ fn shadeSky(rd : vec3f) -> vec3f {
                             ${CFG.MOON_GLOW_P}) * ${CFG.MOON_GLOW} * U.night;
   let m = moonAt(nrd);
   if (m == 2) { col = moonCol * 1.7; }
-  else if (m == 1) { col = vec3f(0.02, 0.03, 0.07); }
+  else if (m == 1) {
+    // The unlit limb is not a hole in the sky - nothing up there is darker
+    // than the atmosphere in front of it. Earthshine keeps it a shade
+    // brighter than the surrounding blue, which is what makes it read as a
+    // sphere standing before the stars instead of a gap in them.
+    col = col * 1.25 + vec3f(${CFG.MOON_DARK});
+  }
   if (rd.z < 0.0) {
     col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
   }

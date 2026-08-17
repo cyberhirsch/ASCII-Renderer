@@ -10,12 +10,12 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
-const src = ['config', 'util', 'world', 'sky', 'overlay', 'edits', 'fells',
+const src = ['config', 'util', 'world', 'sky', 'overlay', 'edits', 'removed',
              'items', 'game']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
-  ['vnoise', 'Fells', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
+  ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky'].map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -197,9 +197,9 @@ if (c.treeSpecies) {
 }
 
 // ---- 8. felling ----
-if (c.Fells) {
-  const { Fells, Game: G } = c;
-  Fells.init();
+if (c.Removed) {
+  const { Removed, Game: G } = c;
+  Removed.init();
   let tix = 0, tiy = 0, T = null;
   outer4:
   for (let ix = 100; ix < 500; ix++) {
@@ -210,7 +210,7 @@ if (c.Fells) {
   }
   // collision knows the trunk before, forgets it after
   const nearBefore = c.World.trunkNear(T.cx, T.cy, 1);
-  Fells.add(tix, tiy);
+  Removed.add(tix, tiy);
   const nearAfter = c.World.trunkNear(T.cx, T.cy, 1);
   (nearBefore && nearBefore.tree.cx === T.cx &&
    (!nearAfter || nearAfter.tree.cx !== T.cx))
@@ -223,18 +223,18 @@ if (c.Fells) {
     ? ok('examine skips the felled tree')
     : fail('examine still sees the felled tree');
   // pack: nearest-first vec2 pairs
-  Fells.add(tix + 200, tiy + 200);
-  const n = Fells.pack(tix, tiy);
-  (n === 2 && Fells.data[0] === tix && Fells.data[1] === tiy)
-    ? ok('fells pack nearest-first')
-    : fail(`fells pack wrong: n=${n} first=${Fells.data[0]},${Fells.data[1]}`);
+  Removed.add(tix + 200, tiy + 200);
+  const n = Removed.pack(tix, tiy);
+  (n === 2 && Removed.data[0] === tix && Removed.data[1] === tiy)
+    ? ok('removed pack nearest-first')
+    : fail(`removed pack wrong: n=${n} first=${Removed.data[0]},${Removed.data[1]}`);
   // serialize round-trip
-  const s1 = JSON.stringify([...Fells.set].sort());
-  Fells.set = new Set(JSON.parse(JSON.stringify([...Fells.set])));
-  const s2 = JSON.stringify([...Fells.set].sort());
-  s1 === s2 ? ok('fells persistence stable') : fail('fells round-trip diverged');
+  const s1 = JSON.stringify([...Removed.set].sort());
+  Removed.set = new Set(JSON.parse(JSON.stringify([...Removed.set])));
+  const s2 = JSON.stringify([...Removed.set].sort());
+  s1 === s2 ? ok('removed persistence stable') : fail('removed round-trip diverged');
 
-  // chop with an axe fells and pays out
+  // chop with an axe removed and pays out
   let cix = 0, ciy = 0, C = null;
   outer5:
   for (let ix = -500; ix < -100; ix++) {
@@ -247,8 +247,8 @@ if (c.Fells) {
     const sp = c.SPECIES[c.treeSpecies(cix, ciy)];
     const wood0 = G.count('wood');
     G.chop({ kind: 'tree', ix: cix, iy: ciy, point: [cix, ciy, 5] }, sp);
-    (Fells.has(cix, ciy) && G.count('wood') === wood0 + sp.chop)
-      ? ok(`chop fells a ${sp.name} for ${sp.chop} wood`)
+    (Removed.has(cix, ciy) && G.count('wood') === wood0 + sp.chop)
+      ? ok(`chop removed a ${sp.name} for ${sp.chop} wood`)
       : fail('chop with axe failed');
     G.take('axe', 1);
   }

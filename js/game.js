@@ -253,8 +253,8 @@ const Game = {
 
   chop(t, sp) {
     if (!this.count('axe')) { this.toast('you need an axe for that'); return; }
-    if (typeof Fells === 'undefined') { this.toast('the axe is not sharp yet'); return; }
-    Fells.add(t.ix, t.iy);
+    if (typeof Removed === 'undefined') { this.toast('the axe is not sharp yet'); return; }
+    Removed.add(t.ix, t.iy);
     this.give('wood', sp.chop);
     this.toast('the ' + sp.name + ' falls  (+' + sp.chop + ' wood)');
     this.close();

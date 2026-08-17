@@ -56,12 +56,12 @@ const GPURenderer = {
     this.editCount = 0;
     this.editBounds = null;
 
-    // felled trees: small list of removed cells (see js/fells.js)
-    this.fellBuf = device.createBuffer({
-      size: CFG.FELL_MAX * 8,
+    // cleared cells: props the player has taken away (see js/removed.js)
+    this.removedBuf = device.createBuffer({
+      size: CFG.REMOVED_MAX * 8,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    this.fellCount = 0;
+    this.removedCount = 0;
 
     this.buildAtlas(CFG.GLYPH_SET);
 
@@ -204,7 +204,7 @@ const GPURenderer = {
         { binding: 2, resource: { buffer: this.entBuf } },
         { binding: 3, resource: { buffer: this.editHeadBuf } },
         { binding: 4, resource: { buffer: this.editDataBuf } },
-        { binding: 5, resource: { buffer: this.fellBuf } },
+        { binding: 5, resource: { buffer: this.removedBuf } },
         { binding: 6, resource: { buffer: this.starBuf } },
       ],
     });
@@ -262,10 +262,10 @@ const GPURenderer = {
       Edits.gpuDirty = false;
     }
 
-    if (Fells.gpuDirty) {
-      this.fellCount = Fells.pack(Player.x, Player.y);
-      dev.queue.writeBuffer(this.fellBuf, 0, Fells.data);
-      Fells.gpuDirty = false;
+    if (Removed.gpuDirty) {
+      this.removedCount = Removed.pack(Player.x, Player.y);
+      dev.queue.writeBuffer(this.removedBuf, 0, Removed.data);
+      Removed.gpuDirty = false;
     }
 
     const u = new Float32Array(64);
@@ -299,7 +299,7 @@ const GPURenderer = {
     // a carried light brightens the headlamp; the gem lantern beats a torch
     u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
                       : Game.count('torch') > 0 ? 2.2 : 1);
-    u[57] = this.fellCount;
+    u[57] = this.removedCount;
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
