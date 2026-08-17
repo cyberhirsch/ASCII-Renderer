@@ -288,8 +288,9 @@ const GPURenderer = {
       u[52] = this.editBounds[3]; u[53] = this.editBounds[4];
       u[54] = this.editBounds[5];
     }
-    // a carried torch brightens the headlamp
-    u[56] = CFG.LAMP * (Game.count('torch') > 0 ? 2.2 : 1);
+    // a carried light brightens the headlamp; the gem lantern beats a torch
+    u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
+                      : Game.count('torch') > 0 ? 2.2 : 1);
     u[57] = this.fellCount;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([

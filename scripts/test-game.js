@@ -14,7 +14,8 @@ const src = ['config', 'util', 'world', 'overlay', 'edits', 'fells', 'items', 'g
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
-  ['vnoise', 'Fells', 'treeSpecies'].map(grab).join(', ') + ' });';
+  ['vnoise', 'Fells', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
+   'oreItem'].map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
 let failures = 0;
@@ -341,11 +342,154 @@ if (c.Fells) {
   (G.count('axe') === 1 && G.count('wood') === 0 && G.count('stone') === 0)
     ? ok('craft consumes ingredients and yields the axe')
     : fail(`craft math wrong: axe=${G.count('axe')} wood=${G.count('wood')}`);
-  // canCraft over all recipes with a rich inventory
-  G.give('wood', 10); G.give('stone', 10); G.give('lichen', 10);
+  // canCraft over all recipes with a rich inventory - every ingredient any
+  // recipe names, so a new recipe cannot quietly become unreachable
+  for (const r of c.RECIPES) {
+    for (const id of Object.keys(r.needs)) G.give(id, 10);
+  }
   const all = c.RECIPES.every(r => G.canCraft(r));
-  all ? ok('all recipes craftable with materials') : fail('canCraft broken');
+  all ? ok(`all ${c.RECIPES.length} recipes craftable with materials`)
+      : fail('canCraft broken');
   G.close();
+}
+
+// ---- 10. ground materials ----
+if (c.matAt) {
+  const { MATS, matAt, soilDepth, rockMat, oreItem, terrainH } = c;
+
+  // determinism
+  (matAt(12.5, -7.25, 3.0, terrainH(12.5, -7.25)) ===
+   matAt(12.5, -7.25, 3.0, terrainH(12.5, -7.25)))
+    ? ok('matAt deterministic') : fail('matAt nondeterministic');
+
+  // just under the surface is soil on gentle ground, rock on steep ground;
+  // and deep down is never soil
+  let flatDirt = 0, steepRock = 0, deepSoil = 0, samples = 0;
+  for (let i = 0; i < 3000; i++) {
+    const x = (i % 71) * 9.3 - 300, y = ((i / 71) | 0) * 7.7 - 200;
+    const gz = terrainH(x, y);
+    const e = 0.5;
+    const slope = Math.hypot(terrainH(x + e, y) - terrainH(x - e, y),
+                             terrainH(x, y + e) - terrainH(x, y - e)) / (2 * e);
+    samples++;
+    const m = matAt(x, y, gz - 0.1, gz);
+    if (slope < MATS.SOIL_FLAT && m === MATS.DIRT) flatDirt++;
+    if (slope > MATS.SOIL_STEEP && m !== MATS.DIRT) steepRock++;
+    if (matAt(x, y, gz - 12, gz) === MATS.DIRT) deepSoil++;
+  }
+  (flatDirt > 0 && steepRock > 0)
+    ? ok(`soil on flats (${flatDirt}), bare rock on steeps (${steepRock})`)
+    : fail(`material/slope relation broken: flat=${flatDirt} steep=${steepRock}`);
+  (deepSoil === 0) ? ok('12 units down is never soil')
+                   : fail(`${deepSoil} deep points classified as soil`);
+
+  // soil depth is never negative and never absurd
+  let badSoil = 0;
+  for (let i = 0; i < 2000; i++) {
+    const d = soilDepth((i % 53) * 11.1, ((i / 53) | 0) * 13.7);
+    if (d < 0 || d > MATS.SOIL_MAX + MATS.SOIL_VAR) badSoil++;
+  }
+  (badSoil === 0) ? ok('soil depth stays in range') : fail(`${badSoil} bad soil depths`);
+
+  // ore is rare but real; gems are rarer still and only deep
+  let ore = 0, gem = 0, rock = 0, shallowGem = 0;
+  for (let ix = 0; ix < 90; ix++) {
+    for (let iy = 0; iy < 90; iy++) {
+      for (let iz = 0; iz < 24; iz++) {
+        const x = ix * 3.1, y = iy * 2.9, z = -1 - iz * 1.3;
+        const m = rockMat(x, y, z);
+        rock++;
+        if (m === MATS.ORE) ore++;
+        if (m === MATS.GEM) { gem++; if (z >= MATS.GEM_Z) shallowGem++; }
+      }
+    }
+  }
+  const oreFrac = ore / rock, gemFrac = gem / rock;
+  (oreFrac > 0.0005 && oreFrac < 0.10)
+    ? ok(`ore veins rare but present: ${(oreFrac * 100).toFixed(2)}% of rock`)
+    : fail(`ore fraction out of range: ${(oreFrac * 100).toFixed(3)}%`);
+  (gem > 0 && gemFrac < oreFrac)
+    ? ok(`gems rarer than ore: ${(gemFrac * 100).toFixed(3)}% of rock (${gem} found)`)
+    : fail(`gem fraction wrong: ${(gemFrac * 100).toFixed(4)}% (${gem} found)`);
+  (shallowGem === 0) ? ok('no gems above the gem depth')
+                     : fail(`${shallowGem} gems formed too shallow`);
+
+  // ore type splits by depth
+  (oreItem(-5) === 'copper' && oreItem(-40) === 'iron')
+    ? ok('ore type splits by depth (copper up, iron down)')
+    : fail('oreItem depth split wrong');
+}
+
+// ---- 11. digging is gated by material ----
+if (c.matAt) {
+  const { Game: G, MATS, matAt, terrainH } = c;
+  G.inv.clear();
+
+  // find a soil point and a rock point on the surface
+  let soilPt = null, rockPt = null;
+  for (let i = 0; i < 6000 && (!soilPt || !rockPt); i++) {
+    const x = (i % 79) * 8.3 - 300, y = ((i / 79) | 0) * 6.1 - 200;
+    const gz = terrainH(x, y);
+    const p = [x, y, gz - 0.2];
+    const m = matAt(x, y, gz - 0.2, gz);
+    if (m === MATS.DIRT && !soilPt) soilPt = p;
+    if (m !== MATS.DIRT && !rockPt) rockPt = p;
+  }
+  if (!soilPt || !rockPt) fail('could not find both a soil and a rock point');
+  else {
+    // bare hands dig nothing
+    (G.digAt(...soilPt) === 0 && G.toastMsg.includes('shovel'))
+      ? ok('bare hands cannot dig soil') : fail('soil dug without a shovel');
+    (G.digAt(...rockPt) === 0 && G.toastMsg.includes('pickaxe'))
+      ? ok('bare hands cannot dig rock') : fail('rock dug without a pickaxe');
+
+    // a shovel opens soil but not rock
+    G.give('shovel', 1);
+    (G.digAt(...soilPt) > 0) ? ok('shovel digs soil') : fail('shovel failed on soil');
+    (G.digAt(...rockPt) === 0)
+      ? ok('shovel still refuses rock') : fail('shovel dug rock');
+
+    // a pickaxe opens rock and pays out
+    G.give('pick', 1);
+    const stone0 = G.count('stone');
+    const r = G.digAt(...rockPt);
+    (r > 0 && G.count('stone') === stone0 + 1)
+      ? ok('pickaxe breaks rock and yields stone')
+      : fail(`pickaxe dig wrong: r=${r} stone=${G.count('stone')}`);
+  }
+
+  // digging an ore point pays the ore, not stone
+  let orePt = null, gemPt = null;
+  for (let ix = 0; ix < 70 && !(orePt && gemPt); ix++) {
+    for (let iy = 0; iy < 70 && !(orePt && gemPt); iy++) {
+      for (let iz = 0; iz < 22; iz++) {
+        const x = ix * 3.1, y = iy * 2.9, z = -1 - iz * 1.3;
+        const m = c.rockMat(x, y, z);
+        if (m === MATS.ORE && !orePt) orePt = [x, y, z];
+        if (m === MATS.GEM && !gemPt) gemPt = [x, y, z];
+      }
+    }
+  }
+  if (orePt) {
+    // dig at the ore point directly: matAt must agree it is ore down there
+    const gz = terrainH(orePt[0], orePt[1]);
+    if (matAt(orePt[0], orePt[1], orePt[2], gz) === MATS.ORE) {
+      const id = c.oreItem(orePt[2]);
+      const before = G.count(id);
+      G.digAt(...orePt);
+      (G.count(id) === before + 1) ? ok(`mining a vein yields ${id}`)
+                                   : fail(`ore dig yielded nothing: ${id}`);
+    } else ok('ore point sits under soil cover (skipped)');
+  } else fail('no ore point found for the dig test');
+  if (gemPt) {
+    const gz = terrainH(gemPt[0], gemPt[1]);
+    if (matAt(gemPt[0], gemPt[1], gemPt[2], gz) === MATS.GEM) {
+      const before = G.count('gem');
+      G.digAt(...gemPt);
+      (G.count('gem') === before + 1) ? ok('mining a gem pocket yields a gem')
+                                      : fail('gem dig yielded nothing');
+    } else ok('gem point sits under soil cover (skipped)');
+  }
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

@@ -36,6 +36,32 @@ const Game = {
 
   toast(msg) { this.toastMsg = msg; this.toastT = 3; this.uiDirty = true; },
 
+  // ---- digging: what the ground is made of decides what it takes ----
+
+  // Returns the scoop radius to carve, or 0 when the right tool is missing
+  // (a toast explaining why is already queued). Pays out whatever the
+  // material yields. Soil moves in bigger bites than rock does.
+  digAt(x, y, z) {
+    const mat = matAt(x, y, z, terrainH(x, y));
+    if (mat === MATS.DIRT) {
+      if (!this.count('shovel')) { this.toast('soil - you need a shovel'); return 0; }
+      return CFG.DIG_R * 1.4;
+    }
+    if (!this.count('pick')) { this.toast('solid rock - you need a pickaxe'); return 0; }
+    if (mat === MATS.GEM) {
+      this.give('gem', 1);
+      this.toast('a gem comes loose (' + this.count('gem') + ')');
+    } else if (mat === MATS.ORE) {
+      const id = oreItem(z);
+      this.give(id, 1);
+      this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
+    } else {
+      this.give('stone', 1);
+      this.toast('+1 stone (' + this.count('stone') + ')');
+    }
+    return CFG.DIG_R;
+  },
+
   open(mode) { this.mode = mode; this.cursor = 0; this.uiDirty = true; },
   close() { this.mode = 'play'; this.uiDirty = true; },
 
@@ -181,6 +207,22 @@ const Game = {
         this.give('lichen', 1);
         this.toast('+1 glow lichen (' + this.count('lichen') + ')');
       });
+    } else if (t.kind === 'ore' || t.kind === 'gem') {
+      const id = t.kind === 'gem' ? 'gem' : oreItem(t.point[2]);
+      const has = this.count('pick') > 0;
+      once('mine', 'mine  (+1 ' + ITEMS[id].name + ')' +
+        (has ? '' : '  (needs a pickaxe)'), () => {
+          if (!has) { this.toast('you need a pickaxe for that'); return; }
+          this.give(id, 1);
+          this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
+        });
+    } else if (t.kind === 'rock' || t.kind === 'cavewall' || t.kind === 'dug') {
+      // Loose scree, gathered by hand: the bootstrap out of having no tools
+      // at all, since every recipe starts with stone.
+      once('gather', 'gather loose stone  (+1 stone)', () => {
+        this.give('stone', 1);
+        this.toast('+1 stone (' + this.count('stone') + ')');
+      });
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
@@ -204,6 +246,11 @@ const Game = {
       }
       case 'water':     return ['WATER', 'Still, dark, patient.'];
       case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
+      case 'ore':       return [ITEMS[oreItem(t.point[2])].name.toUpperCase() + ' VEIN',
+                                'A seam of metal threading the stone.'];
+      case 'gem':       return ['GEM IN THE ROCK',
+                                'Deep in a vein, something is catching',
+                                'the light that is not stone.'];
       case 'cavewall':  return ['CAVE WALL', 'Water-worn stone. It has been',
                                 'down here longer than anything.'];
       case 'dug':       return ['HEWN ROCK', 'Tool marks. Yours.'];
@@ -213,9 +260,11 @@ const Game = {
                                 'It is holding the mountain up.'];
       case 'hallfloor': return ['CARVED FLOOR', 'Dead flat. Nothing natural',
                                 'is this flat.'];
-      case 'sand':      return ['SHORE SAND', 'Fine and pale.'];
-      case 'rock':      return ['BARE ROCK', 'Too steep for anything to root.'];
-      case 'grass':     return ['MEADOW', 'Wind-combed grass.'];
+      case 'sand':      return ['SHORE SAND', 'Fine and pale. A shovel would',
+                                'move it easily.'];
+      case 'rock':      return ['BARE ROCK', 'Too steep for soil to hold.',
+                                'Loose scree lies at your feet.'];
+      case 'grass':     return ['MEADOW', 'Wind-combed grass over deep soil.'];
       default:          return [t.kind.toUpperCase(), ''];
     }
   },

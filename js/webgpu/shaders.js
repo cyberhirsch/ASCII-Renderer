@@ -539,6 +539,49 @@ fn hash1f(p : vec2f) -> f32 {
   return f32(uhash(bitcast<u32>(ip.x), bitcast<u32>(ip.y))) * (1.0 / 4294967296.0);
 }
 
+// -------- ground materials. KEEP IN SYNC with js/util.js --------
+
+const MAT_DIRT : i32 = ${MATS.DIRT};
+const MAT_STONE : i32 = ${MATS.STONE};
+const MAT_ORE : i32 = ${MATS.ORE};
+const MAT_GEM : i32 = ${MATS.GEM};
+
+// soil depth below the surface: deep on flats, zero on steep ground -
+// which is why hillsides read as bare rock
+fn soilDepth(q : vec2f) -> f32 {
+  let e = 0.5;
+  let hx = terrainH(q + vec2f(e, 0.0)) - terrainH(q - vec2f(e, 0.0));
+  let hy = terrainH(q + vec2f(0.0, e)) - terrainH(q - vec2f(0.0, e));
+  let slope = length(vec2f(hx, hy)) / (2.0 * e);
+  let d = smoothstep(${MATS.SOIL_STEEP}, ${MATS.SOIL_FLAT}, slope) * ${MATS.SOIL_MAX}
+        + (vn2(q * ${MATS.SOIL_F}, seedU() ^ 0xD117u) - 0.5) * ${MATS.SOIL_VAR};
+  return max(d, 0.0);
+}
+
+// What a point of rock is. Two value-noise isosurfaces intersect along
+// CURVES, not sheets - that is what makes veins read as branching tubes
+// threading the stone rather than slabs. Gems sit in a deep vein's core.
+fn rockMat(p : vec3f) -> i32 {
+  let o = f32(seedU() & 0xffu) * 0.7;
+  let reg = vnoise(p * ${MATS.ORE_F} + vec3f(13.0 + o, 13.0, 13.0));
+  if (reg < ${MATS.ORE_GATE}) { return MAT_STONE; }
+  let strength = (reg - ${MATS.ORE_GATE}) / (1.0 - ${MATS.ORE_GATE});
+  let n1 = vnoise(p * ${MATS.VEIN_F} + vec3f(o, 0.0, 0.0));
+  let n2 = vnoise(p * ${MATS.VEIN_F} + vec3f(41.0 + o, 17.0, 73.0));
+  let w = ${MATS.VEIN_W} * strength;
+  let d1 = abs(n1 - 0.5);
+  let d2 = abs(n2 - 0.5);
+  if (d1 >= w || d2 >= w) { return MAT_STONE; }
+  if (p.z < ${MATS.GEM_Z} && d1 < w * ${MATS.GEM_CORE}
+      && d2 < w * ${MATS.GEM_CORE}) { return MAT_GEM; }
+  return MAT_ORE;
+}
+
+fn matAt(p : vec3f, gz : f32) -> i32 {
+  if (p.z > gz - soilDepth(p.xy)) { return MAT_DIRT; }
+  return rockMat(p);
+}
+
 // -------- primitives --------
 
 fn hitSphere(ro : vec3f, rd : vec3f, c : vec3f, r : f32) -> vec2f {
@@ -870,24 +913,43 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
   if (tT > 0.0) {
     hit.t = tT;
     let p = ro + rd * tT;
-    if (caveV(p, terrainH(p.xy)) > -1.0 || abs(editDelta(p)) > 0.05) {
+    let pGz = terrainH(p.xy);
+    if (caveV(p, pGz) > -1.0 || abs(editDelta(p)) > 0.05) {
       // carved surface: heightfield normal is meaningless here
       hit.n = solidN(p);
-      hit.albedo = vec3f(0.44, 0.41, 0.38);
+      let m = matAt(p, pGz);
+      if (m == MAT_GEM) {
+        // gems glint out of the wall - findable by eye, worth the walk
+        hit.albedo = vec3f(0.55, 0.80, 0.95);
+        hit.emissive = 0.55;
+        hit.spec = 0.8;
+      } else if (m == MAT_ORE) {
+        // warm copper up top, cold iron deeper down
+        hit.albedo = select(vec3f(0.52, 0.55, 0.60), vec3f(0.62, 0.42, 0.30),
+                            p.z > ${MATS.IRON_Z});
+        hit.emissive = 0.05;
+        hit.spec = 0.35;
+      } else if (m == MAT_DIRT) {
+        hit.albedo = vec3f(0.34, 0.28, 0.22);
+      } else {
+        hit.albedo = vec3f(0.44, 0.41, 0.38);
+      }
       // glow lichen: sparse emissive patches, enough to navigate by and a
       // reason to look at cave walls
       let gl = vnoise(p * 1.9);
-      if (gl > 0.8) {
+      if (gl > 0.8 && m != MAT_GEM) {
         hit.albedo = vec3f(0.55, 0.75, 0.70);
         hit.emissive = (gl - 0.8) * 9.0;
       }
       hit.cave = true;
     } else {
       hit.n = terrainN(p.xy);
-      // grass on flats, rock on slopes, sand near the waterline
-      let slope = 1.0 - hit.n.z;
-      var a = mix(vec3f(0.42, 0.58, 0.33), vec3f(0.52, 0.48, 0.42),
-                  smoothstep(0.12, 0.38, slope));
+      // Soil carries the grass; where the slope strips it away, the bare
+      // rock below shows through - the same soilDepth the shovel checks,
+      // so what you see is what you are allowed to dig.
+      let soil = soilDepth(p.xy);
+      var a = mix(vec3f(0.52, 0.48, 0.42), vec3f(0.42, 0.58, 0.33),
+                  smoothstep(0.0, 0.5, soil));
       a = mix(vec3f(0.72, 0.66, 0.50), a,
               smoothstep(U.seaLevel + 0.15, U.seaLevel + 0.9, p.z));
       hit.albedo = a;

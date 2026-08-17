@@ -333,6 +333,73 @@ function vnoise(px, py, pz) {
   return y0 + (y1 - y0) * uz;
 }
 
+// -------- ground materials: what the world is made of, per point --------
+// Shared constants, interpolated into the WGSL template in
+// js/webgpu/shaders.js so shader and mirror cannot disagree (scripts/
+// verify.js enforces the no-literals convention for MAT_ too).
+const MATS = {
+  DIRT: 0, STONE: 1, ORE: 2, GEM: 3,
+  SOIL_MAX: 2.4,    // soil depth on dead-flat ground, world units
+  SOIL_STEEP: 0.55, // slope where soil runs out entirely (bare rock)
+  SOIL_FLAT: 0.12,  // slope below which soil is at full depth
+  SOIL_F: 0.09,     // soil-depth variation frequency
+  SOIL_VAR: 1.2,    // soil-depth variation amplitude
+  ORE_F: 0.021,     // ore-region frequency: most rock holds nothing
+  ORE_GATE: 0.62,   // region noise above this can carry veins
+  VEIN_F: 0.15,     // vein frequency; two isosurfaces meet in curves
+  VEIN_W: 0.05,     // vein half-width in noise-value units
+  GEM_CORE: 0.22,   // fraction of the vein width that is gem, not ore
+  GEM_Z: -6.0,      // gems only form below this depth
+  IRON_Z: -14.0,    // ore below this is iron, above it copper
+};
+
+// Soil depth below the surface at (x, y): deep on flats, zero on steep
+// ground - which is why hillsides read as bare rock. Mirror of WGSL
+// soilDepth. KEEP IN SYNC.
+function soilDepth(x, y) {
+  const e = 0.5;
+  const hx = terrainH(x + e, y) - terrainH(x - e, y);
+  const hy = terrainH(x, y + e) - terrainH(x, y - e);
+  const slope = Math.hypot(hx, hy) / (2 * e);
+  const d = smoothstep(MATS.SOIL_STEEP, MATS.SOIL_FLAT, slope) * MATS.SOIL_MAX +
+    (vn2(x * MATS.SOIL_F, y * MATS.SOIL_F, (CFG.SEED ^ 0xD117) >>> 0) - 0.5) *
+    MATS.SOIL_VAR;
+  return Math.max(d, 0);
+}
+
+// What a point of rock is: plain stone, an ore vein, or a gem pocket. Two
+// value-noise isosurfaces intersect along CURVES, not sheets - that is what
+// makes veins read as branching tubes threading the stone rather than
+// slabs. Gems sit in the very core of a deep vein. Mirror of WGSL rockMat.
+// KEEP IN SYNC.
+function rockMat(x, y, z) {
+  const o = (CFG.SEED & 0xff) * 0.7;
+  const reg = vnoise(x * MATS.ORE_F + 13 + o, y * MATS.ORE_F + 13,
+                     z * MATS.ORE_F + 13);
+  if (reg < MATS.ORE_GATE) return MATS.STONE;
+  const strength = (reg - MATS.ORE_GATE) / (1 - MATS.ORE_GATE);
+  const n1 = vnoise(x * MATS.VEIN_F + o, y * MATS.VEIN_F, z * MATS.VEIN_F);
+  const n2 = vnoise(x * MATS.VEIN_F + 41 + o, y * MATS.VEIN_F + 17,
+                    z * MATS.VEIN_F + 73);
+  const w = MATS.VEIN_W * strength;
+  const d1 = Math.abs(n1 - 0.5), d2 = Math.abs(n2 - 0.5);
+  if (d1 >= w || d2 >= w) return MATS.STONE;
+  if (z < MATS.GEM_Z && d1 < w * MATS.GEM_CORE && d2 < w * MATS.GEM_CORE) {
+    return MATS.GEM;
+  }
+  return MATS.ORE;
+}
+
+// Material at a world point. gz is terrainH(x, y) - every caller has it.
+// Mirror of WGSL matAt. KEEP IN SYNC.
+function matAt(x, y, z, gz) {
+  if (z > gz - soilDepth(x, y)) return MATS.DIRT;
+  return rockMat(x, y, z);
+}
+
+// which ore this depth yields
+function oreItem(z) { return z < MATS.IRON_Z ? 'iron' : 'copper'; }
+
 // species index for the tree anchored in cell (ix, iy) - deterministic,
 // independent of the placement hash so size and species do not correlate
 function treeSpecies(ix, iy) {

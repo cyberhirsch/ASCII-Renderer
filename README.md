@@ -19,10 +19,19 @@ into the cave below (debug) · **M** mono/color · **V** glyph set · **X** raw
 shading · **F** fullscreen.
 
 You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
-Examine a tree to break a branch for wood, dig for stone, craft an axe, and
-the forest is yours: chopped trees fall and stay felled. Torches (wood +
-glow lichen from cave walls) brighten your headlamp; a pick digs wider.
-Inventory, digs, and felled trees all survive reload.
+
+The ground is made of something specific everywhere you stand. Soil lies deep
+on flats and thins to nothing on steep ground, which is why hillsides show
+bare rock — and you need a **shovel** for soil, a **pickaxe** for stone. Bare
+hands can only gather the loose scree lying on bare rock, which is the
+bootstrap: gather stone, break a branch off a tree for wood, and craft your
+way up from there. Chopped trees fall and stay felled.
+
+Rock rarely carries **ore veins** — branching tubes where two noise fields
+intersect, copper near the surface, iron deeper — and in the core of a deep
+vein, **gems**, which glint out of cave walls and are worth walking toward.
+A torch (wood + cave lichen) brightens your headlamp; a gem lantern brightens
+it far more. Inventory, digs, and felled trees all survive reload.
 
 ## How it works
 

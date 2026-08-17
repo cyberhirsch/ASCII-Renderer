@@ -132,15 +132,12 @@ const Player = {
     if ((this.mouse[0] || this.mouse[2]) && this.digCd <= 0) {
       const hit = this.aim();
       if (hit) {
-        // a pick cuts a wider scoop
-        const digR = Game.count('pick') > 0 ? 1.6 : CFG.DIG_R;
         if (this.mouse[0]) {
-          Edits.splat(hit[0], hit[1], hit[2], digR, -100);
-          // dug rock yields stone; a pick loosens more of it
-          const n = Game.count('pick') > 0 ? 2 : 1;
-          Game.give('stone', n);
-          Game.toast('+' + n + ' stone (' + Game.count('stone') + ')');
+          // what you are digging decides whether you can dig it at all
+          const r = Game.digAt(hit[0], hit[1], hit[2]);
+          if (r > 0) Edits.splat(hit[0], hit[1], hit[2], r, -100);
         } else {
+          const digR = CFG.DIG_R;
           const fx = hit[0] - hit[3] * 0.6;
           const fy = hit[1] - hit[4] * 0.6;
           const fz = hit[2] - hit[5] * 0.6;

@@ -92,31 +92,34 @@ const World = {
   classifySolid(px, py, pz) {
     const gz = terrainH(px, py);
     const p = [px, py, pz];
+    // every solid carries its material: it decides the tool, the yield,
+    // and what the examine panel is allowed to offer
+    const mat = matAt(px, py, pz, gz);
     if (typeof Edits !== 'undefined' && Edits.bounds &&
         Math.abs(Edits.sample(px, py, pz)) > 0.05) {
-      return { kind: 'dug', point: p };
+      return { kind: 'dug', point: p, mat };
     }
     const hv = hallV(px, py, pz, gz);
     if (hv[1] > -0.3) {
       // inside a hall's protected solids; a pillar is still solid overhead
       const up = hallV(px, py, pz + 0.8, gz);
-      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p };
+      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p, mat };
     }
     const sv = shaftV(px, py, pz, gz);
-    if (sv[0] > -0.5 || sv[1] > -0.3) return { kind: 'stair', point: p };
+    if (sv[0] > -0.5 || sv[1] > -0.3) return { kind: 'stair', point: p, mat };
     if (pz < gz - 1.0) {
+      // ore and gems outrank the lichen growing over them
+      if (mat === MATS.GEM) return { kind: 'gem', point: p, mat };
+      if (mat === MATS.ORE) return { kind: 'ore', point: p, mat };
       if (vnoise(px * 1.9, py * 1.9, pz * 1.9) > 0.8) {
-        return { kind: 'lichen', point: p };
+        return { kind: 'lichen', point: p, mat };
       }
-      return { kind: 'cavewall', point: p };
+      return { kind: 'cavewall', point: p, mat };
     }
-    if (gz < CFG.SEA_LEVEL + 0.55) return { kind: 'sand', point: p };
-    // slope decides grass vs bare rock, same threshold family as the shader
-    const e = 0.35;
-    const hx = terrainH(px + e, py) - terrainH(px - e, py);
-    const hy = terrainH(px, py + e) - terrainH(px, py - e);
-    const nz = 2 * e / Math.hypot(hx, hy, 2 * e);
-    return { kind: (1 - nz) > 0.25 ? 'rock' : 'grass', point: p };
+    if (gz < CFG.SEA_LEVEL + 0.55) return { kind: 'sand', point: p, mat };
+    // soil depth decides meadow vs bare rock - the same function the shader
+    // shades with and the shovel checks, so all three agree
+    return { kind: mat === MATS.DIRT ? 'grass' : 'rock', point: p, mat };
   },
 
   // Spawn beside a cave entrance when one exists nearby: scan shaft

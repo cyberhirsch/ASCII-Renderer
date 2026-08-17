@@ -148,7 +148,7 @@ cmp('render', rendDecl, rendEnt);
 {
   const utilSrc = fs.readFileSync(path.join(root, 'js/util.js'), 'utf8');
   let bad = 0, interps = 0, decls = 0;
-  for (const m of shadersSrc.matchAll(/\$\{(CFG|CAVES)\.(\w+)[^}]*\}/g)) {
+  for (const m of shadersSrc.matchAll(/\$\{(CFG|CAVES|MATS)\.(\w+)[^}]*\}/g)) {
     interps++;
     const home = m[1] === 'CFG' ? configSrc : utilSrc;
     if (!new RegExp('\\b' + m[2] + '\\s*:').test(home)) {
@@ -156,14 +156,14 @@ cmp('render', rendDecl, rendEnt);
       bad++;
     }
   }
-  for (const m of shadersSrc.matchAll(/const\s+((?:CAVE|EDIT)_\w+)\s*(?::\s*\w+)?\s*=\s*([^;]+);/g)) {
+  for (const m of shadersSrc.matchAll(/const\s+((?:CAVE|EDIT|MAT)_\w+)\s*(?::\s*\w+)?\s*=\s*([^;]+);/g)) {
     decls++;
     if (!/\$\{/.test(m[2])) {
       fail(`WGSL const ${m[1]} is a literal (${m[2].trim()}) — interpolate from CFG/CAVES`);
       bad++;
     }
   }
-  if (!bad) ok(`shared consts: ${decls} CAVE_/EDIT_ consts, ${interps} interpolations resolve`);
+  if (!bad) ok(`shared consts: ${decls} CAVE_/EDIT_/MAT_ consts, ${interps} interpolations resolve`);
 }
 
 // ---- 5. all modules parse ----
