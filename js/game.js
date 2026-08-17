@@ -284,12 +284,15 @@ const Game = {
 
   // ---- panel rendering (into the Overlay glyph grid) ----
 
+  // Panels are lines of text placed in the field, not boxes: nothing is
+  // padded out to a common width, because padding would clear a rectangle
+  // of cells and put the solid backing chip back.
   panel(lines) {
-    const w = Math.max(...lines.map(l => l.length)) + 4;
-    const x0 = Math.max(0, (Overlay.cols - w) >> 1);
+    const w = Math.max(...lines.map(l => l.length));
+    const x0 = Math.max(1, (Overlay.cols - w) >> 1);
     const y0 = Math.max(1, ((Overlay.rows - lines.length) >> 1) - 2);
     for (let i = 0; i < lines.length; i++) {
-      Overlay.write(x0, y0 + i, ('  ' + lines[i]).padEnd(w, ' '));
+      if (lines[i]) Overlay.write(x0, y0 + i, lines[i]);
     }
   },
 
@@ -307,13 +310,11 @@ const Game = {
     const w = Math.min(Overlay.cols - 4, 70);
     const h = 9;
     const x0 = 2, y0 = Math.max(1, Overlay.rows - h - 2);
-    for (let i = 0; i < h; i++) Overlay.write(x0, y0 + i, ''.padEnd(w, ' '));
-    Overlay.write(x0, y0, (' CONSOLE' + (this.devMode ? ' [dev]' : '')).padEnd(w, ' '));
+    Overlay.write(x0, y0, 'CONSOLE' + (this.devMode ? ' [dev]' : ''));
     const rows = h - 2;
     const hist = this.cmdHistory.slice(-rows);
     for (let i = 0; i < rows; i++) {
-      const line = hist[i] || '';
-      Overlay.write(x0 + 1, y0 + 1 + i, line.slice(0, w - 2).padEnd(w - 2, ' '));
+      if (hist[i]) Overlay.write(x0 + 1, y0 + 1 + i, hist[i].slice(0, w - 2));
     }
     Overlay.write(x0 + 1, y0 + h - 1, ('> ' + this.cmdBuf + '_').slice(0, w - 2));
   },

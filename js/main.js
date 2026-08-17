@@ -36,7 +36,9 @@
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0, fpsLine = '';
-  const HUD_LINE = 'wasd move · Tab inventory · C craft · E examine · Enter console · LMB dig · RMB fill · F fullscreen';
+  // ASCII only: the text atlas covers 32..126, and anything outside it
+  // clears to a gap rather than drawing
+  const HUD_LINE = 'wasd move - Tab inventory - C craft - E examine - Enter console - LMB dig - RMB fill - F fullscreen';
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();

@@ -358,32 +358,28 @@ if (c.Fells) {
   const O = c.Overlay;
   const B = O.BLANK;
   O.clear();
-  // a padded panel line: the blanks must hug the words, not the padding
-  O.write(10, 5, '  INVENTORY   ');
+  O.write(10, 5, 'STAIR WELL');
   const row = 5 * O.cols;
   const at = x => O.data[row + x];
-  // '  INVENTORY   ' at x=10: word spans 12..20, so blanks sit at 11 and 21
-  (at(11) === B && at(12) === 'I'.charCodeAt(0) && at(20) === 'Y'.charCodeAt(0)
-   && at(21) === B)
-    ? ok('blank cells hug the text, not the padding')
-    : fail(`blank placement wrong: ${at(11)},${at(12)},${at(20)},${at(21)}`);
-  // padding beyond the blanks stays space, so the world still shows there
-  (at(10) === 32 && at(22) === 32)
-    ? ok('padding outside the gap still shows the scene')
-    : fail(`padding overwritten: ${at(10)},${at(22)}`);
-  // an all-space line places no blanks at all
+  // text spans 10..19, so the clear air sits at 9 and 20
+  (at(9) === B && at(10) === 'S'.charCodeAt(0) && at(19) === 'L'.charCodeAt(0)
+   && at(20) === B)
+    ? ok('clear air on both sides of an insert')
+    : fail(`end blanks wrong: ${at(9)},${at(10)},${at(19)},${at(20)}`);
+  // the space between the two words is cleared, not left showing the field
+  (at(15) === B)
+    ? ok('spaces between words are cleared')
+    : fail(`inner space not cleared: ${at(15)}`);
+  // everything beyond the insert is untouched, so the scene shows there
+  (at(8) === 0 && at(21) === 0)
+    ? ok('cells beyond the insert stay transparent')
+    : fail(`overlay bled past the insert: ${at(8)},${at(21)}`);
+  // a character outside the ASCII atlas clears rather than drawing garbage
   O.clear();
-  O.write(4, 6, '     ');
-  let anyBlank = false;
-  for (let i = 0; i < O.data.length; i++) if (O.data[i] === B) anyBlank = true;
-  (!anyBlank) ? ok('a blank line places no clear-air cells')
-              : fail('all-space write emitted stray blanks');
-  // internal spaces are untouched: they keep showing the world
-  O.clear();
-  O.write(3, 7, 'chop  (axe)');
-  (O.data[7 * O.cols + 7] === 32 && O.data[7 * O.cols + 8] === 32)
-    ? ok('spaces inside a line still show the scene')
-    : fail('internal spaces were cleared');
+  O.write(3, 7, 'a·b');
+  (O.data[7 * O.cols + 4] === B)
+    ? ok('non-ASCII clears instead of drawing')
+    : fail('non-ASCII not cleared');
 }
 
 // ---- 10. ground materials ----
