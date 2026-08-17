@@ -2856,7 +2856,7 @@ fn starAt(rd : vec3f) -> u32 {
   // fewer stars at dusk, the full field at midnight
   let gate = mix(1.0, ${CFG.STAR_RARE}, U.night);
   if (r < gate) { return 0u; }
-  let pick = f32(h >> 8u & 0xffffu) * (1.0 / 65536.0);
+  let pick = f32((h >> 8u) & 0xffffu) * (1.0 / 65536.0);
   if (pick < 0.50) { return 46u; }   // '.'  faint
   if (pick < 0.78) { return 43u; }   // '+'
   if (pick < 0.93) { return 120u; }  // 'x'

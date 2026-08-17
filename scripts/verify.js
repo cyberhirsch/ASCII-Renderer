@@ -47,19 +47,44 @@ for (const [name, src] of Object.entries(wgsl)) {
 }
 
 // ---- 2. operator-precedence (WGSL requires parens mixing &|^ with arith/shift) ----
+// Does one paren-free expression mix operator classes WGSL will not rank
+// for you?
+function mixesOne(seg) {
+  const hasShift = /<<|>>/.test(seg);
+  // drop shifts, arrows and comparisons before looking for arithmetic, or
+  // their < > characters read as operators
+  const flat = seg.replace(/->/g, ' ').replace(/<<|>>/g, ' ')
+                  .replace(/[<>]=?/g, ' ');
+  const hasBit = /[&|^]/.test(flat.replace(/&&|\|\|/g, ' '));
+  const hasArith = /[a-zA-Z0-9_)\]\s][*\/+%-]\s*[a-zA-Z0-9_(]/.test(flat);
+  return (hasBit && hasArith) || (hasBit && hasShift) || (hasShift && hasArith);
+}
+
+// Commas separate independent expressions: a multiply in one call argument
+// and an xor in the next are not a mix, so each argument is judged alone.
+function mixesIn(seg) { return seg.split(',').some(mixesOne); }
+
+// Wrapping an expression in parentheses does NOT settle the ranking inside
+// it - f32(h >> 8u & 0xffffu) is still rejected - so every nesting level has
+// to be examined on its own. Peel the innermost group, check it, replace it
+// with a placeholder, repeat, then check what is left.
+function precedenceMix(code) {
+  let t = code;
+  for (let guard = 0; guard < 60; guard++) {
+    const m = t.match(/\(([^()]*)\)/);
+    if (!m) break;
+    if (mixesIn(m[1])) return true;
+    t = t.replace(m[0], ' P ');
+  }
+  return mixesIn(t);
+}
+
 for (const [name, src] of Object.entries(wgsl)) {
   let bad = 0;
   src.split('\n').forEach((ln, i) => {
     const code = ln.split('//')[0];
     if (!code.trim()) return;
-    let t = code, prev;
-    do { prev = t; t = t.replace(/\([^()]*\)/g, ' P '); } while (t !== prev);
-    // strip comparison and arrow tokens that contain < >
-    const flat = t.replace(/->/g, ' ').replace(/[<>]=?/g, ' ');
-    const hasBit = /[&|^]/.test(flat.replace(/&&|\|\|/g, ' '));
-    const hasShift = /<<|>>/.test(t);
-    const hasArith = /[a-zA-Z0-9_)\s][*\/+%-]\s*[a-zA-Z0-9_(]/.test(flat);
-    if ((hasBit && hasArith) || (hasBit && hasShift) || (hasShift && hasArith)) {
+    if (precedenceMix(code)) {
       fail(`${name}:${i + 1}: possible precedence mix: ${code.trim()}`);
       bad++;
     }
