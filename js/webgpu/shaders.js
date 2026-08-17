@@ -794,6 +794,13 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       // carved surface: heightfield normal is meaningless here
       hit.n = solidN(p);
       hit.albedo = vec3f(0.44, 0.41, 0.38);
+      // glow lichen: sparse emissive patches, enough to navigate by and a
+      // reason to look at cave walls
+      let gl = vnoise(p * 1.9);
+      if (gl > 0.8) {
+        hit.albedo = vec3f(0.55, 0.75, 0.70);
+        hit.emissive = (gl - 0.8) * 9.0;
+      }
       hit.cave = true;
     } else {
       hit.n = terrainN(p.xy);
@@ -896,8 +903,12 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     let dHit = h.t + length(org - ro);
     let q = clamp(1.0 - (dHit - U.shadeNear) / max(U.shadeFar - U.shadeNear, 1e-3),
                   0.0, 1.0);
-    let nSun = i32(round(U.sunSamples * q));
-    let nAO = i32(round(U.aoSamples * q));
+    var nSun = i32(round(U.sunSamples * q));
+    var nAO = i32(round(U.aoSamples * q));
+    if (h.cave) {
+      nSun = min(nSun, ${CFG.CAVE_SUN});
+      nAO = min(nAO, ${CFG.CAVE_AO});
+    }
     // beyond shadeFar nothing is traced: unshadowed sun, constant ambient
     var sun = 1.0;
     if (nSun > 0) { sun = softShadow(p, seed, nSun); }

@@ -47,6 +47,10 @@ const CFG = {
   // headlamp: camera-attached light so unlit caves are explorable; falls off
   // with distance, only applied to underground hits
   LAMP: 0.6,
+  // underground ray caps: sun is mostly absent down there, so penumbra
+  // fidelity is worth less than frame time
+  CAVE_SUN: 8,
+  CAVE_AO: 16,
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,
