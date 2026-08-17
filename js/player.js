@@ -11,10 +11,12 @@ const Player = {
     this.z = World.groundZ(sx, sy);
 
     addEventListener('keydown', e => {
+      // the game's modal layer gets every key first; panels capture W/S/E/Q
+      if (Game.key(e.code)) { e.preventDefault(); return; }
       this.keys[e.code] = true;
       if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
       if (e.code === 'KeyX') CFG.RAW = !CFG.RAW;
-      if (e.code === 'KeyC' && GPURenderer.ok) {
+      if (e.code === 'KeyV' && GPURenderer.ok) {
         const sets = Object.keys(GlyphAtlas.SETS);
         const next = sets[(sets.indexOf(CFG.GLYPH_SET) + 1) % sets.length];
         console.info('glyph set:', JSON.stringify(GPURenderer.setGlyphSet(next)));
@@ -53,7 +55,7 @@ const Player = {
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
-      if (!locked()) return;
+      if (!locked() || Game.mode !== 'play') return;
       if (skipEvents > 0) { skipEvents--; return; }
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);
@@ -96,6 +98,8 @@ const Player = {
   },
 
   update(dt) {
+    // frozen while a panel is open
+    if (Game.mode !== 'play') { this.keys = {}; return; }
     const k = this.keys;
     const turn = 2.1 * dt;
     if (k['ArrowLeft']) this.angle -= turn;
@@ -125,6 +129,10 @@ const Player = {
       if (hit) {
         if (this.mouse[0]) {
           Edits.splat(hit[0], hit[1], hit[2], CFG.DIG_R, -100);
+          // dug rock yields stone; a pick loosens more of it
+          const n = Game.count('pick') > 0 ? 2 : 1;
+          Game.give('stone', n);
+          Game.toast('+' + n + ' stone (' + Game.count('stone') + ')');
         } else {
           const fx = hit[0] - hit[3] * 0.6;
           const fy = hit[1] - hit[4] * 0.6;

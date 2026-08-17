@@ -3,6 +3,7 @@
 (async function () {
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
+  Game.init();        // load persisted inventory
   Player.init();
 
   let ready = false;
@@ -25,10 +26,13 @@
   addEventListener('resize', () => GPURenderer.handleResize());
 
   let last = performance.now();
-  let fpsAcc = 0, fpsN = 0;
-  const HUD_LINE = 'wasd move · shift run · LMB dig · RMB fill · G cave hop · M mono · C glyphs · F fullscreen';
+  let fpsAcc = 0, fpsN = 0, fpsLine = '';
+  const HUD_LINE = 'wasd move · Tab inventory · E examine · LMB dig · RMB fill · G cave hop · F fullscreen';
 
-  addEventListener('beforeunload', () => { if (Edits.needSave) Edits.save(); });
+  addEventListener('beforeunload', () => {
+    if (Edits.needSave) Edits.save();
+    if (Game.needSave) Game.save();
+  });
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -37,18 +41,25 @@
     Player.update(dt);
     Entities.update(dt, now / 1000);
     Edits.tick(dt);
-    GPURenderer.render();
+    Game.tick(dt);
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       const ms = (fpsAcc / fpsN) * 1000;
-      Overlay.clear();
-      Overlay.writeRight(0, Math.round(fpsN / fpsAcc) + ' fps ' +
+      fpsLine = Math.round(fpsN / fpsAcc) + ' fps ' +
         ms.toFixed(1) + ' ms ' + GPURenderer.cols + 'x' + GPURenderer.rows +
-        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ');
-      Overlay.write(1, Overlay.rows - 1, HUD_LINE);
+        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ';
       fpsAcc = 0; fpsN = 0;
+      Game.uiDirty = true;
     }
+    if (Game.uiDirty) {
+      Overlay.clear();
+      Overlay.writeRight(0, fpsLine);
+      Overlay.write(1, Overlay.rows - 1, HUD_LINE);
+      Game.drawUI();
+      Game.uiDirty = false;
+    }
+    GPURenderer.render();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

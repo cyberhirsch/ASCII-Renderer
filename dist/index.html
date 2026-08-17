@@ -768,6 +768,179 @@ const Edits = {
 };
 </script>
 <script>
+// ---- js/items.js ----
+// Item, recipe, and tree-species definitions. Data only - the logic that
+// gives, takes, crafts, and examines lives in js/game.js.
+const ITEMS = {
+  wood:   { name: 'wood',        desc: 'Rough-split timber.' },
+  stone:  { name: 'stone',       desc: 'Fist-sized chunks of rock.' },
+  lichen: { name: 'glow lichen', desc: 'Faintly luminous. Cold to the touch.' },
+  fruit:  { name: 'pale fruit',  desc: 'Heavy and sweet-smelling.' },
+  sap:    { name: 'pine sap',    desc: 'Sticky amber resin.' },
+  axe:    { name: 'stone axe',   desc: 'Fells trees.' },
+  pick:   { name: 'stone pick',  desc: 'Digs wider scoops.' },
+  torch:  { name: 'torch',       desc: 'Brightens your lamp while carried.' },
+};
+
+const RECIPES = [
+  { out: 'axe',   needs: { wood: 2, stone: 1 } },
+  { out: 'pick',  needs: { wood: 1, stone: 2 } },
+  { out: 'torch', needs: { wood: 1, lichen: 1 } },
+];
+
+// Species index comes from the tree's placement hash - deterministic per
+// tree, same on every visit. harvest: [item, count] or null.
+const SPECIES = [
+  { name: 'pine',      desc: 'Tall, dark, resin-streaked.',
+    harvest: ['sap', 2],   chop: 3,
+    hug: 'Sticky. Worth it.' },
+  { name: 'bloomwood', desc: 'A broadleaf heavy with pale fruit.',
+    harvest: ['fruit', 2], chop: 3,
+    hug: 'The canopy rustles approvingly.' },
+  { name: 'ironbark',  desc: 'Dense and dark. Dents axe blades.',
+    harvest: null,         chop: 4,
+    hug: 'Like hugging a wall. Solid.' },
+];
+</script>
+<script>
+// ---- js/game.js ----
+// Game state: inventory, modal panels (inventory / craft / examine), and the
+// actions they expose. All UI is written into the ASCII grid via Overlay -
+// no DOM. One keydown layer routes keys by mode; while a panel is open the
+// player is frozen and every key is captured here.
+const Game = {
+  mode: 'play',        // play | inventory | craft | examine
+  inv: new Map(),      // item id -> count
+  cursor: 0,
+  uiDirty: true,
+  toastMsg: '', toastT: 0,
+  needSave: false, saveTimer: 0,
+
+  init() { this.load(); },
+
+  // ---- inventory ----
+
+  count(id) { return this.inv.get(id) || 0; },
+
+  give(id, n) {
+    this.inv.set(id, this.count(id) + n);
+    this.needSave = true;
+    this.uiDirty = true;
+  },
+
+  take(id, n) {
+    const c = this.count(id);
+    if (c < n) return false;
+    if (c === n) this.inv.delete(id); else this.inv.set(id, c - n);
+    this.needSave = true;
+    this.uiDirty = true;
+    return true;
+  },
+
+  toast(msg) { this.toastMsg = msg; this.toastT = 3; this.uiDirty = true; },
+
+  open(mode) { this.mode = mode; this.cursor = 0; this.uiDirty = true; },
+  close() { this.mode = 'play'; this.uiDirty = true; },
+
+  // ---- input: returns true when the key was consumed ----
+
+  key(code) {
+    if (this.mode === 'play') {
+      if (code === 'Tab') { this.open('inventory'); return true; }
+      return false;
+    }
+    if (code === 'KeyQ' || code === 'Escape' || code === 'Tab') {
+      this.close();
+      return true;
+    }
+    if (code === 'KeyW' || code === 'ArrowUp') {
+      this.cursor--; this.uiDirty = true; return true;
+    }
+    if (code === 'KeyS' || code === 'ArrowDown') {
+      this.cursor++; this.uiDirty = true; return true;
+    }
+    if (code === 'KeyE' || code === 'Enter') { this.confirm(); return true; }
+    return true;   // swallow everything else while a panel is open
+  },
+
+  confirm() {
+    // panel-specific confirm actions land with their phases
+  },
+
+  // ---- per-frame ----
+
+  tick(dt) {
+    if (this.toastT > 0) {
+      this.toastT -= dt;
+      if (this.toastT <= 0) { this.toastMsg = ''; this.uiDirty = true; }
+    }
+    if (this.needSave) {
+      this.saveTimer += dt;
+      if (this.saveTimer > 2) { this.saveTimer = 0; this.save(); }
+    }
+  },
+
+  // ---- panel rendering (into the Overlay glyph grid) ----
+
+  panel(lines) {
+    const w = Math.max(...lines.map(l => l.length)) + 4;
+    const x0 = Math.max(0, (Overlay.cols - w) >> 1);
+    const y0 = Math.max(1, ((Overlay.rows - lines.length) >> 1) - 2);
+    for (let i = 0; i < lines.length; i++) {
+      Overlay.write(x0, y0 + i, ('  ' + lines[i]).padEnd(w, ' '));
+    }
+  },
+
+  drawUI() {
+    if (this.toastMsg) {
+      Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
+    }
+    if (this.mode === 'inventory') this.drawInventory();
+  },
+
+  drawInventory() {
+    const lines = ['INVENTORY', ''];
+    const ids = [...this.inv.keys()];
+    if (ids.length === 0) {
+      lines.push('(empty)');
+      lines.push('');
+      lines.push('dig for stone, examine [E] a');
+      lines.push('tree for wood');
+    } else {
+      for (const id of ids) {
+        const it = ITEMS[id] || { name: id };
+        lines.push(it.name.padEnd(14) + ' x ' + this.count(id));
+      }
+    }
+    lines.push('');
+    lines.push('[Q] close');
+    this.panel(lines);
+  },
+
+  // ---- persistence ----
+
+  save() {
+    if (typeof localStorage === 'undefined') { this.needSave = false; return; }
+    const obj = {};
+    for (const [k, v] of this.inv) obj[k] = v;
+    try { localStorage.setItem('ascii-inv-v1', JSON.stringify(obj)); }
+    catch (e) { console.warn('inventory save failed: ' + e.message); }
+    this.needSave = false;
+  },
+
+  load() {
+    if (typeof localStorage === 'undefined') return;
+    const s = localStorage.getItem('ascii-inv-v1');
+    if (!s) return;
+    try {
+      const obj = JSON.parse(s);
+      this.inv.clear();
+      for (const k of Object.keys(obj)) this.inv.set(k, obj[k]);
+    } catch (e) { console.warn('inventory load failed'); }
+  },
+};
+</script>
+<script>
 // ---- js/player.js ----
 // First-person player over the infinite terrain: WASD move, arrows/mouse
 // look, slope- and water-limited movement, trunk-circle tree collision.
@@ -782,10 +955,12 @@ const Player = {
     this.z = World.groundZ(sx, sy);
 
     addEventListener('keydown', e => {
+      // the game's modal layer gets every key first; panels capture W/S/E/Q
+      if (Game.key(e.code)) { e.preventDefault(); return; }
       this.keys[e.code] = true;
       if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
       if (e.code === 'KeyX') CFG.RAW = !CFG.RAW;
-      if (e.code === 'KeyC' && GPURenderer.ok) {
+      if (e.code === 'KeyV' && GPURenderer.ok) {
         const sets = Object.keys(GlyphAtlas.SETS);
         const next = sets[(sets.indexOf(CFG.GLYPH_SET) + 1) % sets.length];
         console.info('glyph set:', JSON.stringify(GPURenderer.setGlyphSet(next)));
@@ -824,7 +999,7 @@ const Player = {
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
-      if (!locked()) return;
+      if (!locked() || Game.mode !== 'play') return;
       if (skipEvents > 0) { skipEvents--; return; }
       const mx = clamp(e.movementX, -120, 120);
       const my = clamp(e.movementY, -120, 120);
@@ -867,6 +1042,8 @@ const Player = {
   },
 
   update(dt) {
+    // frozen while a panel is open
+    if (Game.mode !== 'play') { this.keys = {}; return; }
     const k = this.keys;
     const turn = 2.1 * dt;
     if (k['ArrowLeft']) this.angle -= turn;
@@ -896,6 +1073,10 @@ const Player = {
       if (hit) {
         if (this.mouse[0]) {
           Edits.splat(hit[0], hit[1], hit[2], CFG.DIG_R, -100);
+          // dug rock yields stone; a pick loosens more of it
+          const n = Game.count('pick') > 0 ? 2 : 1;
+          Game.give('stone', n);
+          Game.toast('+' + n + ' stone (' + Game.count('stone') + ')');
         } else {
           const fx = hit[0] - hit[3] * 0.6;
           const fy = hit[1] - hit[4] * 0.6;
@@ -2559,6 +2740,7 @@ const GPURenderer = {
 (async function () {
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
+  Game.init();        // load persisted inventory
   Player.init();
 
   let ready = false;
@@ -2581,10 +2763,13 @@ const GPURenderer = {
   addEventListener('resize', () => GPURenderer.handleResize());
 
   let last = performance.now();
-  let fpsAcc = 0, fpsN = 0;
-  const HUD_LINE = 'wasd move · shift run · LMB dig · RMB fill · G cave hop · M mono · C glyphs · F fullscreen';
+  let fpsAcc = 0, fpsN = 0, fpsLine = '';
+  const HUD_LINE = 'wasd move · Tab inventory · E examine · LMB dig · RMB fill · G cave hop · F fullscreen';
 
-  addEventListener('beforeunload', () => { if (Edits.needSave) Edits.save(); });
+  addEventListener('beforeunload', () => {
+    if (Edits.needSave) Edits.save();
+    if (Game.needSave) Game.save();
+  });
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -2593,18 +2778,25 @@ const GPURenderer = {
     Player.update(dt);
     Entities.update(dt, now / 1000);
     Edits.tick(dt);
-    GPURenderer.render();
+    Game.tick(dt);
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       const ms = (fpsAcc / fpsN) * 1000;
-      Overlay.clear();
-      Overlay.writeRight(0, Math.round(fpsN / fpsAcc) + ' fps ' +
+      fpsLine = Math.round(fpsN / fpsAcc) + ' fps ' +
         ms.toFixed(1) + ' ms ' + GPURenderer.cols + 'x' + GPURenderer.rows +
-        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ');
-      Overlay.write(1, Overlay.rows - 1, HUD_LINE);
+        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ';
       fpsAcc = 0; fpsN = 0;
+      Game.uiDirty = true;
     }
+    if (Game.uiDirty) {
+      Overlay.clear();
+      Overlay.writeRight(0, fpsLine);
+      Overlay.write(1, Overlay.rows - 1, HUD_LINE);
+      Game.drawUI();
+      Game.uiDirty = false;
+    }
+    GPURenderer.render();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
