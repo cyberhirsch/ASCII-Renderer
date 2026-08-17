@@ -15,8 +15,8 @@ const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'util', 'world']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, World, terrainH, ' +
-  ['CAVES', 'caveFloor', 'caveV', 'naturalV', 'shaftAt', 'helixV', 'solidD',
-   'vn2', 'smoothstep'].map(grab).join(', ') + ' });';
+  ['CAVES', 'caveFloor', 'caveV', 'naturalV', 'shaftAt', 'helixV', 'hallAt',
+   'solidD', 'vn2', 'smoothstep'].map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math }, { filename: 'under-test' });
 
 if (!c.caveV || !c.caveFloor) {
@@ -265,6 +265,90 @@ if (c.shaftAt) {
       ? ok(`walk-bot found a legal descent to z=${deepest.toFixed(1)} (band floor ${A.zBot.toFixed(1)})`)
       : fail(`walk-bot: no legal path below z=${deepest.toFixed(1)} (band floor ${A.zBot.toFixed(1)}, ${expanded} states)`);
   }
+}
+
+// ---- 11. carved halls: exist, flat floors, solid pillars, walk-out ----
+if (c.hallAt) {
+  const halls = [];
+  for (let cx = -30; cx <= 30 && halls.length < 8; cx++) {
+    for (let cy = -30; cy <= 30 && halls.length < 8; cy++) {
+      for (const k of [-1, -2, -3]) {
+        const a = c.hallAt(cx, cy, k);
+        if (a) halls.push({ a, k });
+      }
+    }
+  }
+  halls.length >= 3 ? ok(`${halls.length}+ halls found in scan`)
+                    : fail(`too few halls: ${halls.length}`);
+
+  let flatBad = 0, pilBad = 0, flatN = 0, pilN = 0;
+  for (const { a } of halls) {
+    // floor flat at fz0 across the interior (skip pillar columns)
+    for (let i = 0; i < 40; i++) {
+      const lx = (u.hash01(i, 1, 77) - 0.5) * 2 * (a.hx - 1.5);
+      const ly = (u.hash01(i, 2, 78) - 0.5) * 2 * (a.hy - 1.5);
+      const x = a.ax + a.ca * lx - a.sa * ly;
+      const y = a.ay + a.sa * lx + a.ca * ly;
+      const S = CAVES.PIL_S;
+      const frac = t => t - Math.floor(t);
+      const cheb = Math.max(Math.abs(frac(lx / S + 0.5) - 0.5) * S,
+                            Math.abs(frac(ly / S + 0.5) - 0.5) * S);
+      if (cheb < CAVES.PIL_R + 0.4) {
+        // pillar column: must be rock at standing height
+        pilN++;
+        if (cheb < CAVES.PIL_R - 0.05 &&
+            c.solidD(x, y, a.fz0 + 1.5) < 0) pilBad++;
+        continue;
+      }
+      flatN++;
+      const wz = c.World.walkZ(x, y, a.fz0 + 1.3);
+      if (wz === null || Math.abs(wz - a.fz0) > 0.05) flatBad++;
+    }
+  }
+  flatBad === 0 ? ok(`hall floors flat at fz0 (${flatN} samples)`)
+                : fail(`hall floors uneven at ${flatBad}/${flatN} samples`);
+  pilBad === 0 ? ok(`pillars solid (${pilN} samples)`)
+               : fail(`pillars carved away at ${pilBad}/${pilN} samples`);
+
+  // walk-out: from the hall centre, legal moves reach beyond the walls
+  const { a: H } = halls[0];
+  const stand2 = (x, y, z) => {
+    const fz = c.World.walkZ(x, y, z);
+    if (fz === null) return null;
+    if (Math.abs(fz - z) > 1.0) return null;
+    for (let dz = 0.5; dz <= 1.7; dz += 0.4) {
+      if (c.solidD(x, y, fz + dz) >= 0) return null;
+    }
+    return fz;
+  };
+  // start beside the centre pillar, not inside it
+  const sx2 = H.ax + H.ca * 1.6, sy2 = H.ay + H.sa * 1.6;
+  const zs = stand2(sx2, sy2, H.fz0 + 0.5);
+  let out = false;
+  if (zs !== null) {
+    const q2 = [[sx2, sy2, zs]];
+    const seen2 = new Set();
+    let exp2 = 0;
+    while (q2.length && !out && exp2 < 5000) {
+      const [x, y, z] = q2.shift();
+      exp2++;
+      for (let d = 0; d < 8; d++) {
+        const ang = d * Math.PI / 4;
+        const nx = x + Math.cos(ang) * 0.4, ny = y + Math.sin(ang) * 0.4;
+        const fz = stand2(nx, ny, z);
+        if (fz === null) continue;
+        const k2 = `${Math.round(nx / 0.4)},${Math.round(ny / 0.4)},${Math.round(fz / 1.2)}`;
+        if (seen2.has(k2)) continue;
+        seen2.add(k2);
+        const ldx = nx - H.ax, ldy = ny - H.ay;
+        const llx = H.ca * ldx + H.sa * ldy, lly = -H.sa * ldx + H.ca * ldy;
+        if (Math.abs(llx) > H.hx + 2 || Math.abs(lly) > H.hy + 2) { out = true; break; }
+        q2.push([nx, ny, fz]);
+      }
+    }
+  }
+  out ? ok('walk-out: hall connects to the passage network on foot')
+      : fail(`walk-out: stuck inside the hall (start ${zs === null ? 'invalid' : 'ok'})`);
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

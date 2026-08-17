@@ -245,11 +245,80 @@ fn shaftV(p : vec3f, gz : f32) -> vec2f {
   return v;
 }
 
-// cave void field: natural banded passages plus carved shafts, minus the
-// stair slabs, which win over every carve
+// -------- carved halls: flat-floored pillared rooms on the network --------
+
+struct Hall {
+  present : bool, ax : f32, ay : f32, hx : f32, hy : f32,
+  hgt : f32, fz0 : f32, ca : f32, sa : f32,
+};
+
+// One candidate per placement cell per band. Presence requires a passage at
+// the anchor, so the network's own tunnels puncture the walls - those
+// punctures are the doorways. The floor is FLAT at the anchor's band-floor
+// height, which against the noisy passages reads as "someone carved this".
+fn hallAt(cx : i32, cy : i32, k : i32, pp : vec2f) -> Hall {
+  var a : Hall;
+  a.present = false;
+  let s = seedU();
+  let sk = s ^ (0xB00Bu + u32(8 + k) * 0x8121u);
+  if (hash01(cx, cy, sk) >= 0.5) { return a; }
+  let h2 = hash2i(cx, cy, sk ^ 0x39D1u);
+  a.ax = f32(cx) * ${CAVES.HALL_E} + 16.0 + h2.x * 64.0;
+  a.ay = f32(cy) * ${CAVES.HALL_E} + 16.0 + h2.y * 64.0;
+  let dx = pp.x - a.ax;
+  let dy = pp.y - a.ay;
+  if (dx * dx + dy * dy > 17.0 * 17.0) { return a; }
+  let h3 = hash2i(cx, cy, sk ^ 0x5A5Au);
+  let aq = vec2f(a.ax, a.ay);
+  let gz = terrainH(aq);
+  a.fz0 = caveFloor(k, aq);
+  if (naturalV(vec3f(aq, a.fz0 + 1.2), gz) < 0.15) { return a; }
+  let ang = hash01(cx, cy, sk ^ 0x11EFu) * 3.14159265;
+  a.hx = 6.0 + h3.x * 5.0;
+  a.hy = 5.0 + h3.y * 3.0;
+  a.hgt = 3.2 + h3.x * 1.3;
+  a.ca = cos(ang);
+  a.sa = sin(ang);
+  a.present = true;
+  return a;
+}
+
+// Hall carve: (void, slab). The room void is a plain rotated box; the flat
+// floor slab and the pillar lattice ride the slab channel, so neither a
+// chamber below nor one overlapping can dissolve them - freestanding
+// pillars in a cavern are exactly the ruin look wanted.
+fn hallV(p : vec3f, gz : f32) -> vec2f {
+  if (p.z >= CAVE_TOP || p.z < CAVE_BOT) { return vec2f(-1.0e9, -1.0e9); }
+  let k = i32(floor(p.z / CAVE_BAND));
+  let cx = i32(floor(p.x / ${CAVES.HALL_E}));
+  let cy = i32(floor(p.y / ${CAVES.HALL_E}));
+  let a = hallAt(cx, cy, k, p.xy);
+  if (!a.present) { return vec2f(-1.0e9, -1.0e9); }
+  let dx = p.x - a.ax;
+  let dy = p.y - a.ay;
+  let lx = a.ca * dx + a.sa * dy;
+  let ly = -a.sa * dx + a.ca * dy;
+  let inBox = min(a.hx - abs(lx), a.hy - abs(ly));
+  let v = min(inBox, min(p.z - a.fz0, a.fz0 + a.hgt - p.z));
+  // pillar lattice in the local frame (kept clear of the walls)
+  let S = ${CAVES.PIL_S};
+  let mx = abs(fract(lx / S + 0.5) - 0.5) * S;
+  let my = abs(fract(ly / S + 0.5) - 0.5) * S;
+  let cheb = max(mx, my);
+  let pillar = min(min(${CAVES.PIL_R} - cheb, inBox - 1.2),
+                   min(p.z - (a.fz0 - 0.1), a.fz0 + a.hgt - p.z));
+  let floorSlab = min(inBox, min(a.fz0 - p.z, p.z - (a.fz0 - 0.9)));
+  return vec2f(v, max(pillar, floorSlab));
+}
+
+// cave void field: natural banded passages plus carved shafts and halls,
+// minus the protected solids (stair slabs, hall floors, pillars), which win
+// over every carve
 fn caveV(p : vec3f, gz : f32) -> f32 {
   let sv = shaftV(p, gz);
-  return min(max(naturalV(p, gz), sv.x), -sv.y);
+  let hv = hallV(p, gz);
+  let v = max(naturalV(p, gz), max(sv.x, hv.x));
+  return min(v, -max(sv.y, hv.y));
 }
 
 fn solidD(p : vec3f) -> f32 {

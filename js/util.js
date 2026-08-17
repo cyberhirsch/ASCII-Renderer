@@ -81,6 +81,12 @@ const CAVES = {
   SHAFT_RIN: 0.75, // central column radius (keeps the stair "supported")
   SHAFT_PITCH: 3.4,// vertical drop per full turn; grade ~16 deg mid-stair
   SHAFT_OPEN: 0.7, // open fraction of each turn (headroom 2.4, slab 1.0)
+  // carved halls: one candidate per HALL_E cell per band; flat-floored
+  // rotated rooms with a pillar lattice, entered wherever the natural
+  // passage network punctures their walls
+  HALL_E: 96,      // placement cell size
+  PIL_S: 3.5,      // pillar lattice spacing inside halls
+  PIL_R: 0.45,     // pillar half-width (square pillars, Chebyshev metric)
 };
 
 // Band floor: a low-frequency ramp whose slope is bounded by construction.
@@ -209,12 +215,75 @@ function shaftV(x, y, z, gz) {
   return [v, slab];
 }
 
-// Cave void field: natural banded passages plus carved shafts, minus the
-// stair slabs, which win over every carve. Mirror of WGSL caveV.
-// KEEP IN SYNC.
+// Hall candidate for placement cell (cx, cy) in band k. Presence requires a
+// passage at the anchor, so the network's own tunnels puncture the walls -
+// those punctures are the doorways. The floor is FLAT: it sits at the
+// anchor's band-floor height across the whole room, which against the noisy
+// passages is what reads as "someone carved this".
+// Mirror of WGSL hallAt. KEEP IN SYNC.
+function hallAt(cx, cy, k, px, py) {
+  const s = CFG.SEED >>> 0;
+  const sk = (s ^ (0xB00B + (8 + k) * 0x8121)) >>> 0;
+  if (hash01(cx, cy, sk) >= 0.5) return null;
+  const h2 = hash2i(cx, cy, (sk ^ 0x39D1) >>> 0);
+  const ax = cx * CAVES.HALL_E + 16 + h2[0] * 64;
+  const ay = cy * CAVES.HALL_E + 16 + h2[1] * 64;
+  if (px !== undefined) {
+    const dx = px - ax, dy = py - ay;
+    if (dx * dx + dy * dy > 17 * 17) return null;
+  }
+  const h3 = hash2i(cx, cy, (sk ^ 0x5A5A) >>> 0);
+  const gz = terrainH(ax, ay);
+  const fz0 = caveFloor(k, ax, ay);
+  if (naturalV(ax, ay, fz0 + 1.2, gz) < 0.15) return null;
+  const ang = hash01(cx, cy, (sk ^ 0x11EF) >>> 0) * Math.PI;
+  return {
+    ax, ay,
+    hx: 6 + h3[0] * 5,
+    hy: 5 + h3[1] * 3,
+    hgt: 3.2 + h3[0] * 1.3,
+    fz0,
+    ca: Math.cos(ang), sa: Math.sin(ang),
+  };
+}
+
+// Hall carve near (x, y, z): returns [void, slab]. The room void is a plain
+// rotated box; the flat floor slab and the pillar lattice ride the slab
+// channel, so neither a chamber below nor one overlapping can dissolve them
+// - freestanding pillars in a cavern are exactly the ruin look wanted.
+// Mirror of WGSL hallV. KEEP IN SYNC.
+function hallV(x, y, z, gz) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return [-1e9, -1e9];
+  const k = Math.floor(z / CAVES.BAND);
+  const cx = Math.floor(x / CAVES.HALL_E);
+  const cy = Math.floor(y / CAVES.HALL_E);
+  const a = hallAt(cx, cy, k, x, y);
+  if (!a) return [-1e9, -1e9];
+  const dx = x - a.ax, dy = y - a.ay;
+  const lx = a.ca * dx + a.sa * dy;
+  const ly = -a.sa * dx + a.ca * dy;
+  const inBox = Math.min(a.hx - Math.abs(lx), a.hy - Math.abs(ly));
+  const v = Math.min(inBox, z - a.fz0, a.fz0 + a.hgt - z);
+  // pillar lattice in the local frame (kept clear of the walls)
+  const S = CAVES.PIL_S;
+  const frac = t => t - Math.floor(t);
+  const mx = Math.abs(frac(lx / S + 0.5) - 0.5) * S;
+  const my = Math.abs(frac(ly / S + 0.5) - 0.5) * S;
+  const cheb = Math.max(mx, my);
+  const pillar = Math.min(CAVES.PIL_R - cheb, inBox - 1.2,
+                          z - (a.fz0 - 0.1), a.fz0 + a.hgt - z);
+  const floorSlab = Math.min(inBox, a.fz0 - z, z - (a.fz0 - 0.9));
+  return [v, Math.max(pillar, floorSlab)];
+}
+
+// Cave void field: natural banded passages plus carved shafts and halls,
+// minus the protected solids (stair slabs, hall floors, pillars), which win
+// over every carve. Mirror of WGSL caveV. KEEP IN SYNC.
 function caveV(x, y, z, gz) {
   const sv = shaftV(x, y, z, gz);
-  return Math.min(Math.max(naturalV(x, y, z, gz), sv[0]), -sv[1]);
+  const hv = hallV(x, y, z, gz);
+  const v = Math.max(naturalV(x, y, z, gz), sv[0], hv[0]);
+  return Math.min(v, -Math.max(sv[1], hv[1]));
 }
 
 // Layered density, the one authority on what is solid: positive in rock,
