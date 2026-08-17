@@ -10,12 +10,13 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
-const src = ['config', 'util', 'world', 'overlay', 'edits', 'fells', 'items', 'game']
+const src = ['config', 'util', 'world', 'sky', 'overlay', 'edits', 'fells',
+             'items', 'game']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Fells', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
-   'oreItem'].map(grab).join(', ') + ' });';
+   'oreItem', 'Sky'].map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
 let failures = 0;
@@ -519,6 +520,96 @@ if (c.matAt) {
                                       : fail('gem dig yielded nothing');
     } else ok('gem point sits under soil cover (skipped)');
   }
+}
+
+// ---- 12. day/night cycle ----
+if (c.Sky) {
+  const { Sky } = c;
+
+  // the sun crosses the horizon twice and peaks at noon
+  Sky.setHour(12);
+  const noonH = Sky.sunHeight();
+  Sky.setHour(0);
+  const midH = Sky.sunHeight();
+  (noonH > 0.9 && midH < -0.9)
+    ? ok(`sun high at noon (${noonH.toFixed(2)}), below at midnight (${midH.toFixed(2)})`)
+    : fail(`sun arc wrong: noon=${noonH.toFixed(2)} midnight=${midH.toFixed(2)}`);
+  Sky.setHour(6);
+  (Math.abs(Sky.sunHeight()) < 0.05)
+    ? ok('sun sits on the horizon at 06:00') : fail('sunrise not at 06:00');
+
+  // night factor: 0 by day, 1 at midnight, monotone across the evening
+  Sky.setHour(12);
+  const dayN = Sky.night();
+  Sky.setHour(0);
+  const nightN = Sky.night();
+  (dayN < 0.01 && nightN > 0.99)
+    ? ok('night factor spans 0 by day to 1 at midnight')
+    : fail(`night factor wrong: day=${dayN} night=${nightN}`);
+
+  // the moon is up when the sun is down
+  Sky.setHour(0);
+  const sd = Sky.sunDir(), md = Sky.moonDir();
+  (sd[2] < 0 && md[2] > 0)
+    ? ok('moon is up at midnight while the sun is down')
+    : fail(`moon/sun elevation wrong: sun.z=${sd[2].toFixed(2)} moon.z=${md[2].toFixed(2)}`);
+  Sky.setHour(12);
+  (Sky.sunDir()[2] > 0 && Sky.moonDir()[2] < 0)
+    ? ok('moon is down at noon') : fail('moon up at noon');
+
+  // directions stay unit length all the way round
+  let worstLen = 0, badCol = 0;
+  for (let i = 0; i <= 96; i++) {
+    Sky.t = i / 96;
+    for (const d of [Sky.sunDir(), Sky.moonDir()]) {
+      worstLen = Math.max(worstLen, Math.abs(Math.hypot(...d) - 1));
+    }
+    const s = Sky.state();
+    for (const v of [...s.sunCol, ...s.ambCol, ...s.skyLo, ...s.skyHi,
+                     s.sunI, s.ambI, s.night]) {
+      if (!isFinite(v) || v < 0 || v > 4) badCol++;
+    }
+  }
+  (worstLen < 1e-9) ? ok('sun and moon directions stay unit length')
+                    : fail(`direction length drifts by ${worstLen}`);
+  (badCol === 0) ? ok('every colour stays finite and in range across the cycle')
+                 : fail(`${badCol} bad colour components over the cycle`);
+
+  // night never crushes the scene: the key light keeps the glyph ramp alive
+  let dimmest = Infinity;
+  for (let i = 0; i <= 96; i++) {
+    Sky.t = i / 96;
+    const s = Sky.state();
+    dimmest = Math.min(dimmest, s.sunI + s.ambI);
+  }
+  (dimmest > 0.8)
+    ? ok(`darkest moment still lights the ramp (key+fill ${dimmest.toFixed(2)})`)
+    : fail(`night goes too dark for the glyph ramp: ${dimmest.toFixed(2)}`);
+
+  // time advances and wraps
+  Sky.t = 0.99; Sky.paused = false;
+  Sky.update(c.CFG.DAY_LEN * 0.02);
+  (Sky.t >= 0 && Sky.t < 1) ? ok('time wraps at the end of the day')
+                            : fail(`time did not wrap: ${Sky.t}`);
+  Sky.paused = true;
+  const frozen = Sky.t;
+  Sky.update(100);
+  (Sky.t === frozen) ? ok('freeze holds the clock') : fail('freeze did not hold');
+  Sky.paused = false;
+
+  // the console drives all of it
+  const { Game: G } = c;
+  G.openConsole();
+  G.cmdBuf = 'time 3';
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (Math.abs(Sky.hour() - 3) < 0.01) ? ok('console "time 3" jumps to 03:00')
+                                    : fail(`time command wrong: ${Sky.hour()}`);
+  G.cmdBuf = 'freeze';
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (Sky.paused === true) ? ok('console "freeze" stops the clock')
+                        : fail('freeze command failed');
+  Sky.paused = false;
+  G.close();
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

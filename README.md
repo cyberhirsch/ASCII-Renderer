@@ -12,6 +12,10 @@ as rays cross it. Ships as a single HTML file.
 Open `dist/index.html` in a browser with WebGPU (current Chrome/Edge, recent
 Firefox/Safari), or serve the repo root and open `index.html`.
 
+**Console:** Enter opens a command line — `time <hour>` jumps the clock,
+`freeze` stops it, `daylen <seconds>` sets the cycle length, and `devmode`
+unlocks the M/X debug views. Escape or an empty Enter closes it.
+
 **Controls:** WASD move · Shift run · click for mouse-look · **LMB** dig ·
 **RMB** fill · **Tab** inventory · **C** craft · **E** examine what you're
 looking at (**W/S** choose an action, **E** do it, **Q** close) · **G** hop
@@ -31,7 +35,17 @@ Rock rarely carries **ore veins** — branching tubes where two noise fields
 intersect, copper near the surface, iron deeper — and in the core of a deep
 vein, **gems**, which glint out of cave walls and are worth walking toward.
 A torch (wood + cave lichen) brightens your headlamp; a gem lantern brightens
-it far more. Inventory, digs, and felled trees all survive reload.
+it far more — and above ground that matters, because the sun sets. A full
+day/night cycle runs in five minutes: warm key light by day, red at the
+horizons, then a night lit blue by a yellow crescent moon under a field of
+`*` `+` `x` `.` stars. Inventory, digs, and felled trees all survive reload.
+
+Night is art-directed, not simulated. The glyph ramp has only ~24 brightness
+steps, so a physically dark night would crush the whole scene into the bottom
+two or three and read as an empty screen. Instead night is a bright moonlit
+blue — it says *night* through hue and contrast while the ramp stays fully
+used, and yellow is reserved for the moon and stars so they read as the only
+light sources up there.
 
 ## How it works
 

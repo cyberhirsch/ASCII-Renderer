@@ -53,15 +53,19 @@
 
     Player.update(dt);
     Entities.update(dt, now / 1000);
+    Sky.update(dt);
     Edits.tick(dt);
     Game.tick(dt);
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       const ms = (fpsAcc / fpsN) * 1000;
+      const hh = Math.floor(Sky.hour());
+      const mm = Math.floor((Sky.hour() - hh) * 60);
       fpsLine = Math.round(fpsN / fpsAcc) + ' fps ' +
         ms.toFixed(1) + ' ms ' + GPURenderer.cols + 'x' + GPURenderer.rows +
-        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ';
+        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) +
+        ' ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
       fpsAcc = 0; fpsN = 0;
       Game.uiDirty = true;
     }

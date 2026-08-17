@@ -67,7 +67,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -179,9 +179,15 @@ const GPURenderer = {
   allocTargets() {
     if (this.lowTex) this.lowTex.destroy();
     if (this.overlayBuf) this.overlayBuf.destroy();
+    if (this.starBuf) this.starBuf.destroy();
     this.overlayBuf = this.device.createBuffer({
       size: this.cols * this.rows * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    // written by the compute pass, read by the glyph pass
+    this.starBuf = this.device.createBuffer({
+      size: this.cols * this.rows * 4,
+      usage: GPUBufferUsage.STORAGE,
     });
     Overlay.resize(this.cols, this.rows);
     this.lowTex = this.device.createTexture({
@@ -199,6 +205,7 @@ const GPURenderer = {
         { binding: 3, resource: { buffer: this.editHeadBuf } },
         { binding: 4, resource: { buffer: this.editDataBuf } },
         { binding: 5, resource: { buffer: this.fellBuf } },
+        { binding: 6, resource: { buffer: this.starBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -210,6 +217,7 @@ const GPURenderer = {
         { binding: 3, resource: { buffer: this.rparBuf } },
         { binding: 4, resource: this.textTex.createView() },
         { binding: 5, resource: { buffer: this.overlayBuf } },
+        { binding: 6, resource: { buffer: this.starBuf } },
       ],
     });
   },
@@ -239,8 +247,8 @@ const GPURenderer = {
       fwd[2] * right[0] - fwd[0] * right[2],
       fwd[0] * right[1] - fwd[1] * right[0],
     ];
-    const sx = Math.cos(CFG.SUN_AZ), sy = Math.sin(CFG.SUN_AZ), sz = Math.tan(CFG.SUN_EL);
-    const il = 1 / Math.hypot(sx, sy, sz);
+    // the whole sky - sun position, moon, every colour - comes from Sky
+    const sky = Sky.state();
     const tanX = CFG.PLANE_LEN;
     const tanY = tanX * (this.rows * this.cellH) / (this.cols * this.cellW);
 
@@ -260,7 +268,7 @@ const GPURenderer = {
       Fells.gpuDirty = false;
     }
 
-    const u = new Float32Array(60);
+    const u = new Float32Array(64);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -268,7 +276,7 @@ const GPURenderer = {
     u[7] = (Player.z || 0) + CFG.EYE;
     u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
     u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.SEED;
-    u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
+    u.set(sky.sunDir, 16);                          u[19] = CFG.SHADOW;
     u[20] = tanX; u[21] = tanY; u[22] = CFG.TERRAIN_MAX;
     u[23] = Math.min(Entities.list.length, CFG.MAX_ENTS);
     u[24] = CFG.SUN_ANGLE; u[25] = CFG.SUN_SAMPLES;
@@ -278,10 +286,10 @@ const GPURenderer = {
     u[30] = (performance.now() / 1000) % 3600;
     u[31] = CFG.SHADE_NEAR;
     u[43] = CFG.SHADE_FAR;
-    u.set(CFG.SUN_COL, 32);      u[35] = CFG.SUN_I;
-    u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
-    u.set(CFG.SKY_HORIZON, 40);
-    u.set(CFG.SKY_ZENITH, 44);
+    u.set(sky.sunCol, 32);       u[35] = sky.sunI;
+    u.set(sky.ambCol, 36);       u[39] = sky.ambI;
+    u.set(sky.skyLo, 40);
+    u.set(sky.skyHi, 44);
     if (this.editCount > 0 && this.editBounds) {
       u[48] = this.editBounds[0]; u[49] = this.editBounds[1];
       u[50] = this.editBounds[2]; u[51] = this.editCount;
@@ -292,6 +300,8 @@ const GPURenderer = {
     u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
                       : Game.count('torch') > 0 ? 2.2 : 1);
     u[57] = this.fellCount;
+    u.set(sky.moonDir, 60);
+    u[63] = sky.night;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

@@ -95,6 +95,27 @@ const Game = {
     const cmd = raw.trim();
     if (!cmd) return;
     this.cmdHistory.push('> ' + cmd);
+    const arg = cmd.split(/\s+/);
+    const verb = arg[0].toLowerCase();
+    // waiting out a whole cycle to see midnight is no way to work
+    if (verb === 'time') {
+      if (arg.length > 1 && isFinite(parseFloat(arg[1]))) {
+        Sky.setHour(parseFloat(arg[1]));
+      }
+      this.cmdHistory.push('time ' + Sky.hour().toFixed(2) +
+        (Sky.paused ? ' (frozen)' : ''));
+      return;
+    }
+    if (verb === 'freeze') {
+      Sky.paused = !Sky.paused;
+      this.cmdHistory.push(Sky.paused ? 'time frozen' : 'time running');
+      return;
+    }
+    if (verb === 'daylen') {
+      if (arg.length > 1 && parseFloat(arg[1]) > 0) CFG.DAY_LEN = parseFloat(arg[1]);
+      this.cmdHistory.push('day length ' + CFG.DAY_LEN + 's');
+      return;
+    }
     switch (cmd.toLowerCase()) {
       case 'devmode':
         this.devMode = !this.devMode;
@@ -106,7 +127,8 @@ const Game = {
         this.cmdHistory.length = 0;
         break;
       case 'help':
-        this.cmdHistory.push('commands: devmode, clear, help');
+        this.cmdHistory.push('commands: devmode, time <h>, freeze, daylen <s>,');
+        this.cmdHistory.push('clear, help');
         break;
       default:
         this.cmdHistory.push('unknown command: ' + cmd);

@@ -55,6 +55,8 @@ struct Uniforms {
   fellCount : f32,   // felled tree cells in the fells buffer
   pad5      : f32,
   pad6      : f32,
+  moonDir   : vec3f, // the moon runs opposite the sun
+  night     : f32,   // 0 by day, 1 in full night; gates moon and stars
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -67,6 +69,10 @@ struct Uniforms {
 @group(0) @binding(4) var<storage, read> editData : array<u32>;
 // felled tree cells (ix, iy), nearest the player first
 @group(0) @binding(5) var<storage, read> fells : array<vec2f>;
+// per-cell forced glyph for stars: 0 = none, else an ASCII code. Stars have
+// to be specific characters, and the glyph is otherwise chosen by luminance
+// in the render pass - so the compute pass names the character here.
+@group(0) @binding(6) var<storage, read_write> stars : array<u32>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -877,6 +883,44 @@ fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f, nRays : i32) -> f32 {
 
 // -------- sky --------
 
+// Stars are specific characters, not bright pixels: the render pass picks a
+// glyph by luminance, so a star has to name the character it wants. Returns
+// an ASCII code or 0. Faint dots are common and big bright stars are rare,
+// which is what keeps a field of them from reading as uniform noise.
+fn starAt(rd : vec3f) -> u32 {
+  if (U.night < 0.05 || rd.z < 0.015) { return 0u; }
+  let q = vec3i(floor(rd * ${CFG.STAR_GRID}));
+  let h = uhash(uhash(bitcast<u32>(q.x), bitcast<u32>(q.y)), bitcast<u32>(q.z));
+  let r = f32(h) * (1.0 / 4294967296.0);
+  // fewer stars at dusk, the full field at midnight
+  let gate = mix(1.0, ${CFG.STAR_RARE}, U.night);
+  if (r < gate) { return 0u; }
+  let pick = f32(h >> 8u & 0xffffu) * (1.0 / 65536.0);
+  if (pick < 0.50) { return 46u; }   // '.'  faint
+  if (pick < 0.78) { return 43u; }   // '+'
+  if (pick < 0.93) { return 120u; }  // 'x'
+  return 42u;                        // '*'  rare and bright
+}
+
+// the moon: a yellow crescent, cut as a disc minus a second disc beside it
+fn moonAt(rd : vec3f) -> f32 {
+  if (U.night < 0.02) { return 0.0; }
+  let dm = dot(rd, U.moonDir);
+  if (dm < 0.99) { return 0.0; }
+  var up = vec3f(0.0, 0.0, 1.0);
+  if (abs(U.moonDir.z) > 0.9) { up = vec3f(1.0, 0.0, 0.0); }
+  let mx = normalize(cross(up, U.moonDir));
+  let my = cross(U.moonDir, mx);
+  let u = dot(rd, mx);
+  let v = dot(rd, my);
+  let R = ${CFG.MOON_R};
+  let r2 = u * u + v * v;
+  if (r2 > R * R) { return 0.0; }
+  let du = u - ${CFG.MOON_CRESC} * R;
+  if (du * du + v * v < R * R * 0.92) { return 0.0; }   // the bitten-out part
+  return 1.0;
+}
+
 fn shadeSky(rd : vec3f) -> vec3f {
   let t = clamp(rd.z, 0.0, 1.0);
   var col = mix(U.skyLo, U.skyHi, pow(t, 0.55));
@@ -884,6 +928,11 @@ fn shadeSky(rd : vec3f) -> vec3f {
   if (d > 0.9995) { return U.sunCol * 1.6; }
   col = col + U.sunCol * pow(max(d, 0.0), 220.0) * 1.1;
   col = col + U.sunCol * pow(max(d, 0.0), 18.0) * 0.22;
+  // moon disc and its halo, both yellow against the blue
+  let moonCol = vec3f(1.0, 0.88, 0.42);
+  let dmoon = dot(normalize(rd), U.moonDir);
+  col = col + moonCol * pow(max(dmoon, 0.0), 90.0) * 0.35 * U.night;
+  if (moonAt(normalize(rd)) > 0.0) { col = moonCol * 1.7; }
   if (rd.z < 0.0) {
     col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
   }
@@ -1029,12 +1078,15 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   var col = vec3f(0.0);
   var throughput = 1.0;
   var org = ro;
+  var starCode = 0u;
 
   for (var bounce = 0; bounce < 4; bounce = bounce + 1) {
   let h = trace(org, rd);
 
   if (!h.ok) {
     col = col + throughput * shadeSky(rd);
+    // only an unobstructed view of the sky carries a star
+    if (throughput > 0.9) { starCode = starAt(rd); }
     break;
   } else {
     let p = org + rd * h.t + h.n * 0.015;
@@ -1072,10 +1124,13 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
       lit = lit + U.sunCol * spec * 0.75 * sun * h.spec;
     }
 
-    // camera headlamp, cave hits only: sunless passages stay explorable
-    if (h.cave) {
+    // Camera headlamp: full strength underground, and above ground it comes
+    // up with the night - which is what makes a torch or the gem lantern
+    // worth carrying out of the caves.
+    let lampAmt = select(U.lampI * U.night, U.lampI, h.cave);
+    if (lampAmt > 0.0) {
       lit = lit + h.albedo *
-            (U.lampI * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
+            (lampAmt * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
     }
 
     // fog: outdoors fades to sky; underground fades to darkness over the
@@ -1098,6 +1153,11 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     break;
   }
   }
+
+  // a star owns its cell outright: yellow, and bright enough that the ink
+  // normalisation in the render pass keeps it yellow
+  if (starCode > 0u) { col = vec3f(1.00, 0.88, 0.38); }
+  stars[px.y * i32(U.res.x) + px.x] = starCode;
 
   let lum = clamp(dot(col, vec3f(0.30, 0.59, 0.11)), 0.0, 1.0);
   textureStore(outTex, px, vec4f(col, lum));
@@ -1137,6 +1197,8 @@ struct RParams {
 // text overlay: one u32 per cell, 0 = transparent, else printable ASCII code
 @group(0) @binding(4) var textAtlas : texture_2d<f32>;
 @group(0) @binding(5) var<storage, read> overlay : array<u32>;
+// per-cell forced glyph for stars, named by the compute pass
+@group(0) @binding(6) var<storage, read> stars : array<u32>;
 
 // 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
 // step count, which shows as banding across smooth gradients; offsetting by
@@ -1186,6 +1248,14 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   // (the panel's padding) leaves cov untouched, so gaps between words show
   // the scene's own glyph rather than blanking to a box.
   let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
+
+  // a star names its own character, overriding the luminance-picked glyph
+  let star = stars[ci];
+  if (star > 32u && star < 127u) {
+    let aus = (f32(star - 32u) + inCell.x) / 95.0;
+    cov = textureSampleLevel(textAtlas, samp, vec2f(aus, inCell.y), 0.0).r;
+  }
+
   let code = overlay[ci];
   if (code == ${CFG.UI_BLANK}u) {
     cov = 0.0;          // clear air: the gap that sets a word off from the field

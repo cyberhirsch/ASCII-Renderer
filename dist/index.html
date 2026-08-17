@@ -103,8 +103,14 @@ const CFG = {
   TONE_WHITE: 0.90,
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
-  SUN_AZ: 0.9,        // sun azimuth (rad)
-  SUN_EL: 0.7,        // sun elevation (rad)
+  SUN_AZ: 0.9,        // sun azimuth at t=0 (rad); the cycle sweeps from here
+  SUN_EL: 0.7,        // legacy static elevation; Sky drives elevation now
+  DAY_LEN: 300,       // seconds for a full day/night cycle
+  // night sky: the moon's angular radius and how thick its crescent is
+  MOON_R: 0.085,
+  MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii
+  STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
+  STAR_RARE: 0.976,   // hash above this is a star, at full night
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   // wide sun disc: broad, soft penumbrae that grow with distance from the
   // occluder (0.05 rad is the "soft shadows" look; the real sun is 0.0047)
@@ -740,6 +746,102 @@ const World = {
 };
 </script>
 <script>
+// ---- js/sky.js ----
+// Time of day: the one place that decides where the sun and moon are and
+// what colour the world is lit by. Every value here already travelled to the
+// GPU as a per-frame uniform, so a full cycle costs the shader nothing.
+//
+// Night is art-directed rather than simulated. The glyph ramp only has ~24
+// brightness steps; a physically dark night would crush the whole scene into
+// the bottom two or three and read as an empty screen. So night is a bright
+// moonlit blue - it says "night" through hue and contrast, and the ramp
+// stays fully used. Yellow is reserved for the moon and stars, which is what
+// makes them read as the only light sources up there.
+const Sky = {
+  t: 0.30,          // 0..1 through the day. .25 dawn, .5 noon, .75 dusk, 0 midnight
+  paused: false,
+
+  // sun height above the horizon, -1..1; the whole cycle keys off this
+  sunHeight() { return Math.sin((this.t - 0.25) * Math.PI * 2); },
+
+  // 0 by day, 1 in full night, smooth through the twilights
+  night() { return 1 - smoothstep(-0.10, 0.16, this.sunHeight()); },
+
+  // how much of the twilight colour to mix in: peaks as the sun crosses over
+  dusk() {
+    const h = this.sunHeight();
+    return Math.max(0, 1 - Math.abs(h) / 0.28);
+  },
+
+  update(dt) {
+    if (this.paused) return;
+    this.t = (this.t + dt / CFG.DAY_LEN) % 1;
+  },
+
+  // hour of day, for the HUD and the console: t maps straight onto the
+  // clock, so t=0 is midnight, .25 sunrise, .5 noon, .75 sunset
+  hour() { return this.t * 24; },
+
+  setHour(h) { this.t = ((h / 24) % 1 + 1) % 1; },
+
+  dir(az, el) {
+    const c = Math.cos(el);
+    return [Math.cos(az) * c, Math.sin(az) * c, Math.sin(el)];
+  },
+
+  sunDir() {
+    const el = Math.asin(clamp(this.sunHeight(), -1, 1)) * 0.8;
+    return this.dir(CFG.SUN_AZ + this.t * Math.PI * 2, el);
+  },
+
+  // the moon runs opposite the sun, so it is up when the sun is not
+  moonDir() {
+    const el = Math.asin(clamp(-this.sunHeight(), -1, 1)) * 0.75;
+    return this.dir(CFG.SUN_AZ + Math.PI * 0.7 + this.t * Math.PI * 2, el);
+  },
+
+  // ---- palettes, blended by sun height ----
+  // day: warm key over a blue sky. twilight: the sun reddens at the horizon.
+  // night: everything blue, lit by a cool moon.
+  DAY:   { sun: [1.00, 0.94, 0.78], sunI: 1.55,
+           amb: [0.30, 0.42, 0.62], ambI: 0.55,
+           lo:  [0.42, 0.56, 0.76], hi: [0.10, 0.22, 0.50] },
+  DUSK:  { sun: [1.00, 0.62, 0.30], sunI: 1.30,
+           amb: [0.34, 0.34, 0.52], ambI: 0.55,
+           lo:  [0.62, 0.46, 0.44], hi: [0.10, 0.16, 0.42] },
+  NIGHT: { sun: [0.52, 0.68, 1.00], sunI: 0.62,
+           amb: [0.24, 0.36, 0.66], ambI: 0.62,
+           lo:  [0.14, 0.22, 0.44], hi: [0.03, 0.07, 0.20] },
+
+  mix3(a, b, k) { return a.map((v, i) => v + (b[i] - v) * k); },
+
+  // the full lighting state for this instant
+  state() {
+    const n = this.night(), d = this.dusk();
+    const base = {
+      sun: this.mix3(this.DAY.sun, this.NIGHT.sun, n),
+      sunI: this.DAY.sunI + (this.NIGHT.sunI - this.DAY.sunI) * n,
+      amb: this.mix3(this.DAY.amb, this.NIGHT.amb, n),
+      ambI: this.DAY.ambI + (this.NIGHT.ambI - this.DAY.ambI) * n,
+      lo: this.mix3(this.DAY.lo, this.NIGHT.lo, n),
+      hi: this.mix3(this.DAY.hi, this.NIGHT.hi, n),
+    };
+    // twilight rides on top of the day/night blend
+    return {
+      sunDir: this.sunDir(),
+      moonDir: this.moonDir(),
+      night: n,
+      sunCol: this.mix3(base.sun, this.DUSK.sun, d * 0.85),
+      sunI: base.sunI + (this.DUSK.sunI - base.sunI) * d * 0.6,
+      ambCol: this.mix3(base.amb, this.DUSK.amb, d * 0.6),
+      ambI: base.ambI + (this.DUSK.ambI - base.ambI) * d * 0.5,
+      skyLo: this.mix3(base.lo, this.DUSK.lo, d * 0.8),
+      skyHi: this.mix3(base.hi, this.DUSK.hi, d * 0.5),
+    };
+  },
+};
+</script>
+<script>
 // ---- js/overlay.js ----
 // Text overlay composited into the ASCII grid by the glyph pass — the HUD is
 // made of the same character cells as the world, not a DOM layer floating
@@ -1209,6 +1311,27 @@ const Game = {
     const cmd = raw.trim();
     if (!cmd) return;
     this.cmdHistory.push('> ' + cmd);
+    const arg = cmd.split(/\s+/);
+    const verb = arg[0].toLowerCase();
+    // waiting out a whole cycle to see midnight is no way to work
+    if (verb === 'time') {
+      if (arg.length > 1 && isFinite(parseFloat(arg[1]))) {
+        Sky.setHour(parseFloat(arg[1]));
+      }
+      this.cmdHistory.push('time ' + Sky.hour().toFixed(2) +
+        (Sky.paused ? ' (frozen)' : ''));
+      return;
+    }
+    if (verb === 'freeze') {
+      Sky.paused = !Sky.paused;
+      this.cmdHistory.push(Sky.paused ? 'time frozen' : 'time running');
+      return;
+    }
+    if (verb === 'daylen') {
+      if (arg.length > 1 && parseFloat(arg[1]) > 0) CFG.DAY_LEN = parseFloat(arg[1]);
+      this.cmdHistory.push('day length ' + CFG.DAY_LEN + 's');
+      return;
+    }
     switch (cmd.toLowerCase()) {
       case 'devmode':
         this.devMode = !this.devMode;
@@ -1220,7 +1343,8 @@ const Game = {
         this.cmdHistory.length = 0;
         break;
       case 'help':
-        this.cmdHistory.push('commands: devmode, clear, help');
+        this.cmdHistory.push('commands: devmode, time <h>, freeze, daylen <s>,');
+        this.cmdHistory.push('clear, help');
         break;
       default:
         this.cmdHistory.push('unknown command: ' + cmd);
@@ -1892,6 +2016,8 @@ struct Uniforms {
   fellCount : f32,   // felled tree cells in the fells buffer
   pad5      : f32,
   pad6      : f32,
+  moonDir   : vec3f, // the moon runs opposite the sun
+  night     : f32,   // 0 by day, 1 in full night; gates moon and stars
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -1904,6 +2030,10 @@ struct Uniforms {
 @group(0) @binding(4) var<storage, read> editData : array<u32>;
 // felled tree cells (ix, iy), nearest the player first
 @group(0) @binding(5) var<storage, read> fells : array<vec2f>;
+// per-cell forced glyph for stars: 0 = none, else an ASCII code. Stars have
+// to be specific characters, and the glyph is otherwise chosen by luminance
+// in the render pass - so the compute pass names the character here.
+@group(0) @binding(6) var<storage, read_write> stars : array<u32>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -2714,6 +2844,44 @@ fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f, nRays : i32) -> f32 {
 
 // -------- sky --------
 
+// Stars are specific characters, not bright pixels: the render pass picks a
+// glyph by luminance, so a star has to name the character it wants. Returns
+// an ASCII code or 0. Faint dots are common and big bright stars are rare,
+// which is what keeps a field of them from reading as uniform noise.
+fn starAt(rd : vec3f) -> u32 {
+  if (U.night < 0.05 || rd.z < 0.015) { return 0u; }
+  let q = vec3i(floor(rd * ${CFG.STAR_GRID}));
+  let h = uhash(uhash(bitcast<u32>(q.x), bitcast<u32>(q.y)), bitcast<u32>(q.z));
+  let r = f32(h) * (1.0 / 4294967296.0);
+  // fewer stars at dusk, the full field at midnight
+  let gate = mix(1.0, ${CFG.STAR_RARE}, U.night);
+  if (r < gate) { return 0u; }
+  let pick = f32(h >> 8u & 0xffffu) * (1.0 / 65536.0);
+  if (pick < 0.50) { return 46u; }   // '.'  faint
+  if (pick < 0.78) { return 43u; }   // '+'
+  if (pick < 0.93) { return 120u; }  // 'x'
+  return 42u;                        // '*'  rare and bright
+}
+
+// the moon: a yellow crescent, cut as a disc minus a second disc beside it
+fn moonAt(rd : vec3f) -> f32 {
+  if (U.night < 0.02) { return 0.0; }
+  let dm = dot(rd, U.moonDir);
+  if (dm < 0.99) { return 0.0; }
+  var up = vec3f(0.0, 0.0, 1.0);
+  if (abs(U.moonDir.z) > 0.9) { up = vec3f(1.0, 0.0, 0.0); }
+  let mx = normalize(cross(up, U.moonDir));
+  let my = cross(U.moonDir, mx);
+  let u = dot(rd, mx);
+  let v = dot(rd, my);
+  let R = ${CFG.MOON_R};
+  let r2 = u * u + v * v;
+  if (r2 > R * R) { return 0.0; }
+  let du = u - ${CFG.MOON_CRESC} * R;
+  if (du * du + v * v < R * R * 0.92) { return 0.0; }   // the bitten-out part
+  return 1.0;
+}
+
 fn shadeSky(rd : vec3f) -> vec3f {
   let t = clamp(rd.z, 0.0, 1.0);
   var col = mix(U.skyLo, U.skyHi, pow(t, 0.55));
@@ -2721,6 +2889,11 @@ fn shadeSky(rd : vec3f) -> vec3f {
   if (d > 0.9995) { return U.sunCol * 1.6; }
   col = col + U.sunCol * pow(max(d, 0.0), 220.0) * 1.1;
   col = col + U.sunCol * pow(max(d, 0.0), 18.0) * 0.22;
+  // moon disc and its halo, both yellow against the blue
+  let moonCol = vec3f(1.0, 0.88, 0.42);
+  let dmoon = dot(normalize(rd), U.moonDir);
+  col = col + moonCol * pow(max(dmoon, 0.0), 90.0) * 0.35 * U.night;
+  if (moonAt(normalize(rd)) > 0.0) { col = moonCol * 1.7; }
   if (rd.z < 0.0) {
     col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
   }
@@ -2866,12 +3039,15 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
   var col = vec3f(0.0);
   var throughput = 1.0;
   var org = ro;
+  var starCode = 0u;
 
   for (var bounce = 0; bounce < 4; bounce = bounce + 1) {
   let h = trace(org, rd);
 
   if (!h.ok) {
     col = col + throughput * shadeSky(rd);
+    // only an unobstructed view of the sky carries a star
+    if (throughput > 0.9) { starCode = starAt(rd); }
     break;
   } else {
     let p = org + rd * h.t + h.n * 0.015;
@@ -2909,10 +3085,13 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
       lit = lit + U.sunCol * spec * 0.75 * sun * h.spec;
     }
 
-    // camera headlamp, cave hits only: sunless passages stay explorable
-    if (h.cave) {
+    // Camera headlamp: full strength underground, and above ground it comes
+    // up with the night - which is what makes a torch or the gem lantern
+    // worth carrying out of the caves.
+    let lampAmt = select(U.lampI * U.night, U.lampI, h.cave);
+    if (lampAmt > 0.0) {
       lit = lit + h.albedo *
-            (U.lampI * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
+            (lampAmt * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
     }
 
     // fog: outdoors fades to sky; underground fades to darkness over the
@@ -2935,6 +3114,11 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     break;
   }
   }
+
+  // a star owns its cell outright: yellow, and bright enough that the ink
+  // normalisation in the render pass keeps it yellow
+  if (starCode > 0u) { col = vec3f(1.00, 0.88, 0.38); }
+  stars[px.y * i32(U.res.x) + px.x] = starCode;
 
   let lum = clamp(dot(col, vec3f(0.30, 0.59, 0.11)), 0.0, 1.0);
   textureStore(outTex, px, vec4f(col, lum));
@@ -2974,6 +3158,8 @@ struct RParams {
 // text overlay: one u32 per cell, 0 = transparent, else printable ASCII code
 @group(0) @binding(4) var textAtlas : texture_2d<f32>;
 @group(0) @binding(5) var<storage, read> overlay : array<u32>;
+// per-cell forced glyph for stars, named by the compute pass
+@group(0) @binding(6) var<storage, read> stars : array<u32>;
 
 // 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
 // step count, which shows as banding across smooth gradients; offsetting by
@@ -3023,6 +3209,14 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   // (the panel's padding) leaves cov untouched, so gaps between words show
   // the scene's own glyph rather than blanking to a box.
   let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
+
+  // a star names its own character, overriding the luminance-picked glyph
+  let star = stars[ci];
+  if (star > 32u && star < 127u) {
+    let aus = (f32(star - 32u) + inCell.x) / 95.0;
+    cov = textureSampleLevel(textAtlas, samp, vec2f(aus, inCell.y), 0.0).r;
+  }
+
   let code = overlay[ci];
   if (code == ${CFG.UI_BLANK}u) {
     cov = 0.0;          // clear air: the gap that sets a word off from the field
@@ -3118,7 +3312,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -3230,9 +3424,15 @@ const GPURenderer = {
   allocTargets() {
     if (this.lowTex) this.lowTex.destroy();
     if (this.overlayBuf) this.overlayBuf.destroy();
+    if (this.starBuf) this.starBuf.destroy();
     this.overlayBuf = this.device.createBuffer({
       size: this.cols * this.rows * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    // written by the compute pass, read by the glyph pass
+    this.starBuf = this.device.createBuffer({
+      size: this.cols * this.rows * 4,
+      usage: GPUBufferUsage.STORAGE,
     });
     Overlay.resize(this.cols, this.rows);
     this.lowTex = this.device.createTexture({
@@ -3250,6 +3450,7 @@ const GPURenderer = {
         { binding: 3, resource: { buffer: this.editHeadBuf } },
         { binding: 4, resource: { buffer: this.editDataBuf } },
         { binding: 5, resource: { buffer: this.fellBuf } },
+        { binding: 6, resource: { buffer: this.starBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -3261,6 +3462,7 @@ const GPURenderer = {
         { binding: 3, resource: { buffer: this.rparBuf } },
         { binding: 4, resource: this.textTex.createView() },
         { binding: 5, resource: { buffer: this.overlayBuf } },
+        { binding: 6, resource: { buffer: this.starBuf } },
       ],
     });
   },
@@ -3290,8 +3492,8 @@ const GPURenderer = {
       fwd[2] * right[0] - fwd[0] * right[2],
       fwd[0] * right[1] - fwd[1] * right[0],
     ];
-    const sx = Math.cos(CFG.SUN_AZ), sy = Math.sin(CFG.SUN_AZ), sz = Math.tan(CFG.SUN_EL);
-    const il = 1 / Math.hypot(sx, sy, sz);
+    // the whole sky - sun position, moon, every colour - comes from Sky
+    const sky = Sky.state();
     const tanX = CFG.PLANE_LEN;
     const tanY = tanX * (this.rows * this.cellH) / (this.cols * this.cellW);
 
@@ -3311,7 +3513,7 @@ const GPURenderer = {
       Fells.gpuDirty = false;
     }
 
-    const u = new Float32Array(60);
+    const u = new Float32Array(64);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -3319,7 +3521,7 @@ const GPURenderer = {
     u[7] = (Player.z || 0) + CFG.EYE;
     u[8] = right[0]; u[9] = right[1]; u[10] = right[2]; u[11] = CFG.MAX_DIST;
     u[12] = up[0]; u[13] = up[1]; u[14] = up[2];   u[15] = CFG.SEED;
-    u[16] = sx * il; u[17] = sy * il; u[18] = sz * il; u[19] = CFG.SHADOW;
+    u.set(sky.sunDir, 16);                          u[19] = CFG.SHADOW;
     u[20] = tanX; u[21] = tanY; u[22] = CFG.TERRAIN_MAX;
     u[23] = Math.min(Entities.list.length, CFG.MAX_ENTS);
     u[24] = CFG.SUN_ANGLE; u[25] = CFG.SUN_SAMPLES;
@@ -3329,10 +3531,10 @@ const GPURenderer = {
     u[30] = (performance.now() / 1000) % 3600;
     u[31] = CFG.SHADE_NEAR;
     u[43] = CFG.SHADE_FAR;
-    u.set(CFG.SUN_COL, 32);      u[35] = CFG.SUN_I;
-    u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
-    u.set(CFG.SKY_HORIZON, 40);
-    u.set(CFG.SKY_ZENITH, 44);
+    u.set(sky.sunCol, 32);       u[35] = sky.sunI;
+    u.set(sky.ambCol, 36);       u[39] = sky.ambI;
+    u.set(sky.skyLo, 40);
+    u.set(sky.skyHi, 44);
     if (this.editCount > 0 && this.editBounds) {
       u[48] = this.editBounds[0]; u[49] = this.editBounds[1];
       u[50] = this.editBounds[2]; u[51] = this.editCount;
@@ -3343,6 +3545,8 @@ const GPURenderer = {
     u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
                       : Game.count('torch') > 0 ? 2.2 : 1);
     u[57] = this.fellCount;
+    u.set(sky.moonDir, 60);
+    u[63] = sky.night;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
@@ -3482,15 +3686,19 @@ const GPURenderer = {
 
     Player.update(dt);
     Entities.update(dt, now / 1000);
+    Sky.update(dt);
     Edits.tick(dt);
     Game.tick(dt);
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {
       const ms = (fpsAcc / fpsN) * 1000;
+      const hh = Math.floor(Sky.hour());
+      const mm = Math.floor((Sky.hour() - hh) * 60);
       fpsLine = Math.round(fpsN / fpsAcc) + ' fps ' +
         ms.toFixed(1) + ' ms ' + GPURenderer.cols + 'x' + GPURenderer.rows +
-        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) + ' ';
+        ' ' + Player.x.toFixed(0) + ',' + Player.y.toFixed(0) +
+        ' ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
       fpsAcc = 0; fpsN = 0;
       Game.uiDirty = true;
     }

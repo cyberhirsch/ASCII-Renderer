@@ -25,8 +25,14 @@ const CFG = {
   TONE_WHITE: 0.90,
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
-  SUN_AZ: 0.9,        // sun azimuth (rad)
-  SUN_EL: 0.7,        // sun elevation (rad)
+  SUN_AZ: 0.9,        // sun azimuth at t=0 (rad); the cycle sweeps from here
+  SUN_EL: 0.7,        // legacy static elevation; Sky drives elevation now
+  DAY_LEN: 300,       // seconds for a full day/night cycle
+  // night sky: the moon's angular radius and how thick its crescent is
+  MOON_R: 0.085,
+  MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii
+  STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
+  STAR_RARE: 0.976,   // hash above this is a star, at full night
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   // wide sun disc: broad, soft penumbrae that grow with distance from the
   // occluder (0.05 rad is the "soft shadows" look; the real sun is 0.0047)
