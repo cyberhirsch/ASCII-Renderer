@@ -71,6 +71,7 @@ const GPURenderer = {
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
+    if (typeof Boot !== 'undefined') Boot.set('compiling the world');
     device.pushErrorScope('validation');
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
     const rmod = device.createShaderModule({ code: WGSL_RENDER });

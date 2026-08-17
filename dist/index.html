@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ASCII City</title>
+<title>ASCII World</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
@@ -10,6 +10,16 @@
      here to the viewport would reintroduce fractional scaling */
   canvas { display: block; image-rendering: pixelated; }
   canvas[hidden] { display: none; }
+  #boot {
+    position: fixed; inset: 0; background: #000; z-index: 9;
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity .45s ease;
+  }
+  #boot pre {
+    margin: 0; text-align: center; color: #c8d2dc;
+    font: 14px/1.7 "Consolas", "Courier New", monospace;
+  }
+  #boot .dim { color: #566070; }
   #fail {
     color: #c8d2dc; font: 14px/1.6 "Consolas", monospace;
     max-width: 34em; padding: 2em; text-align: center;
@@ -19,6 +29,51 @@
 </head>
 <body>
 <canvas id="screen"></canvas>
+<div id="boot"><pre>a s c i i   w o r l d
+
+<span id="boot-bar">                          </span>
+<span id="boot-msg" class="dim">reading the seed</span></pre></div>
+<script>
+// Boot screen: paints before the bundle parses, animates a pulse along the
+// same brightness ramp the renderer draws with, and hands stage text to
+// main.js. Removed by Boot.done() on the first rendered frame.
+(function () {
+  const RAMP = ' .:-=+*#%@';
+  const W = 26;
+  let t = 0;
+  const iv = setInterval(() => {
+    t++;
+    const period = 2 * (W - 1);
+    const ph = t % period;
+    const pos = ph < W ? ph : period - ph;
+    let s = '';
+    for (let i = 0; i < W; i++) {
+      const g = Math.max(0, RAMP.length - 1 - Math.abs(i - pos) * 2);
+      s += RAMP[g];
+    }
+    const bar = document.getElementById('boot-bar');
+    if (bar) bar.textContent = s;
+  }, 90);
+  window.Boot = {
+    set(msg) {
+      const m = document.getElementById('boot-msg');
+      if (m) m.textContent = msg;
+    },
+    done() {
+      clearInterval(iv);
+      const b = document.getElementById('boot');
+      if (!b) return;
+      b.style.opacity = '0';
+      setTimeout(() => b.remove(), 500);
+    },
+    fail() {
+      clearInterval(iv);
+      const b = document.getElementById('boot');
+      if (b) b.remove();
+    },
+  };
+})();
+</script>
 <script>
 // ---- js/config.js ----
 // Global configuration. Plain script, shared global scope (inlined at build time).
@@ -2784,6 +2839,7 @@ const GPURenderer = {
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
+    if (typeof Boot !== 'undefined') Boot.set('compiling the world');
     device.pushErrorScope('validation');
     const cmod = device.createShaderModule({ code: WGSL_COMPUTE });
     const rmod = device.createShaderModule({ code: WGSL_RENDER });
@@ -3090,17 +3146,25 @@ const GPURenderer = {
 // Bootstrap + frame loop. The world is procedural in the shader; nothing to
 // generate up front beyond finding a spawn point.
 (async function () {
+  // a macrotask yield so a boot-stage line paints before a synchronous block
+  const breathe = () => new Promise(r => setTimeout(r, 0));
+
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
   Fells.init();       // load persisted felled trees
   Game.init();        // load persisted inventory
-  Player.init();
+  Boot.set('finding a door');
+  await breathe();
+  Player.init();      // spawn scan: the heavy synchronous bit
+  Boot.set('waking the gpu');
+  await breathe();
 
   let ready = false;
   try { ready = await GPURenderer.init(); }
   catch (e) { GPURenderer.reason = e.message; }
 
   if (!ready) {
+    Boot.fail();
     document.getElementById('screen').hidden = true;
     const msg = document.createElement('div');
     msg.id = 'fail';
@@ -3123,6 +3187,8 @@ const GPURenderer = {
     if (Edits.needSave) Edits.save();
     if (Game.needSave) Game.save();
   });
+
+  let booted = false;
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -3150,6 +3216,7 @@ const GPURenderer = {
       Game.uiDirty = false;
     }
     GPURenderer.render();
+    if (!booted) { booted = true; Boot.done(); }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

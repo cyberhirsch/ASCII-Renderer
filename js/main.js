@@ -1,17 +1,25 @@
 // Bootstrap + frame loop. The world is procedural in the shader; nothing to
 // generate up front beyond finding a spawn point.
 (async function () {
+  // a macrotask yield so a boot-stage line paints before a synchronous block
+  const breathe = () => new Promise(r => setTimeout(r, 0));
+
   Entities.init();
   Edits.init();       // load persisted digs before the first frame
   Fells.init();       // load persisted felled trees
   Game.init();        // load persisted inventory
-  Player.init();
+  Boot.set('finding a door');
+  await breathe();
+  Player.init();      // spawn scan: the heavy synchronous bit
+  Boot.set('waking the gpu');
+  await breathe();
 
   let ready = false;
   try { ready = await GPURenderer.init(); }
   catch (e) { GPURenderer.reason = e.message; }
 
   if (!ready) {
+    Boot.fail();
     document.getElementById('screen').hidden = true;
     const msg = document.createElement('div');
     msg.id = 'fail';
@@ -34,6 +42,8 @@
     if (Edits.needSave) Edits.save();
     if (Game.needSave) Game.save();
   });
+
+  let booted = false;
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -61,6 +71,7 @@
       Game.uiDirty = false;
     }
     GPURenderer.render();
+    if (!booted) { booted = true; Boot.done(); }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
