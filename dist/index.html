@@ -77,6 +77,10 @@ const CFG = {
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,
+  // digging: resident edit-chunk capacity on the GPU, reach and scoop size
+  EDIT_MAX: 32,
+  DIG_REACH: 3.5,
+  DIG_R: 1.1,
 };
 </script>
 <script>
@@ -170,6 +174,11 @@ const CAVES = {
   HALL_E: 96,      // placement cell size
   PIL_S: 3.5,      // pillar lattice spacing inside halls
   PIL_R: 0.45,     // pillar half-width (square pillars, Chebyshev metric)
+  // edits: sparse voxel-delta overlay (digging); see js/edits.js
+  EDIT_CHUNK: 32,      // voxels per chunk edge
+  EDIT_VOX: 0.5,       // voxel size, world units
+  EDIT_SCALE: 0.03125, // stored i8 -> density units (1/32; range ~±4)
+  EDIT_WORDS: 8192,    // u32 words per chunk (32^3 / 4)
 };
 
 // Band floor: a low-frequency ramp whose slope is bounded by construction.
@@ -370,10 +379,14 @@ function caveV(x, y, z, gz) {
 }
 
 // Layered density, the one authority on what is solid: positive in rock,
-// negative in air. Mirror of WGSL solidD. KEEP IN SYNC.
+// negative in air. The sparse edit overlay (digging) adds on top - the
+// typeof guard keeps this file loadable before js/edits.js and in node
+// tests that do not exercise edits. Mirror of WGSL solidD. KEEP IN SYNC.
 function solidD(x, y, z) {
   const gz = terrainH(x, y);
-  return Math.min(gz - z, -caveV(x, y, z, gz));
+  let d = Math.min(gz - z, -caveV(x, y, z, gz));
+  if (typeof Edits !== 'undefined' && Edits.bounds) d += Edits.sample(x, y, z);
+  return d;
 }
 
 // -------- tree placement — mirror of WGSL treeAt --------
@@ -543,6 +556,218 @@ const Entities = {
 };
 </script>
 <script>
+// ---- js/edits.js ----
+// Player edits to the world: a sparse voxel-delta overlay on the procedural
+// density field. Chunks of EDIT_CHUNK^3 signed bytes at EDIT_VOX resolution
+// exist ONLY where digging happened - the rest of the infinite world stays a
+// pure function of the seed. The CPU is authoritative (collision samples
+// this); the GPU receives up to EDIT_MAX resident chunks nearest the player.
+// Persisted to localStorage, edited chunks only.
+const Edits = {
+  chunks: new Map(),   // "cx,cy,cz" -> Int8Array(EDIT_CHUNK^3), z-major
+  bounds: null,        // world AABB over all chunks + trilinear margin
+  gpuDirty: false,     // resident set needs re-packing and upload
+  needSave: false,
+  saveTimer: 0,
+
+  // persistent pack targets so per-dig uploads do not allocate
+  head: null, data: null,
+
+  key(cx, cy, cz) { return cx + ',' + cy + ',' + cz; },
+
+  init() {
+    const n = CAVES.EDIT_CHUNK;
+    this.head = new Float32Array(CFG.EDIT_MAX * 4);
+    this.data = new Int8Array(CFG.EDIT_MAX * n * n * n);
+    this.load();
+  },
+
+  growBounds(cx, cy, cz) {
+    const w = CAVES.EDIT_CHUNK * CAVES.EDIT_VOX;
+    const m = CAVES.EDIT_VOX;           // trilinear reach past the chunk
+    const lo = [cx * w - m, cy * w - m, cz * w - m];
+    const hi = [cx * w + w + m, cy * w + w + m, cz * w + w + m];
+    if (!this.bounds) { this.bounds = [...lo, ...hi]; return; }
+    const b = this.bounds;
+    for (let i = 0; i < 3; i++) {
+      if (lo[i] < b[i]) b[i] = lo[i];
+      if (hi[i] > b[i + 3]) b[i + 3] = hi[i];
+    }
+  },
+
+  // signed delta at an integer voxel; 0 where no chunk exists
+  voxel(ix, iy, iz) {
+    const n = CAVES.EDIT_CHUNK;
+    const cx = Math.floor(ix / n), cy = Math.floor(iy / n), cz = Math.floor(iz / n);
+    const ch = this.chunks.get(this.key(cx, cy, cz));
+    if (!ch) return 0;
+    return ch[((iz - cz * n) * n + (iy - cy * n)) * n + (ix - cx * n)];
+  },
+
+  // trilinear density delta at a world point; mirror of WGSL editDelta.
+  // KEEP IN SYNC.
+  sample(x, y, z) {
+    const b = this.bounds;
+    if (!b || x < b[0] || y < b[1] || z < b[2] ||
+        x > b[3] || y > b[4] || z > b[5]) return 0;
+    const inv = 1 / CAVES.EDIT_VOX;
+    const gx = x * inv - 0.5, gy = y * inv - 0.5, gz = z * inv - 0.5;
+    const ix = Math.floor(gx), iy = Math.floor(gy), iz = Math.floor(gz);
+    const fx = gx - ix, fy = gy - iy, fz = gz - iz;
+    let sum = 0;
+    for (let c = 0; c < 8; c++) {
+      const ox = c & 1, oy = (c >> 1) & 1, oz = (c >> 2) & 1;
+      const w = (ox ? fx : 1 - fx) * (oy ? fy : 1 - fy) * (oz ? fz : 1 - fz);
+      if (w > 1e-4) sum += this.voxel(ix + ox, iy + oy, iz + oz) * w;
+    }
+    return sum * CAVES.EDIT_SCALE;
+  },
+
+  // Spherical smooth splat; amount < 0 digs, > 0 fills. Fills never place
+  // material above the terrain surface - the primary ray march trusts the
+  // heightfield in open air, so built-above-ground would be invisible.
+  splat(x, y, z, r, amount) {
+    const n = CAVES.EDIT_CHUNK;
+    const vox = CAVES.EDIT_VOX;
+    const lo = [x - r, y - r, z - r].map(v => Math.floor(v / vox - 0.5));
+    const hi = [x + r, y + r, z + r].map(v => Math.ceil(v / vox - 0.5));
+    for (let iy = lo[1]; iy <= hi[1]; iy++) {
+      for (let ix = lo[0]; ix <= hi[0]; ix++) {
+        const wx = (ix + 0.5) * vox, wy = (iy + 0.5) * vox;
+        const colTop = amount > 0 ? terrainH(wx, wy) - 0.1 : Infinity;
+        for (let iz = lo[2]; iz <= hi[2]; iz++) {
+          const wz = (iz + 0.5) * vox;
+          if (wz > colTop) continue;
+          const d = Math.hypot(wx - x, wy - y, wz - z);
+          if (d > r) continue;
+          const fall = 1 - smoothstep(r * 0.45, r, d);
+          const add = Math.round(amount * fall);
+          if (add === 0) continue;
+          const cx = Math.floor(ix / n), cy = Math.floor(iy / n), cz = Math.floor(iz / n);
+          const k = this.key(cx, cy, cz);
+          let ch = this.chunks.get(k);
+          if (!ch) {
+            ch = new Int8Array(n * n * n);
+            this.chunks.set(k, ch);
+            this.growBounds(cx, cy, cz);
+          }
+          const li = ((iz - cz * n) * n + (iy - cy * n)) * n + (ix - cx * n);
+          ch[li] = clamp(ch[li] + add, -127, 127);
+        }
+      }
+    }
+    this.gpuDirty = true;
+    this.needSave = true;
+  },
+
+  // Pack the EDIT_MAX chunks nearest the player for the GPU. Header slot:
+  // (world origin xyz, used flag); data: raw signed bytes, z-major, read as
+  // packed u32 words in the shader. Returns the resident count and AABB.
+  pack(px, py, pz) {
+    const n = CAVES.EDIT_CHUNK;
+    const w = n * CAVES.EDIT_VOX;
+    const keys = [...this.chunks.keys()];
+    keys.sort((a, b) => {
+      const pa = a.split(',').map(Number), pb = b.split(',').map(Number);
+      const da = (pa[0] * w + w / 2 - px) ** 2 + (pa[1] * w + w / 2 - py) ** 2 +
+                 (pa[2] * w + w / 2 - pz) ** 2;
+      const db = (pb[0] * w + w / 2 - px) ** 2 + (pb[1] * w + w / 2 - py) ** 2 +
+                 (pb[2] * w + w / 2 - pz) ** 2;
+      return da - db;
+    });
+    const count = Math.min(keys.length, CFG.EDIT_MAX);
+    this.head.fill(0);
+    let bounds = null;
+    for (let i = 0; i < count; i++) {
+      const [cx, cy, cz] = keys[i].split(',').map(Number);
+      this.head[i * 4] = cx * w;
+      this.head[i * 4 + 1] = cy * w;
+      this.head[i * 4 + 2] = cz * w;
+      this.head[i * 4 + 3] = 1;
+      this.data.set(this.chunks.get(keys[i]), i * n * n * n);
+      const m = CAVES.EDIT_VOX;
+      const lo = [cx * w - m, cy * w - m, cz * w - m];
+      const hi = [cx * w + w + m, cy * w + w + m, cz * w + w + m];
+      if (!bounds) bounds = [...lo, ...hi];
+      else for (let d = 0; d < 3; d++) {
+        if (lo[d] < bounds[d]) bounds[d] = lo[d];
+        if (hi[d] > bounds[d + 3]) bounds[d + 3] = hi[d];
+      }
+    }
+    return { count, bounds };
+  },
+
+  // ---- persistence: base64 per chunk, portable (no btoa dependency) ----
+  B64: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+
+  enc(bytes) {
+    const c = this.B64;
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 3) {
+      const a = bytes[i] & 0xff;
+      const b = i + 1 < bytes.length ? bytes[i + 1] & 0xff : 0;
+      const d = i + 2 < bytes.length ? bytes[i + 2] & 0xff : 0;
+      s += c[a >> 2] + c[((a & 3) << 4) | (b >> 4)] +
+           c[((b & 15) << 2) | (d >> 6)] + c[d & 63];
+    }
+    return s;
+  },
+
+  dec(s, out) {
+    const c = this.B64;
+    let o = 0;
+    for (let i = 0; i < s.length; i += 4) {
+      const a = c.indexOf(s[i]), b = c.indexOf(s[i + 1]);
+      const d = c.indexOf(s[i + 2]), e = c.indexOf(s[i + 3]);
+      if (o < out.length) out[o++] = (a << 2) | (b >> 4);
+      if (o < out.length) out[o++] = ((b & 15) << 4) | (d >> 2);
+      if (o < out.length) out[o++] = ((d & 3) << 6) | e;
+    }
+  },
+
+  serialize() {
+    const obj = {};
+    for (const [k, ch] of this.chunks) obj[k] = this.enc(new Uint8Array(ch.buffer));
+    return JSON.stringify(obj);
+  },
+
+  deserialize(str) {
+    const n = CAVES.EDIT_CHUNK;
+    this.chunks.clear();
+    this.bounds = null;
+    const obj = JSON.parse(str);
+    for (const k of Object.keys(obj)) {
+      const ch = new Int8Array(n * n * n);
+      this.dec(obj[k], new Uint8Array(ch.buffer));
+      this.chunks.set(k, ch);
+      const [cx, cy, cz] = k.split(',').map(Number);
+      this.growBounds(cx, cy, cz);
+    }
+    this.gpuDirty = this.chunks.size > 0;
+  },
+
+  save() {
+    if (typeof localStorage === 'undefined') return;
+    try { localStorage.setItem('ascii-caves-v1', this.serialize()); }
+    catch (e) { console.warn('edit save failed: ' + e.message); }
+    this.needSave = false;
+  },
+
+  load() {
+    if (typeof localStorage === 'undefined') return;
+    const s = localStorage.getItem('ascii-caves-v1');
+    if (!s) return;
+    try { this.deserialize(s); } catch (e) { console.warn('edit load failed'); }
+  },
+
+  tick(dt) {
+    if (!this.needSave) return;
+    this.saveTimer += dt;
+    if (this.saveTimer > 4) { this.saveTimer = 0; this.save(); }
+  },
+};
+</script>
+<script>
 // ---- js/player.js ----
 // First-person player over the infinite terrain: WASD move, arrows/mouse
 // look, slope- and water-limited movement, trunk-circle tree collision.
@@ -591,7 +816,11 @@ const Player = {
 
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => canvas.requestPointerLock());
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
     const locked = () => document.pointerLockElement === canvas;
+    this.mouse = {};
+    addEventListener('mousedown', e => { if (locked()) this.mouse[e.button] = true; });
+    addEventListener('mouseup', e => { this.mouse[e.button] = false; });
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
@@ -603,6 +832,18 @@ const Player = {
       const LIM = Math.PI / 2 - 0.001;
       this.pitch = clamp(this.pitch - my * 0.0022, -LIM, LIM);
     });
+  },
+
+  // first solid point along the view ray within digging reach, or null
+  aim() {
+    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
+    const dx = Math.cos(this.angle) * cp, dy = Math.sin(this.angle) * cp;
+    const ez = this.z + CFG.EYE;
+    for (let t = 0.3; t <= CFG.DIG_REACH; t += 0.08) {
+      const px = this.x + dx * t, py = this.y + dy * t, pz = ez + sp * t;
+      if (solidD(px, py, pz) >= 0) return [px, py, pz, dx, dy, sp];
+    }
+    return null;
   },
 
   blocked(x, y) {
@@ -648,6 +889,26 @@ const Player = {
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
     }
+    // digging: LMB carves, RMB fills; fills never engulf the player
+    this.digCd = Math.max(0, (this.digCd || 0) - dt);
+    if ((this.mouse[0] || this.mouse[2]) && this.digCd <= 0) {
+      const hit = this.aim();
+      if (hit) {
+        if (this.mouse[0]) {
+          Edits.splat(hit[0], hit[1], hit[2], CFG.DIG_R, -100);
+        } else {
+          const fx = hit[0] - hit[3] * 0.6;
+          const fy = hit[1] - hit[4] * 0.6;
+          const fz = hit[2] - hit[5] * 0.6;
+          const hd = Math.hypot(fx - this.x, fy - this.y);
+          const overlap = hd < CFG.DIG_R + 0.35 &&
+            fz > this.z - CFG.DIG_R && fz < this.z + 1.8 + CFG.DIG_R;
+          if (!overlap) Edits.splat(fx, fy, fz, CFG.DIG_R, 100);
+        }
+        this.digCd = 0.15;
+      }
+    }
+
     // ride the floor (terrain or cave), smoothed
     const gz = World.walkZ(this.x, this.y, this.z);
     if (gz !== null) this.z += (gz - this.z) * Math.min(1, dt * 10);
@@ -861,12 +1122,20 @@ struct Uniforms {
   shadeFar  : f32,   // beyond this: no shadow/AO rays at all
   skyHi     : vec3f,
   pad3      : f32,
+  editMin   : vec3f, // AABB of resident edit chunks: the cheap gate that
+  editCount : f32,   // keeps the untouched world paying two comparisons
+  editMax   : vec3f,
+  pad4      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
 @group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
 // two vec4 per entity: (x, y, heading, kind) and kind-specific extras
 @group(0) @binding(2) var<storage, read> ents : array<vec4f>;
+// player edits: resident chunk headers (world origin xyz, used flag) and
+// their voxel deltas as packed signed bytes, four to a word
+@group(0) @binding(3) var<storage, read> editHead : array<vec4f>;
+@group(0) @binding(4) var<storage, read> editData : array<u32>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -1135,9 +1404,56 @@ fn caveV(p : vec3f, gz : f32) -> f32 {
   return min(v, -max(sv.y, hv.y));
 }
 
+// -------- player edits: sparse voxel-delta overlay (digging) --------
+
+const EDIT_CHUNK : i32 = ${CAVES.EDIT_CHUNK};
+const EDIT_VOX : f32 = ${CAVES.EDIT_VOX};
+const EDIT_SCALE : f32 = ${CAVES.EDIT_SCALE};
+const EDIT_WORDS : i32 = ${CAVES.EDIT_WORDS};
+
+// signed delta at an integer voxel: resolve its chunk among the resident
+// headers, unpack the byte
+fn editVoxel(v : vec3i, n : i32) -> f32 {
+  let c = vec3i(floor(vec3f(v) / f32(EDIT_CHUNK)));
+  let orgW = vec3f(c * EDIT_CHUNK) * EDIT_VOX;
+  for (var i = 0; i < n; i = i + 1) {
+    let h = editHead[i];
+    if (h.w < 0.5) { continue; }
+    if (abs(h.x - orgW.x) > 0.01 || abs(h.y - orgW.y) > 0.01 ||
+        abs(h.z - orgW.z) > 0.01) { continue; }
+    let l = v - c * EDIT_CHUNK;
+    let li = (l.z * EDIT_CHUNK + l.y) * EDIT_CHUNK + l.x;
+    let word = editData[i * EDIT_WORDS + (li >> 2)];
+    let byte = (word >> (u32(li & 3) * 8u)) & 0xffu;
+    return f32(bitcast<i32>(byte << 24u) >> 24);
+  }
+  return 0.0;
+}
+
+// trilinear density delta at a world point; mirror of Edits.sample in
+// js/edits.js. KEEP IN SYNC.
+fn editDelta(p : vec3f) -> f32 {
+  let n = i32(U.editCount);
+  if (n == 0) { return 0.0; }
+  if (any(p < U.editMin) || any(p > U.editMax)) { return 0.0; }
+  let g = p / EDIT_VOX - vec3f(0.5);
+  let g0 = floor(g);
+  let f = g - g0;
+  let gi = vec3i(g0);
+  var sum = 0.0;
+  for (var ci = 0; ci < 8; ci = ci + 1) {
+    let o = vec3i(ci & 1, (ci >> 1) & 1, (ci >> 2) & 1);
+    let w = select(1.0 - f.x, f.x, o.x == 1)
+          * select(1.0 - f.y, f.y, o.y == 1)
+          * select(1.0 - f.z, f.z, o.z == 1);
+    if (w > 1e-4) { sum = sum + editVoxel(gi + o, n) * w; }
+  }
+  return sum * EDIT_SCALE;
+}
+
 fn solidD(p : vec3f) -> f32 {
   let gz = terrainH(p.xy);
-  return min(gz - p.z, -caveV(p, gz));
+  return min(gz - p.z, -caveV(p, gz)) + editDelta(p);
 }
 
 // gradient normal of the density field, for carved surfaces where the
@@ -1169,8 +1485,9 @@ fn heightMarch(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
         let pm = ro + rd * m;
         if (pm.z - terrainH(pm.xy) < 0.0) { b = m; } else { a = m; }
       }
-      let pb = ro + rd * b;
-      if (caveV(pb, terrainH(pb.xy)) > 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
+      // the crossing point may sit in carved or dug-out air: cave mouth,
+      // stair well, or a player-dug pit - hand over to the density march
+      if (solidD(ro + rd * b) < 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
       return vec2f((a + b) * 0.5, 0.0);
     }
     tPrev = t;
@@ -1191,7 +1508,7 @@ fn marchCave(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
     let p = ro + rd * t;
     let gzp = terrainH(p.xy);
     let v = caveV(p, gzp);
-    if (min(gzp - p.z, -v) > 0.0) {
+    if (min(gzp - p.z, -v) + editDelta(p) > 0.0) {
       var a = tPrev;
       var b = t;
       for (var j = 0; j < 6; j = j + 1) {
@@ -1438,7 +1755,8 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
   // outruns maxT while still in cave air is free: nothing within radius.
   var t0 = 0.2;
   let oGz = terrainH(ro.xy);
-  if (ro.z < oGz && caveV(ro, oGz) > 0.0) {
+  if (ro.z < oGz &&
+      min(oGz - ro.z, -caveV(ro, oGz)) + editDelta(ro) < 0.0) {
     var t = 0.15;
     var escaped = false;
     for (var i = 0; i < ${CAVES.TSTEPS}; i = i + 1) {
@@ -1446,7 +1764,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       let p = ro + rd * t;
       let gzp = terrainH(p.xy);
       let v = caveV(p, gzp);
-      if (min(gzp - p.z, -v) > 0.0) { return 0.0; }
+      if (min(gzp - p.z, -v) + editDelta(p) > 0.0) { return 0.0; }
       if (p.z - gzp > 0.3) { escaped = true; t0 = t; break; }
       t = t + CAVE_TSTEP;
     }
@@ -1462,7 +1780,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
       let gzp = terrainH(p.xy);
       let d = p.z - gzp;
-      if (d < 0.0 && caveV(p, gzp) <= 0.0) { return 0.0; }
+      if (d < 0.0 && min(-d, -caveV(p, gzp)) + editDelta(p) > 0.0) { return 0.0; }
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
@@ -1599,12 +1917,12 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
 
   // terrain
   let oGz = terrainH(ro.xy);
-  let oCave = ro.z < oGz && caveV(ro, oGz) > 0.0;
+  let oCave = ro.z < oGz && solidD(ro) < 0.0;
   let tT = terrainT(ro, rd, U.maxDist, oCave);
   if (tT > 0.0) {
     hit.t = tT;
     let p = ro + rd * tT;
-    if (caveV(p, terrainH(p.xy)) > -1.0) {
+    if (caveV(p, terrainH(p.xy)) > -1.0 || abs(editDelta(p)) > 0.05) {
       // carved surface: heightfield normal is meaningless here
       hit.n = solidN(p);
       hit.albedo = vec3f(0.44, 0.41, 0.38);
@@ -1922,11 +2240,24 @@ const GPURenderer = {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
+    // player edits: resident chunk headers + voxel bricks (see js/edits.js)
+    const chunkBytes = CAVES.EDIT_CHUNK ** 3;
+    this.editHeadBuf = device.createBuffer({
+      size: CFG.EDIT_MAX * 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.editDataBuf = device.createBuffer({
+      size: CFG.EDIT_MAX * chunkBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.editCount = 0;
+    this.editBounds = null;
+
     this.buildAtlas(CFG.GLYPH_SET);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 224, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -2054,6 +2385,8 @@ const GPURenderer = {
         { binding: 0, resource: { buffer: this.uniBuf } },
         { binding: 1, resource: this.lowTex.createView() },
         { binding: 2, resource: { buffer: this.entBuf } },
+        { binding: 3, resource: { buffer: this.editHeadBuf } },
+        { binding: 4, resource: { buffer: this.editDataBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -2099,7 +2432,17 @@ const GPURenderer = {
     const tanX = CFG.PLANE_LEN;
     const tanY = tanX * (this.rows * this.cellH) / (this.cols * this.cellW);
 
-    const u = new Float32Array(48);
+    // --- player edits: re-pack the resident chunk set when it changed ---
+    if (Edits.gpuDirty) {
+      const res = Edits.pack(Player.x, Player.y, Player.z);
+      dev.queue.writeBuffer(this.editHeadBuf, 0, Edits.head);
+      dev.queue.writeBuffer(this.editDataBuf, 0, Edits.data);
+      this.editCount = res.count;
+      this.editBounds = res.bounds;
+      Edits.gpuDirty = false;
+    }
+
+    const u = new Float32Array(56);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -2121,6 +2464,12 @@ const GPURenderer = {
     u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
     u.set(CFG.SKY_HORIZON, 40);
     u.set(CFG.SKY_ZENITH, 44);
+    if (this.editCount > 0 && this.editBounds) {
+      u[48] = this.editBounds[0]; u[49] = this.editBounds[1];
+      u[50] = this.editBounds[2]; u[51] = this.editCount;
+      u[52] = this.editBounds[3]; u[53] = this.editBounds[4];
+      u[54] = this.editBounds[5];
+    }
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
@@ -2209,6 +2558,7 @@ const GPURenderer = {
 // generate up front beyond finding a spawn point.
 (async function () {
   Entities.init();
+  Edits.init();       // load persisted digs before the first frame
   Player.init();
 
   let ready = false;
@@ -2232,7 +2582,9 @@ const GPURenderer = {
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0;
-  const HUD_LINE = 'wasd move · shift run · click mouse-look · M mono · C glyphs · X raw · F fullscreen';
+  const HUD_LINE = 'wasd move · shift run · LMB dig · RMB fill · G cave hop · M mono · C glyphs · F fullscreen';
+
+  addEventListener('beforeunload', () => { if (Edits.needSave) Edits.save(); });
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -2240,6 +2592,7 @@ const GPURenderer = {
 
     Player.update(dt);
     Entities.update(dt, now / 1000);
+    Edits.tick(dt);
     GPURenderer.render();
 
     fpsAcc += dt; fpsN++;

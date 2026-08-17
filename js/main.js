@@ -2,6 +2,7 @@
 // generate up front beyond finding a spawn point.
 (async function () {
   Entities.init();
+  Edits.init();       // load persisted digs before the first frame
   Player.init();
 
   let ready = false;
@@ -25,7 +26,9 @@
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0;
-  const HUD_LINE = 'wasd move · shift run · click mouse-look · M mono · C glyphs · X raw · F fullscreen';
+  const HUD_LINE = 'wasd move · shift run · LMB dig · RMB fill · G cave hop · M mono · C glyphs · F fullscreen';
+
+  addEventListener('beforeunload', () => { if (Edits.needSave) Edits.save(); });
 
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -33,6 +36,7 @@
 
     Player.update(dt);
     Entities.update(dt, now / 1000);
+    Edits.tick(dt);
     GPURenderer.render();
 
     fpsAcc += dt; fpsN++;

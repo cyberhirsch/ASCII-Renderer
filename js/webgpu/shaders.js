@@ -47,12 +47,20 @@ struct Uniforms {
   shadeFar  : f32,   // beyond this: no shadow/AO rays at all
   skyHi     : vec3f,
   pad3      : f32,
+  editMin   : vec3f, // AABB of resident edit chunks: the cheap gate that
+  editCount : f32,   // keeps the untouched world paying two comparisons
+  editMax   : vec3f,
+  pad4      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
 @group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
 // two vec4 per entity: (x, y, heading, kind) and kind-specific extras
 @group(0) @binding(2) var<storage, read> ents : array<vec4f>;
+// player edits: resident chunk headers (world origin xyz, used flag) and
+// their voxel deltas as packed signed bytes, four to a word
+@group(0) @binding(3) var<storage, read> editHead : array<vec4f>;
+@group(0) @binding(4) var<storage, read> editData : array<u32>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -321,9 +329,56 @@ fn caveV(p : vec3f, gz : f32) -> f32 {
   return min(v, -max(sv.y, hv.y));
 }
 
+// -------- player edits: sparse voxel-delta overlay (digging) --------
+
+const EDIT_CHUNK : i32 = ${CAVES.EDIT_CHUNK};
+const EDIT_VOX : f32 = ${CAVES.EDIT_VOX};
+const EDIT_SCALE : f32 = ${CAVES.EDIT_SCALE};
+const EDIT_WORDS : i32 = ${CAVES.EDIT_WORDS};
+
+// signed delta at an integer voxel: resolve its chunk among the resident
+// headers, unpack the byte
+fn editVoxel(v : vec3i, n : i32) -> f32 {
+  let c = vec3i(floor(vec3f(v) / f32(EDIT_CHUNK)));
+  let orgW = vec3f(c * EDIT_CHUNK) * EDIT_VOX;
+  for (var i = 0; i < n; i = i + 1) {
+    let h = editHead[i];
+    if (h.w < 0.5) { continue; }
+    if (abs(h.x - orgW.x) > 0.01 || abs(h.y - orgW.y) > 0.01 ||
+        abs(h.z - orgW.z) > 0.01) { continue; }
+    let l = v - c * EDIT_CHUNK;
+    let li = (l.z * EDIT_CHUNK + l.y) * EDIT_CHUNK + l.x;
+    let word = editData[i * EDIT_WORDS + (li >> 2)];
+    let byte = (word >> (u32(li & 3) * 8u)) & 0xffu;
+    return f32(bitcast<i32>(byte << 24u) >> 24);
+  }
+  return 0.0;
+}
+
+// trilinear density delta at a world point; mirror of Edits.sample in
+// js/edits.js. KEEP IN SYNC.
+fn editDelta(p : vec3f) -> f32 {
+  let n = i32(U.editCount);
+  if (n == 0) { return 0.0; }
+  if (any(p < U.editMin) || any(p > U.editMax)) { return 0.0; }
+  let g = p / EDIT_VOX - vec3f(0.5);
+  let g0 = floor(g);
+  let f = g - g0;
+  let gi = vec3i(g0);
+  var sum = 0.0;
+  for (var ci = 0; ci < 8; ci = ci + 1) {
+    let o = vec3i(ci & 1, (ci >> 1) & 1, (ci >> 2) & 1);
+    let w = select(1.0 - f.x, f.x, o.x == 1)
+          * select(1.0 - f.y, f.y, o.y == 1)
+          * select(1.0 - f.z, f.z, o.z == 1);
+    if (w > 1e-4) { sum = sum + editVoxel(gi + o, n) * w; }
+  }
+  return sum * EDIT_SCALE;
+}
+
 fn solidD(p : vec3f) -> f32 {
   let gz = terrainH(p.xy);
-  return min(gz - p.z, -caveV(p, gz));
+  return min(gz - p.z, -caveV(p, gz)) + editDelta(p);
 }
 
 // gradient normal of the density field, for carved surfaces where the
@@ -355,8 +410,9 @@ fn heightMarch(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
         let pm = ro + rd * m;
         if (pm.z - terrainH(pm.xy) < 0.0) { b = m; } else { a = m; }
       }
-      let pb = ro + rd * b;
-      if (caveV(pb, terrainH(pb.xy)) > 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
+      // the crossing point may sit in carved or dug-out air: cave mouth,
+      // stair well, or a player-dug pit - hand over to the density march
+      if (solidD(ro + rd * b) < 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
       return vec2f((a + b) * 0.5, 0.0);
     }
     tPrev = t;
@@ -377,7 +433,7 @@ fn marchCave(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
     let p = ro + rd * t;
     let gzp = terrainH(p.xy);
     let v = caveV(p, gzp);
-    if (min(gzp - p.z, -v) > 0.0) {
+    if (min(gzp - p.z, -v) + editDelta(p) > 0.0) {
       var a = tPrev;
       var b = t;
       for (var j = 0; j < 6; j = j + 1) {
@@ -624,7 +680,8 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
   // outruns maxT while still in cave air is free: nothing within radius.
   var t0 = 0.2;
   let oGz = terrainH(ro.xy);
-  if (ro.z < oGz && caveV(ro, oGz) > 0.0) {
+  if (ro.z < oGz &&
+      min(oGz - ro.z, -caveV(ro, oGz)) + editDelta(ro) < 0.0) {
     var t = 0.15;
     var escaped = false;
     for (var i = 0; i < ${CAVES.TSTEPS}; i = i + 1) {
@@ -632,7 +689,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       let p = ro + rd * t;
       let gzp = terrainH(p.xy);
       let v = caveV(p, gzp);
-      if (min(gzp - p.z, -v) > 0.0) { return 0.0; }
+      if (min(gzp - p.z, -v) + editDelta(p) > 0.0) { return 0.0; }
       if (p.z - gzp > 0.3) { escaped = true; t0 = t; break; }
       t = t + CAVE_TSTEP;
     }
@@ -648,7 +705,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
       let gzp = terrainH(p.xy);
       let d = p.z - gzp;
-      if (d < 0.0 && caveV(p, gzp) <= 0.0) { return 0.0; }
+      if (d < 0.0 && min(-d, -caveV(p, gzp)) + editDelta(p) > 0.0) { return 0.0; }
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
@@ -785,12 +842,12 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
 
   // terrain
   let oGz = terrainH(ro.xy);
-  let oCave = ro.z < oGz && caveV(ro, oGz) > 0.0;
+  let oCave = ro.z < oGz && solidD(ro) < 0.0;
   let tT = terrainT(ro, rd, U.maxDist, oCave);
   if (tT > 0.0) {
     hit.t = tT;
     let p = ro + rd * tT;
-    if (caveV(p, terrainH(p.xy)) > -1.0) {
+    if (caveV(p, terrainH(p.xy)) > -1.0 || abs(editDelta(p)) > 0.05) {
       // carved surface: heightfield normal is meaningless here
       hit.n = solidN(p);
       hit.albedo = vec3f(0.44, 0.41, 0.38);

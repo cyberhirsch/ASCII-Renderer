@@ -43,11 +43,24 @@ const GPURenderer = {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
+    // player edits: resident chunk headers + voxel bricks (see js/edits.js)
+    const chunkBytes = CAVES.EDIT_CHUNK ** 3;
+    this.editHeadBuf = device.createBuffer({
+      size: CFG.EDIT_MAX * 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.editDataBuf = device.createBuffer({
+      size: CFG.EDIT_MAX * chunkBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.editCount = 0;
+    this.editBounds = null;
+
     this.buildAtlas(CFG.GLYPH_SET);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 224, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -175,6 +188,8 @@ const GPURenderer = {
         { binding: 0, resource: { buffer: this.uniBuf } },
         { binding: 1, resource: this.lowTex.createView() },
         { binding: 2, resource: { buffer: this.entBuf } },
+        { binding: 3, resource: { buffer: this.editHeadBuf } },
+        { binding: 4, resource: { buffer: this.editDataBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -220,7 +235,17 @@ const GPURenderer = {
     const tanX = CFG.PLANE_LEN;
     const tanY = tanX * (this.rows * this.cellH) / (this.cols * this.cellW);
 
-    const u = new Float32Array(48);
+    // --- player edits: re-pack the resident chunk set when it changed ---
+    if (Edits.gpuDirty) {
+      const res = Edits.pack(Player.x, Player.y, Player.z);
+      dev.queue.writeBuffer(this.editHeadBuf, 0, Edits.head);
+      dev.queue.writeBuffer(this.editDataBuf, 0, Edits.data);
+      this.editCount = res.count;
+      this.editBounds = res.bounds;
+      Edits.gpuDirty = false;
+    }
+
+    const u = new Float32Array(56);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -242,6 +267,12 @@ const GPURenderer = {
     u.set(CFG.AMB_COL, 36);      u[39] = CFG.AMB_I;
     u.set(CFG.SKY_HORIZON, 40);
     u.set(CFG.SKY_ZENITH, 44);
+    if (this.editCount > 0 && this.editBounds) {
+      u[48] = this.editBounds[0]; u[49] = this.editBounds[1];
+      u[50] = this.editBounds[2]; u[51] = this.editCount;
+      u[52] = this.editBounds[3]; u[53] = this.editBounds[4];
+      u[54] = this.editBounds[5];
+    }
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

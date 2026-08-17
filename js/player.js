@@ -45,7 +45,11 @@ const Player = {
 
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => canvas.requestPointerLock());
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
     const locked = () => document.pointerLockElement === canvas;
+    this.mouse = {};
+    addEventListener('mousedown', e => { if (locked()) this.mouse[e.button] = true; });
+    addEventListener('mouseup', e => { this.mouse[e.button] = false; });
     let skipEvents = 0;
     document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
     addEventListener('mousemove', e => {
@@ -57,6 +61,18 @@ const Player = {
       const LIM = Math.PI / 2 - 0.001;
       this.pitch = clamp(this.pitch - my * 0.0022, -LIM, LIM);
     });
+  },
+
+  // first solid point along the view ray within digging reach, or null
+  aim() {
+    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
+    const dx = Math.cos(this.angle) * cp, dy = Math.sin(this.angle) * cp;
+    const ez = this.z + CFG.EYE;
+    for (let t = 0.3; t <= CFG.DIG_REACH; t += 0.08) {
+      const px = this.x + dx * t, py = this.y + dy * t, pz = ez + sp * t;
+      if (solidD(px, py, pz) >= 0) return [px, py, pz, dx, dy, sp];
+    }
+    return null;
   },
 
   blocked(x, y) {
@@ -102,6 +118,26 @@ const Player = {
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
     }
+    // digging: LMB carves, RMB fills; fills never engulf the player
+    this.digCd = Math.max(0, (this.digCd || 0) - dt);
+    if ((this.mouse[0] || this.mouse[2]) && this.digCd <= 0) {
+      const hit = this.aim();
+      if (hit) {
+        if (this.mouse[0]) {
+          Edits.splat(hit[0], hit[1], hit[2], CFG.DIG_R, -100);
+        } else {
+          const fx = hit[0] - hit[3] * 0.6;
+          const fy = hit[1] - hit[4] * 0.6;
+          const fz = hit[2] - hit[5] * 0.6;
+          const hd = Math.hypot(fx - this.x, fy - this.y);
+          const overlap = hd < CFG.DIG_R + 0.35 &&
+            fz > this.z - CFG.DIG_R && fz < this.z + 1.8 + CFG.DIG_R;
+          if (!overlap) Edits.splat(fx, fy, fz, CFG.DIG_R, 100);
+        }
+        this.digCd = 0.15;
+      }
+    }
+
     // ride the floor (terrain or cave), smoothed
     const gz = World.walkZ(this.x, this.y, this.z);
     if (gz !== null) this.z += (gz - this.z) * Math.min(1, dt * 10);

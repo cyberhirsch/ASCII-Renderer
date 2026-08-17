@@ -54,4 +54,8 @@ const CFG = {
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,
+  // digging: resident edit-chunk capacity on the GPU, reach and scoop size
+  EDIT_MAX: 32,
+  DIG_REACH: 3.5,
+  DIG_R: 1.1,
 };

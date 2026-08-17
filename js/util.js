@@ -87,6 +87,11 @@ const CAVES = {
   HALL_E: 96,      // placement cell size
   PIL_S: 3.5,      // pillar lattice spacing inside halls
   PIL_R: 0.45,     // pillar half-width (square pillars, Chebyshev metric)
+  // edits: sparse voxel-delta overlay (digging); see js/edits.js
+  EDIT_CHUNK: 32,      // voxels per chunk edge
+  EDIT_VOX: 0.5,       // voxel size, world units
+  EDIT_SCALE: 0.03125, // stored i8 -> density units (1/32; range ~±4)
+  EDIT_WORDS: 8192,    // u32 words per chunk (32^3 / 4)
 };
 
 // Band floor: a low-frequency ramp whose slope is bounded by construction.
@@ -287,10 +292,14 @@ function caveV(x, y, z, gz) {
 }
 
 // Layered density, the one authority on what is solid: positive in rock,
-// negative in air. Mirror of WGSL solidD. KEEP IN SYNC.
+// negative in air. The sparse edit overlay (digging) adds on top - the
+// typeof guard keeps this file loadable before js/edits.js and in node
+// tests that do not exercise edits. Mirror of WGSL solidD. KEEP IN SYNC.
 function solidD(x, y, z) {
   const gz = terrainH(x, y);
-  return Math.min(gz - z, -caveV(x, y, z, gz));
+  let d = Math.min(gz - z, -caveV(x, y, z, gz));
+  if (typeof Edits !== 'undefined' && Edits.bounds) d += Edits.sample(x, y, z);
+  return d;
 }
 
 // -------- tree placement — mirror of WGSL treeAt --------
