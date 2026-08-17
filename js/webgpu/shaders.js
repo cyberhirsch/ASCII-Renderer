@@ -883,12 +883,34 @@ fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f, nRays : i32) -> f32 {
 
 // -------- sky --------
 
+// The moon. 0 = not the moon, 1 = its unlit limb, 2 = the lit crescent.
+// The whole disc counts, not just the crescent: the moon is a sphere, so it
+// stands in front of the stars even where the sun is not lighting it.
+fn moonAt(rd : vec3f) -> i32 {
+  if (U.night < 0.02) { return 0; }
+  if (dot(rd, U.moonDir) < 0.99) { return 0; }
+  var up = vec3f(0.0, 0.0, 1.0);
+  if (abs(U.moonDir.z) > 0.9) { up = vec3f(1.0, 0.0, 0.0); }
+  let mx = normalize(cross(up, U.moonDir));
+  let my = cross(U.moonDir, mx);
+  let u = dot(rd, mx);
+  let v = dot(rd, my);
+  let R = ${CFG.MOON_R};
+  if (u * u + v * v > R * R) { return 0; }
+  // the crescent is what is left of the disc after a second disc, offset
+  // beside it, takes a bite out
+  let du = u - ${CFG.MOON_CRESC} * R;
+  if (du * du + v * v < R * R * 0.92) { return 1; }
+  return 2;
+}
+
 // Stars are specific characters, not bright pixels: the render pass picks a
 // glyph by luminance, so a star has to name the character it wants. Returns
 // an ASCII code or 0. Faint dots are common and big bright stars are rare,
 // which is what keeps a field of them from reading as uniform noise.
 fn starAt(rd : vec3f) -> u32 {
   if (U.night < 0.05 || rd.z < 0.015) { return 0u; }
+  if (moonAt(rd) > 0) { return 0u; }   // hidden behind the moon
   let q = vec3i(floor(rd * ${CFG.STAR_GRID}));
   let h = uhash(uhash(bitcast<u32>(q.x), bitcast<u32>(q.y)), bitcast<u32>(q.z));
   let r = f32(h) * (1.0 / 4294967296.0);
@@ -902,25 +924,6 @@ fn starAt(rd : vec3f) -> u32 {
   return 42u;                        // '*'  rare and bright
 }
 
-// the moon: a yellow crescent, cut as a disc minus a second disc beside it
-fn moonAt(rd : vec3f) -> f32 {
-  if (U.night < 0.02) { return 0.0; }
-  let dm = dot(rd, U.moonDir);
-  if (dm < 0.99) { return 0.0; }
-  var up = vec3f(0.0, 0.0, 1.0);
-  if (abs(U.moonDir.z) > 0.9) { up = vec3f(1.0, 0.0, 0.0); }
-  let mx = normalize(cross(up, U.moonDir));
-  let my = cross(U.moonDir, mx);
-  let u = dot(rd, mx);
-  let v = dot(rd, my);
-  let R = ${CFG.MOON_R};
-  let r2 = u * u + v * v;
-  if (r2 > R * R) { return 0.0; }
-  let du = u - ${CFG.MOON_CRESC} * R;
-  if (du * du + v * v < R * R * 0.92) { return 0.0; }   // the bitten-out part
-  return 1.0;
-}
-
 fn shadeSky(rd : vec3f) -> vec3f {
   let t = clamp(rd.z, 0.0, 1.0);
   var col = mix(U.skyLo, U.skyHi, pow(t, 0.55));
@@ -928,11 +931,15 @@ fn shadeSky(rd : vec3f) -> vec3f {
   if (d > 0.9995) { return U.sunCol * 1.6; }
   col = col + U.sunCol * pow(max(d, 0.0), 220.0) * 1.1;
   col = col + U.sunCol * pow(max(d, 0.0), 18.0) * 0.22;
-  // moon disc and its halo, both yellow against the blue
+  // moon: a tight halo, a yellow lit crescent, and an unlit limb that goes
+  // darker than the sky so the sphere reads as a silhouette against it
   let moonCol = vec3f(1.0, 0.88, 0.42);
-  let dmoon = dot(normalize(rd), U.moonDir);
-  col = col + moonCol * pow(max(dmoon, 0.0), 90.0) * 0.35 * U.night;
-  if (moonAt(normalize(rd)) > 0.0) { col = moonCol * 1.7; }
+  let nrd = normalize(rd);
+  col = col + moonCol * pow(max(dot(nrd, U.moonDir), 0.0),
+                            ${CFG.MOON_GLOW_P}) * ${CFG.MOON_GLOW} * U.night;
+  let m = moonAt(nrd);
+  if (m == 2) { col = moonCol * 1.7; }
+  else if (m == 1) { col = vec3f(0.02, 0.03, 0.07); }
   if (rd.z < 0.0) {
     col = mix(U.skyLo * 0.85, col, exp(rd.z * 6.0));
   }

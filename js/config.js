@@ -31,6 +31,8 @@ const CFG = {
   // night sky: the moon's angular radius and how thick its crescent is
   MOON_R: 0.085,
   MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii
+  MOON_GLOW: 0.10,    // halo strength around the disc
+  MOON_GLOW_P: 400,   // halo tightness; higher is a smaller halo
   STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
   STAR_RARE: 0.976,   // hash above this is a star, at full night
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
