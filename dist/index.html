@@ -1705,7 +1705,7 @@ const GlyphAtlas = {
 // function of world position evaluated in the shader — nothing is stored, so
 // the world has no edges and no cell steps: rays march the smooth heightfield
 // and normals come from its gradient. Trees are placed by deterministic hash
-// per integer cell and traced as trunk + translucent canopy. Water is a sea
+// per integer cell and traced as trunk + opaque, noise-holed canopy. Water is a sea
 // level plane. Sun visibility is a real marched shadow ray; AO is traced
 // hemisphere rays. Entities (future creatures) are articulated primitives.
 //
@@ -2362,7 +2362,10 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
               (vec3f(vnoise(hp * 5.1 + 11.0), vnoise(hp * 5.1 + 23.0),
                      vnoise(hp * 5.1 + 37.0)) - 0.5) * 0.55);
             o.albedo = vec3f(0.40, 0.60, 0.32);
-            o.alpha = clamp(a, 0.0, 0.94);
+            // density noise still carves holes (the 'a > 0.03' test above),
+            // but where the canopy is present it is now solid - no
+            // translucency, no bounce-through, one lighting pass per ray
+            o.alpha = 1.0;
             o.canopy = true; o.emissive = 0.0; o.ok = true;
           }
         }
@@ -2384,11 +2387,11 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
 }
 
 // -------- occlusion for shadows and AO --------
-// Occlusion rays return TRANSMITTANCE, not a boolean: solid hits give 0,
-// canopies multiply in their translucency. A stochastic canopy test would
-// need many rays to average clean - with near-parallel sun rays it dithers
-// into blocky speckle - while transmittance is deterministic and smooth at
-// the same cost. Budgeted: coarse terrain march, single-cell tree walk.
+// Occlusion rays return TRANSMITTANCE: 1 = fully lit, 0 = fully blocked.
+// Canopies are opaque now, same as trunks, so a hit just returns 0 - the
+// transmittance return type is kept because the caller averages many rays
+// into a soft result, not because any one ray is partial. Budgeted: coarse
+// terrain march, single-cell tree walk.
 
 fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
   // Underground origins first march the density field: cave walls block
@@ -2428,12 +2431,10 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
     }
   }
 
-  var trans = 1.0;
   // Trees: exact DDA over the cells the ray crosses, testing a 3x3
   // neighbourhood at each step - canopies overhang their anchor cell, and a
   // single-cell test shadows only disconnected slices of the crown. A short
-  // history of tested anchors keeps a tree from multiplying its
-  // transmittance in once per neighbouring window.
+  // history of tested anchors keeps a tree from testing the same one twice.
   let hlen = length(rd.xy);
   if (hlen > 1e-4) {
     let treeRange = min(maxT, 16.0);
@@ -2475,11 +2476,14 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (tTrunk > 0.001 && tTrunk * hlen < maxD) { return 0.0; }
         let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
         if (sph.y > 0.001 && sph.x * hlen < maxD) {
-          let mid = ro + rd * max((sph.x + sph.y) * 0.5, 0.0);
+          // same hole test as the primary ray (traceTrees), so shadow gaps
+          // line up with the gaps the eye actually sees in the canopy
+          let tEnter = max(sph.x, 0.001);
+          let mid = ro + rd * max((tEnter + sph.y) * 0.5, 0.0);
           let dens = vnoise(mid * 2.6) * 0.75 + vnoise(mid * 6.5) * 0.25;
-          let chord = max(sph.y - max(sph.x, 0.0), 0.0);
-          trans = trans * exp(-chord * 1.1 * (0.3 + 1.4 * dens));
-          if (trans < 0.04) { return 0.0; }
+          let chord = max(sph.y - tEnter, 0.0);
+          let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
+          if (a > 0.03) { return 0.0; }
         }
       }
       }
@@ -2488,7 +2492,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       else { side.y = side.y + dD.y; cy = cy + sgn.y; }
     }
   }
-  return trans;
+  return 1.0;
 }
 
 fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
