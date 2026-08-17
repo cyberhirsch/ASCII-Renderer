@@ -74,6 +74,13 @@ const CAVES = {
   PASS_W: 0.06,  // passage half-width in isoline value units
   CHAM_W: 0.15,  // extra half-width inside chambers
   PASS_SCALE: 15,// value units -> approx world units (1 / (1.5 * PASS_F))
+  // shafts: helical stair wells, one candidate per SHAFT_E cell per band
+  // pair. Compact by design so the field only ever checks its own cell.
+  SHAFT_E: 48,     // placement cell size; anchor jitter keeps R inside it
+  SHAFT_R: 3.0,    // outer radius of the stair well
+  SHAFT_RIN: 0.75, // central column radius (keeps the stair "supported")
+  SHAFT_PITCH: 3.4,// vertical drop per full turn; grade ~16 deg mid-stair
+  SHAFT_OPEN: 0.7, // open fraction of each turn (headroom 2.4, slab 1.0)
 };
 
 // Band floor: a low-frequency ramp whose slope is bounded by construction.
@@ -86,13 +93,13 @@ function caveFloor(k, x, y) {
          CAVES.FLOOR_A;
 }
 
-// Cave void field: positive inside carved space (roughly world-unit
+// Natural banded void: positive inside carved space (roughly world-unit
 // magnitude), very negative elsewhere. Passages are the near-median isolines
 // of a per-band value noise - the median level set of a random field
 // percolates, so the network is connected across the infinite plane. gz is
 // terrainH(x, y), passed in because every caller already has it.
-// Mirror of WGSL caveV. KEEP IN SYNC.
-function caveV(x, y, z, gz) {
+// Mirror of WGSL naturalV. KEEP IN SYNC.
+function naturalV(x, y, z, gz) {
   if (z >= CAVES.TOP || z < CAVES.BOT) return -1e9;
   const s = CFG.SEED >>> 0;
   const m = vn2(x * CAVES.MASK_F, y * CAVES.MASK_F, (s ^ 0x33AA) >>> 0);
@@ -114,6 +121,100 @@ function caveV(x, y, z, gz) {
   const h = (w - iso) * CAVES.PASS_SCALE;
   const vz = Math.min(z - fz, fz + ceilH - z);
   return Math.min(h, vz);
+}
+
+// Shaft candidate for placement cell (cx, cy) and band pair j (0 = surface
+// into band -1, j >= 1 = band -j into band -(j+1)). Presence requires a
+// passage at the anchor in the destination band (both bands for j >= 1), so
+// a shaft always daylights into the network. When (px, py) is given, the
+// cheap position/distance precheck runs before any expensive validation -
+// the order the WGSL twin relies on. Mirror of WGSL shaftAt. KEEP IN SYNC.
+function shaftAt(cx, cy, j, px, py) {
+  const s = CFG.SEED >>> 0;
+  const sj = (s ^ (0x51F7 + j * 0x9101)) >>> 0;
+  if (hash01(cx, cy, sj) >= (j === 0 ? 0.55 : 0.8)) return null;
+  const h2 = hash2i(cx, cy, (sj ^ 0x2C55) >>> 0);
+  const ax = cx * CAVES.SHAFT_E + 10 + h2[0] * 28;
+  const ay = cy * CAVES.SHAFT_E + 10 + h2[1] * 28;
+  if (px !== undefined) {
+    const dx = px - ax, dy = py - ay;
+    if (dx * dx + dy * dy > (CAVES.SHAFT_R + 2.0) * (CAVES.SHAFT_R + 2.0)) {
+      return null;
+    }
+  }
+  const gz = terrainH(ax, ay);
+  let zTop, zBot;
+  if (j === 0) {
+    if (gz < CFG.SEA_LEVEL + 1.2 || gz > 11.0) return null;
+    zTop = gz;
+    zBot = caveFloor(-1, ax, ay);
+    if (naturalV(ax, ay, zBot + 1.2, gz) < 0.15) return null;
+  } else {
+    zTop = caveFloor(-j, ax, ay) + 0.2;
+    zBot = caveFloor(-j - 1, ax, ay);
+    if (naturalV(ax, ay, zTop + 1.0, gz) < 0.15) return null;
+    if (naturalV(ax, ay, zBot + 1.2, gz) < 0.15) return null;
+  }
+  const phase = hash01(cx, cy, (sj ^ 0x77AD) >>> 0);
+  return { ax, ay, zTop, zBot, phase };
+}
+
+// Helical stair carve for one shaft: an annulus between the central column
+// and the outer wall, with a helicoid floor - SHAFT_OPEN of every turn is
+// air, the rest is the stair slab. Open to the sky just above the mouth;
+// the bottom join is the band's own passage carving through the outer wall.
+// Returns [void, slab]: slab > 0 marks stair steps that must STAY rock even
+// where a tall passage or chamber would carve them away - without it the
+// last turns of the stair dissolve into the band void and leave a drop.
+// Mirror of WGSL helixV. KEEP IN SYNC.
+function helixV(x, y, z, a) {
+  const dx = x - a.ax, dy = y - a.ay;
+  const r = Math.hypot(dx, dy);
+  const radial = Math.min(CAVES.SHAFT_R - r, r - CAVES.SHAFT_RIN);
+  const u = (a.zTop - z) / CAVES.SHAFT_PITCH +
+            Math.atan2(dy, dx) / (2 * Math.PI) + a.phase;
+  const su = u - Math.floor(u);
+  const sv = Math.min(su, CAVES.SHAFT_OPEN - su) * CAVES.SHAFT_PITCH;
+  let v = Math.min(radial, sv);
+  // entry apron: a flat ledge ring around the mouth, stepped into from any
+  // rim angle; the stair top emerges from it and winds down
+  const apron = Math.min(CAVES.SHAFT_R + 1.8 - r,
+                         z - (a.zTop - 0.45));
+  v = Math.max(v, apron);
+  v = Math.min(v, a.zTop + 1.5 - z, z - (a.zBot - 0.2));
+  const slab = Math.min(radial,
+    Math.min(su - CAVES.SHAFT_OPEN, 1 - su) * CAVES.SHAFT_PITCH,
+    Math.min(z - (a.zBot - 0.2), (a.zTop - 0.45) - z));
+  return [v, slab];
+}
+
+// All shafts near (x, y): anchors are jittered to keep the well inside its
+// own placement cell, so only that one cell is ever checked - the cheap
+// presence hash is all the hot march loops pay when no shaft is near.
+// Returns [void, slab] aggregated over the band pairs.
+// Mirror of WGSL shaftV. KEEP IN SYNC.
+function shaftV(x, y, z, gz) {
+  if (z > gz + 1.5) return [-1e9, -1e9];
+  const cx = Math.floor(x / CAVES.SHAFT_E);
+  const cy = Math.floor(y / CAVES.SHAFT_E);
+  let v = -1e9, slab = -1e9;
+  for (let j = 0; j < 3; j++) {
+    const a = shaftAt(cx, cy, j, x, y);
+    if (!a) continue;
+    if (z > a.zTop + 1.5 || z < a.zBot - 0.5) continue;
+    const h = helixV(x, y, z, a);
+    if (h[0] > v) v = h[0];
+    if (h[1] > slab) slab = h[1];
+  }
+  return [v, slab];
+}
+
+// Cave void field: natural banded passages plus carved shafts, minus the
+// stair slabs, which win over every carve. Mirror of WGSL caveV.
+// KEEP IN SYNC.
+function caveV(x, y, z, gz) {
+  const sv = shaftV(x, y, z, gz);
+  return Math.min(Math.max(naturalV(x, y, z, gz), sv[0]), -sv[1]);
 }
 
 // Layered density, the one authority on what is solid: positive in rock,

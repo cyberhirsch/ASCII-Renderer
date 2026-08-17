@@ -15,8 +15,8 @@ const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'util', 'world']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, World, terrainH, ' +
-  ['CAVES', 'caveFloor', 'caveV', 'solidD', 'vn2', 'smoothstep']
-    .map(grab).join(', ') + ' });';
+  ['CAVES', 'caveFloor', 'caveV', 'naturalV', 'shaftAt', 'helixV', 'solidD',
+   'vn2', 'smoothstep'].map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math }, { filename: 'under-test' });
 
 if (!c.caveV || !c.caveFloor) {
@@ -136,11 +136,23 @@ let bestIntFrac = 0;
   ? ok(`connectivity: largest component holds ${(bestIntFrac * 100).toFixed(0)}% of ${intCount} interior cells`)
   : fail(`passages disconnected: largest holds ${(bestIntFrac * 100).toFixed(0)}% of ${intCount} interior cells`);
 
+// shaft proximity check, shared by the headroom and floor-landing tests:
+// stair slabs and stair floors legitimately reshape the space near a well
+const nearShaft = (x, y) => {
+  const cx = Math.floor(x / CAVES.SHAFT_E), cy = Math.floor(y / CAVES.SHAFT_E);
+  for (let j = 0; j < 3; j++) {
+    const a = c.shaftAt && c.shaftAt(cx, cy, j);
+    if (a && Math.hypot(x - a.ax, y - a.ay) < CAVES.SHAFT_R + 2.5) return true;
+  }
+  return false;
+};
+
 // ---- 5. headroom at strong points ----
 let cramped = 0, checked = 0;
 for (let i = 0; i < N * N; i += 7) {
   if (!open[i]) continue;
   const x = bx - R + ((i / N) | 0) * STEP, y = by - R + (i % N) * STEP;
+  if (nearShaft(x, y)) continue;
   const gz = c.terrainH(x, y);
   const fz = c.caveFloor(-1, x, y);
   if (c.caveV(x, y, fz + 1.2, gz) < 0.5) continue;   // only strong interior
@@ -163,11 +175,13 @@ for (let i = 0; i < 500; i++) {
 worstDev < 0.12 ? ok(`walkZ surface parity: worst dev ${worstDev.toFixed(3)}`)
                 : fail(`walkZ deviates from terrain on the surface: ${worstDev}`);
 
-// ---- 7. walkZ lands on cave floors ----
+// ---- 7. walkZ lands on cave floors (away from shafts, whose stair carve
+// legitimately undercuts the local band floor) ----
 let landBad = 0, landChecked = 0;
 for (let i = 0; i < N * N; i += 11) {
   if (!open[i]) continue;
   const x = bx - R + ((i / N) | 0) * STEP, y = by - R + (i % N) * STEP;
+  if (nearShaft(x, y)) continue;
   const gz = c.terrainH(x, y);
   const fz = c.caveFloor(-1, x, y);
   if (c.caveV(x, y, fz + 1.2, gz) < 0.5) continue;
@@ -178,6 +192,80 @@ for (let i = 0; i < N * N; i += 11) {
 (landChecked > 30 && landBad === 0)
   ? ok(`walkZ cave landing: ${landChecked} points land on the band floor`)
   : fail(`walkZ misses the cave floor at ${landBad}/${landChecked} points`);
+
+// ---- 8. shafts exist: surface entrances and band links ----
+if (c.shaftAt) {
+  let surf = 0, deep = 0;
+  for (let cx = -40; cx <= 40; cx++) {
+    for (let cy = -40; cy <= 40; cy++) {
+      if (c.shaftAt(cx, cy, 0)) surf++;
+      if (c.shaftAt(cx, cy, 1) || c.shaftAt(cx, cy, 2)) deep++;
+    }
+  }
+  surf >= 5 ? ok(`${surf} surface entrances in +/-40 cells`)
+            : fail(`too few surface entrances: ${surf}`);
+  deep >= 3 ? ok(`${deep} band-link shafts in +/-40 cells`)
+            : fail(`too few band-link shafts: ${deep}`);
+
+  // ---- 9. spawn sits beside an entrance ----
+  const [sx, sy] = c.World.findSpawn();
+  let A = null, bestD2 = Infinity;
+  const scx = Math.floor(sx / CAVES.SHAFT_E), scy = Math.floor(sy / CAVES.SHAFT_E);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const a = c.shaftAt(scx + dx, scy + dy, 0);
+      if (!a) continue;
+      const d2 = (a.ax - sx) ** 2 + (a.ay - sy) ** 2;
+      if (d2 < bestD2) { bestD2 = d2; A = a; }
+    }
+  }
+  (A && bestD2 < (CAVES.SHAFT_R + 4) ** 2)
+    ? ok(`spawn ${sx.toFixed(0)},${sy.toFixed(0)} beside entrance at ${A.ax.toFixed(0)},${A.ay.toFixed(0)}`)
+    : fail('spawn is not beside a cave entrance');
+
+  // ---- 10. walk-bot: a legal walking path exists from spawn down the
+  // entrance to band -1. BFS over (x, y, z) states using only legal moves
+  // (step <= 1.0, headroom clear) - what a player can do, not clairvoyance.
+  if (A) {
+    const stand = (x, y, z) => {
+      const fz = c.World.walkZ(x, y, z);
+      if (fz === null) return null;
+      if (Math.abs(fz - z) > 1.0) return null;
+      for (let dz = 0.5; dz <= 1.7; dz += 0.4) {
+        if (c.solidD(x, y, fz + dz) >= 0) return null;
+      }
+      return fz;
+    };
+    const z0 = c.World.walkZ(sx, sy, c.terrainH(sx, sy));
+    const queue = [[sx, sy, z0]];
+    const seen = new Set();
+    const key = (x, y, z) =>
+      `${Math.round(x / 0.3)},${Math.round(y / 0.3)},${Math.round(z / 1.2)}`;
+    seen.add(key(sx, sy, z0));
+    let reached = false, deepest = z0, expanded = 0;
+    while (queue.length && !reached && expanded < 6000) {
+      const [x, y, z] = queue.shift();
+      expanded++;
+      for (let d = 0; d < 8; d++) {
+        const ang = d * Math.PI / 4;
+        const nx = x + Math.cos(ang) * 0.35;
+        const ny = y + Math.sin(ang) * 0.35;
+        if (Math.hypot(nx - A.ax, ny - A.ay) > CAVES.SHAFT_R + 3.0) continue;
+        const fz = stand(nx, ny, z);
+        if (fz === null) continue;
+        const k = key(nx, ny, fz);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        if (fz < deepest) deepest = fz;
+        if (fz <= A.zBot + 2.2) { reached = true; break; }
+        queue.push([nx, ny, fz]);
+      }
+    }
+    reached
+      ? ok(`walk-bot found a legal descent to z=${deepest.toFixed(1)} (band floor ${A.zBot.toFixed(1)})`)
+      : fail(`walk-bot: no legal path below z=${deepest.toFixed(1)} (band floor ${A.zBot.toFixed(1)}, ${expanded} states)`);
+  }
+}
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\ncave tests passed');

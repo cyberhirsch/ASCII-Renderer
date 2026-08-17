@@ -127,11 +127,11 @@ fn caveFloor(k : i32, q : vec2f) -> f32 {
          vn2(q * ${CAVES.FLOOR_F}, bs ^ 0x0F1Du) * ${CAVES.FLOOR_A};
 }
 
-// Cave void field: positive inside carved space, very negative elsewhere.
-// Passages are near-median isolines of per-band value noise - the median
-// level set of a random field percolates, so the network is connected across
-// the infinite plane. gz = terrainH(p.xy), every caller has it already.
-fn caveV(p : vec3f, gz : f32) -> f32 {
+// Natural banded void: positive inside carved space, very negative
+// elsewhere. Passages are near-median isolines of per-band value noise - the
+// median level set of a random field percolates, so the network is connected
+// across the infinite plane. gz = terrainH(p.xy), every caller has it.
+fn naturalV(p : vec3f, gz : f32) -> f32 {
   if (p.z >= CAVE_TOP || p.z < CAVE_BOT) { return -1.0e9; }
   let s = seedU();
   let m = vn2(p.xy * ${CAVES.MASK_F}, s ^ 0x33AAu);
@@ -153,6 +153,103 @@ fn caveV(p : vec3f, gz : f32) -> f32 {
   let h = (w - iso) * ${CAVES.PASS_SCALE};
   let vz = min(p.z - fz, fz + ceilH - p.z);
   return min(h, vz);
+}
+
+// -------- shafts: helical stair wells linking surface and bands --------
+
+struct Shaft {
+  present : bool, ax : f32, ay : f32, zTop : f32, zBot : f32, phase : f32,
+};
+
+// One candidate per placement cell per band pair j (0 = surface into band
+// -1, j >= 1 = band -j into band -(j+1)). Presence requires a passage at the
+// anchor in the destination band, so a shaft always daylights into the
+// network. Cheap hashes and the distance precheck run before any expensive
+// validation - the hot march loops rely on that order.
+fn shaftAt(cx : i32, cy : i32, j : i32, pp : vec2f) -> Shaft {
+  var a : Shaft;
+  a.present = false;
+  let s = seedU();
+  let sj = s ^ (0x51F7u + u32(j) * 0x9101u);
+  let rate = select(0.8, 0.55, j == 0);
+  if (hash01(cx, cy, sj) >= rate) { return a; }
+  let h2 = hash2i(cx, cy, sj ^ 0x2C55u);
+  a.ax = f32(cx) * ${CAVES.SHAFT_E} + 10.0 + h2.x * 28.0;
+  a.ay = f32(cy) * ${CAVES.SHAFT_E} + 10.0 + h2.y * 28.0;
+  let dx = pp.x - a.ax;
+  let dy = pp.y - a.ay;
+  if (dx * dx + dy * dy >
+      (${CAVES.SHAFT_R} + 2.0) * (${CAVES.SHAFT_R} + 2.0)) { return a; }
+  let gz = terrainH(vec2f(a.ax, a.ay));
+  let aq = vec2f(a.ax, a.ay);
+  if (j == 0) {
+    if (gz < U.seaLevel + 1.2 || gz > 11.0) { return a; }
+    a.zTop = gz;
+    a.zBot = caveFloor(-1, aq);
+    if (naturalV(vec3f(aq, a.zBot + 1.2), gz) < 0.15) { return a; }
+  } else {
+    a.zTop = caveFloor(-j, aq) + 0.2;
+    a.zBot = caveFloor(-j - 1, aq);
+    if (naturalV(vec3f(aq, a.zTop + 1.0), gz) < 0.15) { return a; }
+    if (naturalV(vec3f(aq, a.zBot + 1.2), gz) < 0.15) { return a; }
+  }
+  a.phase = hash01(cx, cy, sj ^ 0x77ADu);
+  a.present = true;
+  return a;
+}
+
+// Helical stair carve: an annulus between central column and outer wall
+// with a helicoid floor - SHAFT_OPEN of every turn is air, the rest is the
+// stair slab. Open to the sky just above the mouth; the bottom join is the
+// band's own passage carving through the outer wall. Returns (void, slab):
+// slab > 0 marks stair steps that must STAY rock even where a tall passage
+// or chamber would carve them away - without it the last turns of the stair
+// dissolve into the band void and leave a drop.
+fn helixV(p : vec3f, a : Shaft) -> vec2f {
+  let dx = p.x - a.ax;
+  let dy = p.y - a.ay;
+  let r = sqrt(dx * dx + dy * dy);
+  let radial = min(${CAVES.SHAFT_R} - r, r - ${CAVES.SHAFT_RIN});
+  let u = (a.zTop - p.z) / ${CAVES.SHAFT_PITCH}
+        + atan2(dy, dx) / 6.2831853 + a.phase;
+  let su = fract(u);
+  let sv = min(su, ${CAVES.SHAFT_OPEN} - su) * ${CAVES.SHAFT_PITCH};
+  var v = min(radial, sv);
+  // entry apron: a flat ledge ring around the mouth, stepped into from any
+  // rim angle; the stair top emerges from it and winds down
+  let apron = min(${CAVES.SHAFT_R} + 1.8 - r,
+                  p.z - (a.zTop - 0.45));
+  v = max(v, apron);
+  v = min(v, min(a.zTop + 1.5 - p.z, p.z - (a.zBot - 0.2)));
+  let slab = min(radial, min(
+    min(su - ${CAVES.SHAFT_OPEN}, 1.0 - su) * ${CAVES.SHAFT_PITCH},
+    min(p.z - (a.zBot - 0.2), (a.zTop - 0.45) - p.z)));
+  return vec2f(v, slab);
+}
+
+// All shafts near p: anchors are jittered to keep the well inside its own
+// placement cell, so only that one cell is ever checked - the presence hash
+// is all the hot march loops pay when no shaft is near. Returns (void, slab).
+fn shaftV(p : vec3f, gz : f32) -> vec2f {
+  if (p.z > gz + 1.5) { return vec2f(-1.0e9, -1.0e9); }
+  let cx = i32(floor(p.x / ${CAVES.SHAFT_E}));
+  let cy = i32(floor(p.y / ${CAVES.SHAFT_E}));
+  var v = vec2f(-1.0e9, -1.0e9);
+  for (var j = 0; j < 3; j = j + 1) {
+    let a = shaftAt(cx, cy, j, p.xy);
+    if (!a.present) { continue; }
+    if (p.z > a.zTop + 1.5 || p.z < a.zBot - 0.5) { continue; }
+    let h = helixV(p, a);
+    v = max(v, h);
+  }
+  return v;
+}
+
+// cave void field: natural banded passages plus carved shafts, minus the
+// stair slabs, which win over every carve
+fn caveV(p : vec3f, gz : f32) -> f32 {
+  let sv = shaftV(p, gz);
+  return min(max(naturalV(p, gz), sv.x), -sv.y);
 }
 
 fn solidD(p : vec3f) -> f32 {

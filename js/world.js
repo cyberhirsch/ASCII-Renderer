@@ -53,14 +53,38 @@ const World = {
     return best && { tree: best, dist: bestD };
   },
 
-  // spiral out from the origin for dry, walkable ground
+  // Spawn beside a cave entrance when one exists nearby: scan shaft
+  // placement cells ring by ring from the origin, then stand on dry, gentle
+  // ground at the rim of the first entrance found.
   findSpawn() {
+    for (let ring = 0; ring < 40; ring++) {
+      for (let cy = -ring; cy <= ring; cy++) {
+        for (let cx = -ring; cx <= ring; cx++) {
+          if (Math.max(Math.abs(cx), Math.abs(cy)) !== ring) continue;
+          const a = shaftAt(cx, cy, 0);
+          if (!a) continue;
+          for (let ang = 0; ang < Math.PI * 2; ang += 0.4) {
+            const x = a.ax + Math.cos(ang) * (CAVES.SHAFT_R + 2.0);
+            const y = a.ay + Math.sin(ang) * (CAVES.SHAFT_R + 2.0);
+            const h = terrainH(x, y);
+            if (h < CFG.SEA_LEVEL + 0.6) continue;
+            // the entry apron ledge sits 0.45 below the mouth; spawn where
+            // stepping onto it is a legal move
+            if (Math.abs(h - (a.zTop - 0.45)) > 1.0) continue;
+            // gentle ground: sample slope
+            const s = Math.abs(terrainH(x + 1, y) - h) +
+                      Math.abs(terrainH(x, y + 1) - h);
+            if (s < 0.8) return [x, y];
+          }
+        }
+      }
+    }
+    // fallback: any dry, gentle ground, spiralling out from the origin
     for (let r = 0; r < 400; r += 3) {
       for (let a = 0; a < Math.PI * 2; a += 0.7) {
         const x = Math.cos(a) * r, y = Math.sin(a) * r;
         const h = terrainH(x, y);
         if (h < CFG.SEA_LEVEL + 0.6) continue;
-        // gentle ground: sample slope
         const s = Math.abs(terrainH(x + 1, y) - h) + Math.abs(terrainH(x, y + 1) - h);
         if (s < 0.8) return [x, y];
       }
