@@ -42,6 +42,8 @@ const CFG = {
   // terrain: a continuous, infinite heightfield evaluated in the shader and
   // mirrored in js/util.js. No stored grid, no world bounds.
   TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units
+  // caves: view distance underground; rays in cave air stop here and fade out
+  CAVE_VIEW: 60,
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,

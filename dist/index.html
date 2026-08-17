@@ -65,6 +65,8 @@ const CFG = {
   // terrain: a continuous, infinite heightfield evaluated in the shader and
   // mirrored in js/util.js. No stored grid, no world bounds.
   TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units
+  // caves: view distance underground; rays in cave air stop here and fade out
+  CAVE_VIEW: 60,
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,
@@ -122,6 +124,31 @@ function terrainH(px, py) {
           vn2(qx * 6.1, qy * 6.1, (s ^ 0x51ed) >>> 0) * 0.12;
   h = Math.pow(h, 1.55);
   return h * CFG.TERRAIN_MAX;
+}
+
+// -------- caves: shared constants + density mirror --------
+// These values are interpolated into the WGSL template in
+// js/webgpu/shaders.js, so shader and mirror cannot disagree
+// (scripts/verify.js enforces the convention: no literal CAVE_/EDIT_
+// constants in the shader source).
+const CAVES = {
+  STEP: 0.3,     // primary-ray march step through cave air, world units
+  STEPS: 200,    // primary-ray march budget (STEP * STEPS = CAVE_VIEW)
+  TSTEP: 0.55,   // occlusion-ray march step through cave air
+  TSTEPS: 14,    // occlusion-ray march budget
+};
+
+// Cave void field: positive inside carved space, negative in rock and in the
+// open air above ground. Mirror of WGSL caveV. Stub until the cave phase
+// lands; -1e9 makes solidD degenerate to the plain heightfield exactly.
+function caveV(x, y, z) {
+  return -1e9;
+}
+
+// Layered density, the one authority on what is solid: positive in rock,
+// negative in air. Mirror of WGSL solidD. KEEP IN SYNC.
+function solidD(x, y, z) {
+  return Math.min(terrainH(x, y) - z, -caveV(x, y, z));
 }
 
 // -------- tree placement — mirror of WGSL treeAt --------
@@ -588,10 +615,39 @@ fn terrainN(p : vec2f) -> vec3f {
   return normalize(vec3f(-hx, -hy, 2.0 * e));
 }
 
-// march the heightfield; returns ray parameter or -1
-fn terrainT(ro : vec3f, rd : vec3f, tMax : f32) -> f32 {
-  if (ro.z >= U.maxHeight && rd.z >= 0.0) { return -1.0; }
-  var t = 0.02;
+// -------- caves: layered density. KEEP IN SYNC with js/util.js --------
+// solidD(p) = min(terrainH - z, -caveV(p)): positive in rock, negative in
+// air. caveV > 0 inside carved void; the stub below keeps it dead until the
+// cave phase lands, which makes solidD degenerate to the heightfield exactly.
+
+const CAVE_VIEW : f32 = ${CFG.CAVE_VIEW};   // view distance underground
+const CAVE_STEP : f32 = ${CAVES.STEP};      // primary march step in cave air
+const CAVE_TSTEP : f32 = ${CAVES.TSTEP};    // occlusion march step in cave air
+
+fn caveV(p : vec3f) -> f32 {
+  return -1.0e9;
+}
+
+fn solidD(p : vec3f) -> f32 {
+  return min(terrainH(p.xy) - p.z, -caveV(p));
+}
+
+// gradient normal of the density field, for carved surfaces where the
+// heightfield normal is meaningless
+fn solidN(p : vec3f) -> vec3f {
+  let e = 0.22;
+  return normalize(vec3f(
+    solidD(p - vec3f(e, 0.0, 0.0)) - solidD(p + vec3f(e, 0.0, 0.0)),
+    solidD(p - vec3f(0.0, e, 0.0)) - solidD(p + vec3f(0.0, e, 0.0)),
+    solidD(p - vec3f(0.0, 0.0, e)) - solidD(p + vec3f(0.0, 0.0, e))));
+}
+
+// heightfield march, the fast path through open air. Returns (t, 0) on a
+// solid hit, (-1, 0) on none, (-2, tCross) when the crossing point is carved
+// away - the ray passed through a cave mouth and must switch marches.
+fn heightMarch(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
+  if (ro.z >= U.maxHeight && rd.z >= 0.0) { return vec2f(-1.0, 0.0); }
+  var t = tStart;
   var tPrev = t;
   for (var i = 0; i < 260; i = i + 1) {
     if (t > tMax) { break; }
@@ -605,10 +661,59 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32) -> f32 {
         let pm = ro + rd * m;
         if (pm.z - terrainH(pm.xy) < 0.0) { b = m; } else { a = m; }
       }
-      return (a + b) * 0.5;
+      if (caveV(ro + rd * b) > 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
+      return vec2f((a + b) * 0.5, 0.0);
     }
     tPrev = t;
     t = t + clamp(d * 0.45, 0.06, 0.35 + t * 0.045);
+  }
+  return vec2f(-1.0, 0.0);
+}
+
+// fixed-step density march through cave air. Returns (t, 0) on a hit,
+// (-1, 0) when the budget or view distance runs out underground, and
+// (-3, tEnd) when the ray resurfaces into open air - the caller resumes the
+// heightfield march from tEnd, so distant hills stay visible through a mouth.
+fn marchCave(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
+  var t = tStart;
+  var tPrev = t;
+  for (var i = 0; i < ${CAVES.STEPS}; i = i + 1) {
+    if (t > tMax) { break; }
+    let p = ro + rd * t;
+    if (solidD(p) > 0.0) {
+      var a = tPrev;
+      var b = t;
+      for (var j = 0; j < 6; j = j + 1) {
+        let m = (a + b) * 0.5;
+        if (solidD(ro + rd * m) > 0.0) { b = m; } else { a = m; }
+      }
+      return vec2f((a + b) * 0.5, 0.0);
+    }
+    if (p.z - terrainH(p.xy) > 0.5 && caveV(p) <= 0.0) { return vec2f(-3.0, t); }
+    tPrev = t;
+    t = t + CAVE_STEP;
+  }
+  return vec2f(-1.0, 0.0);
+}
+
+// unified march: alternate heightfield and density phases as the ray crosses
+// in and out of carved space (WGSL has no recursion; 4 phases cover a view
+// through a mouth and out another)
+fn terrainT(ro : vec3f, rd : vec3f, tMax : f32) -> f32 {
+  var t = 0.02;
+  var mode = 0;
+  if (ro.z < terrainH(ro.xy) && caveV(ro) > 0.0) { mode = 1; }
+  for (var phase = 0; phase < 4; phase = phase + 1) {
+    if (mode == 0) {
+      let r = heightMarch(ro, rd, t, tMax);
+      if (r.x >= 0.0) { return r.x; }
+      if (r.x < -1.5) { t = r.y; mode = 1; continue; }
+      return -1.0;
+    }
+    let r = marchCave(ro, rd, t, min(tMax, t + CAVE_VIEW));
+    if (r.x >= 0.0) { return r.x; }
+    if (r.x < -2.5) { t = r.y; mode = 0; continue; }
+    return -1.0;
   }
   return -1.0;
 }
@@ -814,15 +919,34 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
 // the same cost. Budgeted: coarse terrain march, single-cell tree walk.
 
 fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
-  // terrain: coarse march, few steps
+  // Underground origins first march the density field: cave walls block
+  // fully, resurfacing through a mouth hands over to the terrain march below
+  // (that is what makes entrance light shafts), and rays still in cave air
+  // when the budget ends are blocked - deep caves see no sky. A ray that
+  // outruns maxT while still in cave air is free: nothing within radius.
+  var t0 = 0.2;
+  if (ro.z < terrainH(ro.xy) && caveV(ro) > 0.0) {
+    var t = 0.15;
+    var escaped = false;
+    for (var i = 0; i < ${CAVES.TSTEPS}; i = i + 1) {
+      if (t > maxT) { return 1.0; }
+      let p = ro + rd * t;
+      if (solidD(p) > 0.0) { return 0.0; }
+      if (p.z - terrainH(p.xy) > 0.3) { escaped = true; t0 = t; break; }
+      t = t + CAVE_TSTEP;
+    }
+    if (!escaped) { return 0.0; }
+  }
+
+  // terrain: coarse march, few steps; carved crossings are air, not shadow
   if (!(ro.z >= U.maxHeight && rd.z >= 0.0)) {
-    var t = 0.2;
+    var t = t0;
     for (var i = 0; i < 22; i = i + 1) {
       if (t > maxT) { break; }
       let p = ro + rd * t;
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
       let d = p.z - terrainH(p.xy);
-      if (d < 0.0) { return 0.0; }
+      if (d < 0.0 && caveV(p) <= 0.0) { return 0.0; }
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
@@ -960,14 +1084,20 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
   if (tT > 0.0) {
     hit.t = tT;
     let p = ro + rd * tT;
-    hit.n = terrainN(p.xy);
-    // grass on flats, rock on slopes, sand near the waterline
-    let slope = 1.0 - hit.n.z;
-    var a = mix(vec3f(0.42, 0.58, 0.33), vec3f(0.52, 0.48, 0.42),
-                smoothstep(0.12, 0.38, slope));
-    a = mix(vec3f(0.72, 0.66, 0.50), a,
-            smoothstep(U.seaLevel + 0.15, U.seaLevel + 0.9, p.z));
-    hit.albedo = a;
+    if (caveV(p) > -1.0) {
+      // carved surface: heightfield normal is meaningless here
+      hit.n = solidN(p);
+      hit.albedo = vec3f(0.44, 0.41, 0.38);
+    } else {
+      hit.n = terrainN(p.xy);
+      // grass on flats, rock on slopes, sand near the waterline
+      let slope = 1.0 - hit.n.z;
+      var a = mix(vec3f(0.42, 0.58, 0.33), vec3f(0.52, 0.48, 0.42),
+                  smoothstep(0.12, 0.38, slope));
+      a = mix(vec3f(0.72, 0.66, 0.50), a,
+              smoothstep(U.seaLevel + 0.15, U.seaLevel + 0.9, p.z));
+      hit.albedo = a;
+    }
     hit.ok = true;
   }
 

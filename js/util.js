@@ -50,6 +50,31 @@ function terrainH(px, py) {
   return h * CFG.TERRAIN_MAX;
 }
 
+// -------- caves: shared constants + density mirror --------
+// These values are interpolated into the WGSL template in
+// js/webgpu/shaders.js, so shader and mirror cannot disagree
+// (scripts/verify.js enforces the convention: no literal CAVE_/EDIT_
+// constants in the shader source).
+const CAVES = {
+  STEP: 0.3,     // primary-ray march step through cave air, world units
+  STEPS: 200,    // primary-ray march budget (STEP * STEPS = CAVE_VIEW)
+  TSTEP: 0.55,   // occlusion-ray march step through cave air
+  TSTEPS: 14,    // occlusion-ray march budget
+};
+
+// Cave void field: positive inside carved space, negative in rock and in the
+// open air above ground. Mirror of WGSL caveV. Stub until the cave phase
+// lands; -1e9 makes solidD degenerate to the plain heightfield exactly.
+function caveV(x, y, z) {
+  return -1e9;
+}
+
+// Layered density, the one authority on what is solid: positive in rock,
+// negative in air. Mirror of WGSL solidD. KEEP IN SYNC.
+function solidD(x, y, z) {
+  return Math.min(terrainH(x, y) - z, -caveV(x, y, z));
+}
+
 // -------- tree placement — mirror of WGSL treeAt --------
 // returns null or { cx, cy, r, trunkH, trunkR }
 function treeAt(ix, iy) {

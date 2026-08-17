@@ -140,6 +140,32 @@ function cmp(name, decl, ent) {
 cmp('compute', compDecl, compEnt);
 cmp('render', rendDecl, rendEnt);
 
+// ---- 4b. shared JS<->WGSL constants ----
+// Convention: every CAVE_*/EDIT_* const in the WGSL source must be an
+// interpolation from the JS side (${CFG.X} or ${CAVES.X}), never a literal —
+// a literal is exactly how the shader and the CPU mirrors would drift apart.
+// And every such interpolation must resolve to a key that actually exists.
+{
+  const utilSrc = fs.readFileSync(path.join(root, 'js/util.js'), 'utf8');
+  let bad = 0, interps = 0, decls = 0;
+  for (const m of shadersSrc.matchAll(/\$\{(CFG|CAVES)\.(\w+)[^}]*\}/g)) {
+    interps++;
+    const home = m[1] === 'CFG' ? configSrc : utilSrc;
+    if (!new RegExp('\\b' + m[2] + '\\s*:').test(home)) {
+      fail(`WGSL interpolation \${${m[1]}.${m[2]}}: key not defined in ${m[1] === 'CFG' ? 'js/config.js' : 'js/util.js'}`);
+      bad++;
+    }
+  }
+  for (const m of shadersSrc.matchAll(/const\s+((?:CAVE|EDIT)_\w+)\s*(?::\s*\w+)?\s*=\s*([^;]+);/g)) {
+    decls++;
+    if (!/\$\{/.test(m[2])) {
+      fail(`WGSL const ${m[1]} is a literal (${m[2].trim()}) — interpolate from CFG/CAVES`);
+      bad++;
+    }
+  }
+  if (!bad) ok(`shared consts: ${decls} CAVE_/EDIT_ consts, ${interps} interpolations resolve`);
+}
+
 // ---- 5. all modules parse ----
 const vm = require('vm');
 const modules = ['config', 'util', 'world', 'overlay', 'entities', 'player',
