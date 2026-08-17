@@ -1110,7 +1110,19 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   let dith = bayer4(vec2i(cell)) / R.levels;
   let gi = floor(clamp(tone + dith, 0.0, 0.9999) * R.levels);
   let au = (gi + inCell.x) / R.levels;
-  let cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
+  var cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
+
+  // Text overlay: not a layer drawn over the scene, but a substitution of
+  // WHICH character this cell renders. A UI cell looks up the text atlas
+  // instead of the tone-selected glyph atlas, before the shared ink step
+  // below runs - so a letter is shaded exactly like any other glyph in the
+  // field, and a word reads as ascii-art that happens to spell it.
+  let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
+  let code = overlay[ci];
+  if (code >= 32u && code < 127u) {
+    let au2 = (f32(code - 32u) + inCell.x) / 95.0;
+    cov = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
+  }
 
   // Glyph density already encodes brightness — the glyph was picked by
   // luminance. Tinting by luminance as well would apply it twice and squash
@@ -1123,18 +1135,7 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
     ink = texel.rgb / m;
   }
-  var col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
-
-  // Text overlay, embedded in the glyph field: the scene keeps rendering
-  // beneath a UI cell, dimmed just enough for contrast, so panels read as
-  // brighter text woven into the world rather than boxes floating over it.
-  let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
-  let code = overlay[ci];
-  if (code >= 32u && code < 127u) {
-    let au2 = (f32(code - 32u) + inCell.x) / 95.0;
-    let cov2 = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
-    col = mix(col * ${CFG.UI_CHIP}, vec3f(1.0), cov2);
-  }
+  let col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
   return vec4f(col, 1.0);
 }
 `;

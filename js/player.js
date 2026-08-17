@@ -11,11 +11,16 @@ const Player = {
     this.z = World.groundZ(sx, sy);
 
     addEventListener('keydown', e => {
+      // the console wants raw typed characters, not just key codes - route
+      // it before the code-only panel dispatch below
+      if (Game.mode === 'console') { Game.consoleInput(e); e.preventDefault(); return; }
       // the game's modal layer gets every key first; panels capture W/S/E/Q
       if (Game.key(e.code)) { e.preventDefault(); return; }
       this.keys[e.code] = true;
-      if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
-      if (e.code === 'KeyX') CFG.RAW = !CFG.RAW;
+      if (e.code === 'Enter') { Game.openConsole(); return; }
+      // view toggles are debug tools, locked behind the "devmode" command
+      if (e.code === 'KeyM' && Game.devMode) CFG.MONO = !CFG.MONO;
+      if (e.code === 'KeyX' && Game.devMode) CFG.RAW = !CFG.RAW;
       if (e.code === 'KeyV' && GPURenderer.ok) {
         const sets = Object.keys(GlyphAtlas.SETS);
         const next = sets[(sets.indexOf(CFG.GLYPH_SET) + 1) % sets.length];

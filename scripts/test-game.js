@@ -252,6 +252,66 @@ if (c.Fells) {
   }
 }
 
+// ---- 8b. console + devmode gate ----
+{
+  const { Game: G } = c;
+  G.close();
+  G.devMode = false;
+  (G.devMode === false) ? ok('devmode starts off') : fail('devmode default wrong');
+
+  G.openConsole();
+  (G.mode === 'console' && G.cmdBuf === '') ? ok('openConsole enters console mode')
+                                            : fail('openConsole broken');
+
+  // typing builds the buffer; Backspace and Escape behave
+  G.consoleInput({ code: 'KeyD', key: 'd' });
+  G.consoleInput({ code: 'KeyE', key: 'e' });
+  G.consoleInput({ code: 'Backspace', key: 'Backspace' });
+  G.consoleInput({ code: 'KeyE', key: 'e' });
+  (G.cmdBuf === 'de') ? ok('console buffer types and backspaces')
+                      : fail('console buffer wrong: "' + G.cmdBuf + '"');
+
+  // run "devmode" via Enter
+  G.cmdBuf = 'devmode';
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (G.devMode === true && G.cmdBuf === '')
+    ? ok('devmode command toggles the flag and clears the buffer')
+    : fail('devmode command did not toggle: devMode=' + G.devMode);
+
+  // toggling again turns it back off
+  G.cmdBuf = 'DevMode';   // case-insensitive
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (G.devMode === false) ? ok('devmode command is case-insensitive and toggles back')
+                        : fail('devmode second toggle failed');
+
+  // unknown command logs, does not throw, does not touch devMode
+  G.cmdBuf = 'flyhack';
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (G.devMode === false && G.cmdHistory[G.cmdHistory.length - 1].includes('unknown'))
+    ? ok('unknown command reported, no state change')
+    : fail('unknown command mishandled');
+
+  // Escape closes back to play
+  G.consoleInput({ code: 'Escape', key: 'Escape' });
+  (G.mode === 'play') ? ok('Escape closes the console') : fail('Escape did not close console');
+
+  // console panel renders into the overlay
+  G.openConsole();
+  G.cmdBuf = 'hello';
+  c.Overlay.clear();
+  G.drawUI();
+  {
+    let text = '';
+    for (let i = 0; i < c.Overlay.data.length; i++) {
+      if (c.Overlay.data[i]) text += String.fromCharCode(c.Overlay.data[i]);
+    }
+    (text.includes('CONSOLE') && text.includes('hello'))
+      ? ok('console panel renders into the glyph grid')
+      : fail('console panel missing from overlay');
+  }
+  G.close();
+}
+
 // ---- 9. crafting ----
 {
   const { Game: G } = c;

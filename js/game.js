@@ -3,12 +3,15 @@
 // no DOM. One keydown layer routes keys by mode; while a panel is open the
 // player is frozen and every key is captured here.
 const Game = {
-  mode: 'play',        // play | inventory | craft | examine
+  mode: 'play',        // play | inventory | craft | examine | console
   inv: new Map(),      // item id -> count
   cursor: 0,
   uiDirty: true,
   toastMsg: '', toastT: 0,
   needSave: false, saveTimer: 0,
+  devMode: false,       // gates debug view toggles (mono/raw) behind a command
+  cmdBuf: '',
+  cmdHistory: [],
 
   init() { this.load(); },
 
@@ -35,6 +38,54 @@ const Game = {
 
   open(mode) { this.mode = mode; this.cursor = 0; this.uiDirty = true; },
   close() { this.mode = 'play'; this.uiDirty = true; },
+
+  // ---- console: text commands, "devmode" gates the debug view toggles ----
+
+  openConsole() { this.cmdBuf = ''; this.mode = 'console'; this.uiDirty = true; },
+
+  // Takes the raw keyboard event, not just the code - it needs the actual
+  // typed character, which the code-only key() routing below doesn't carry.
+  consoleInput(e) {
+    if (e.code === 'Escape') { this.close(); return; }
+    if (e.code === 'Enter') {
+      this.runCommand(this.cmdBuf);
+      this.cmdBuf = '';
+      this.uiDirty = true;
+      return;
+    }
+    if (e.code === 'Backspace') {
+      this.cmdBuf = this.cmdBuf.slice(0, -1);
+      this.uiDirty = true;
+      return;
+    }
+    if (e.key && e.key.length === 1 && this.cmdBuf.length < 60) {
+      this.cmdBuf += e.key;
+      this.uiDirty = true;
+    }
+  },
+
+  runCommand(raw) {
+    const cmd = raw.trim();
+    if (!cmd) return;
+    this.cmdHistory.push('> ' + cmd);
+    switch (cmd.toLowerCase()) {
+      case 'devmode':
+        this.devMode = !this.devMode;
+        this.cmdHistory.push(this.devMode
+          ? 'dev mode on - M/X view toggles unlocked'
+          : 'dev mode off');
+        break;
+      case 'clear':
+        this.cmdHistory.length = 0;
+        break;
+      case 'help':
+        this.cmdHistory.push('commands: devmode, clear, help');
+        break;
+      default:
+        this.cmdHistory.push('unknown command: ' + cmd);
+    }
+    if (this.cmdHistory.length > 40) this.cmdHistory.splice(0, this.cmdHistory.length - 40);
+  },
 
   // ---- input: returns true when the key was consumed ----
 
@@ -199,6 +250,22 @@ const Game = {
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
+    if (this.mode === 'console') this.drawConsole();
+  },
+
+  drawConsole() {
+    const w = Math.min(Overlay.cols - 4, 70);
+    const h = 9;
+    const x0 = 2, y0 = Math.max(1, Overlay.rows - h - 2);
+    for (let i = 0; i < h; i++) Overlay.write(x0, y0 + i, ''.padEnd(w, ' '));
+    Overlay.write(x0, y0, (' CONSOLE' + (this.devMode ? ' [dev]' : '')).padEnd(w, ' '));
+    const rows = h - 2;
+    const hist = this.cmdHistory.slice(-rows);
+    for (let i = 0; i < rows; i++) {
+      const line = hist[i] || '';
+      Overlay.write(x0 + 1, y0 + 1 + i, line.slice(0, w - 2).padEnd(w - 2, ' '));
+    }
+    Overlay.write(x0 + 1, y0 + h - 1, ('> ' + this.cmdBuf + '_').slice(0, w - 2));
   },
 
   canCraft(r) {

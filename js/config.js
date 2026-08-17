@@ -47,9 +47,6 @@ const CFG = {
   // headlamp: camera-attached light so unlit caves are explorable; falls off
   // with distance, only applied to underground hits
   LAMP: 0.6,
-  // UI text sits IN the glyph field, not on a solid chip: this is how much
-  // of the scene survives beneath a UI cell (0 = opaque box, 1 = no backing)
-  UI_CHIP: 0.42,
   // underground ray caps: sun is mostly absent down there, so penumbra
   // fidelity is worth less than frame time
   CAVE_SUN: 8,

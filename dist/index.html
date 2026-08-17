@@ -125,9 +125,6 @@ const CFG = {
   // headlamp: camera-attached light so unlit caves are explorable; falls off
   // with distance, only applied to underground hits
   LAMP: 0.6,
-  // UI text sits IN the glyph field, not on a solid chip: this is how much
-  // of the scene survives beneath a UI cell (0 = opaque box, 1 = no backing)
-  UI_CHIP: 0.42,
   // underground ray caps: sun is mostly absent down there, so penumbra
   // fidelity is worth less than frame time
   CAVE_SUN: 8,
@@ -1030,12 +1027,15 @@ const SPECIES = [
 // no DOM. One keydown layer routes keys by mode; while a panel is open the
 // player is frozen and every key is captured here.
 const Game = {
-  mode: 'play',        // play | inventory | craft | examine
+  mode: 'play',        // play | inventory | craft | examine | console
   inv: new Map(),      // item id -> count
   cursor: 0,
   uiDirty: true,
   toastMsg: '', toastT: 0,
   needSave: false, saveTimer: 0,
+  devMode: false,       // gates debug view toggles (mono/raw) behind a command
+  cmdBuf: '',
+  cmdHistory: [],
 
   init() { this.load(); },
 
@@ -1062,6 +1062,54 @@ const Game = {
 
   open(mode) { this.mode = mode; this.cursor = 0; this.uiDirty = true; },
   close() { this.mode = 'play'; this.uiDirty = true; },
+
+  // ---- console: text commands, "devmode" gates the debug view toggles ----
+
+  openConsole() { this.cmdBuf = ''; this.mode = 'console'; this.uiDirty = true; },
+
+  // Takes the raw keyboard event, not just the code - it needs the actual
+  // typed character, which the code-only key() routing below doesn't carry.
+  consoleInput(e) {
+    if (e.code === 'Escape') { this.close(); return; }
+    if (e.code === 'Enter') {
+      this.runCommand(this.cmdBuf);
+      this.cmdBuf = '';
+      this.uiDirty = true;
+      return;
+    }
+    if (e.code === 'Backspace') {
+      this.cmdBuf = this.cmdBuf.slice(0, -1);
+      this.uiDirty = true;
+      return;
+    }
+    if (e.key && e.key.length === 1 && this.cmdBuf.length < 60) {
+      this.cmdBuf += e.key;
+      this.uiDirty = true;
+    }
+  },
+
+  runCommand(raw) {
+    const cmd = raw.trim();
+    if (!cmd) return;
+    this.cmdHistory.push('> ' + cmd);
+    switch (cmd.toLowerCase()) {
+      case 'devmode':
+        this.devMode = !this.devMode;
+        this.cmdHistory.push(this.devMode
+          ? 'dev mode on - M/X view toggles unlocked'
+          : 'dev mode off');
+        break;
+      case 'clear':
+        this.cmdHistory.length = 0;
+        break;
+      case 'help':
+        this.cmdHistory.push('commands: devmode, clear, help');
+        break;
+      default:
+        this.cmdHistory.push('unknown command: ' + cmd);
+    }
+    if (this.cmdHistory.length > 40) this.cmdHistory.splice(0, this.cmdHistory.length - 40);
+  },
 
   // ---- input: returns true when the key was consumed ----
 
@@ -1226,6 +1274,22 @@ const Game = {
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
+    if (this.mode === 'console') this.drawConsole();
+  },
+
+  drawConsole() {
+    const w = Math.min(Overlay.cols - 4, 70);
+    const h = 9;
+    const x0 = 2, y0 = Math.max(1, Overlay.rows - h - 2);
+    for (let i = 0; i < h; i++) Overlay.write(x0, y0 + i, ''.padEnd(w, ' '));
+    Overlay.write(x0, y0, (' CONSOLE' + (this.devMode ? ' [dev]' : '')).padEnd(w, ' '));
+    const rows = h - 2;
+    const hist = this.cmdHistory.slice(-rows);
+    for (let i = 0; i < rows; i++) {
+      const line = hist[i] || '';
+      Overlay.write(x0 + 1, y0 + 1 + i, line.slice(0, w - 2).padEnd(w - 2, ' '));
+    }
+    Overlay.write(x0 + 1, y0 + h - 1, ('> ' + this.cmdBuf + '_').slice(0, w - 2));
   },
 
   canCraft(r) {
@@ -1327,11 +1391,16 @@ const Player = {
     this.z = World.groundZ(sx, sy);
 
     addEventListener('keydown', e => {
+      // the console wants raw typed characters, not just key codes - route
+      // it before the code-only panel dispatch below
+      if (Game.mode === 'console') { Game.consoleInput(e); e.preventDefault(); return; }
       // the game's modal layer gets every key first; panels capture W/S/E/Q
       if (Game.key(e.code)) { e.preventDefault(); return; }
       this.keys[e.code] = true;
-      if (e.code === 'KeyM') CFG.MONO = !CFG.MONO;
-      if (e.code === 'KeyX') CFG.RAW = !CFG.RAW;
+      if (e.code === 'Enter') { Game.openConsole(); return; }
+      // view toggles are debug tools, locked behind the "devmode" command
+      if (e.code === 'KeyM' && Game.devMode) CFG.MONO = !CFG.MONO;
+      if (e.code === 'KeyX' && Game.devMode) CFG.RAW = !CFG.RAW;
       if (e.code === 'KeyV' && GPURenderer.ok) {
         const sets = Object.keys(GlyphAtlas.SETS);
         const next = sets[(sets.indexOf(CFG.GLYPH_SET) + 1) % sets.length];
@@ -2740,7 +2809,19 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   let dith = bayer4(vec2i(cell)) / R.levels;
   let gi = floor(clamp(tone + dith, 0.0, 0.9999) * R.levels);
   let au = (gi + inCell.x) / R.levels;
-  let cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
+  var cov = textureSample(atlas, samp, vec2f(au, inCell.y)).r;
+
+  // Text overlay: not a layer drawn over the scene, but a substitution of
+  // WHICH character this cell renders. A UI cell looks up the text atlas
+  // instead of the tone-selected glyph atlas, before the shared ink step
+  // below runs - so a letter is shaded exactly like any other glyph in the
+  // field, and a word reads as ascii-art that happens to spell it.
+  let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
+  let code = overlay[ci];
+  if (code >= 32u && code < 127u) {
+    let au2 = (f32(code - 32u) + inCell.x) / 95.0;
+    cov = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
+  }
 
   // Glyph density already encodes brightness — the glyph was picked by
   // luminance. Tinting by luminance as well would apply it twice and squash
@@ -2753,18 +2834,7 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
     ink = texel.rgb / m;
   }
-  var col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
-
-  // Text overlay, embedded in the glyph field: the scene keeps rendering
-  // beneath a UI cell, dimmed just enough for contrast, so panels read as
-  // brighter text woven into the world rather than boxes floating over it.
-  let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
-  let code = overlay[ci];
-  if (code >= 32u && code < 127u) {
-    let au2 = (f32(code - 32u) + inCell.x) / 95.0;
-    let cov2 = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
-    col = mix(col * ${CFG.UI_CHIP}, vec3f(1.0), cov2);
-  }
+  let col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
   return vec4f(col, 1.0);
 }
 `;
@@ -3186,7 +3256,7 @@ const GPURenderer = {
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0, fpsLine = '';
-  const HUD_LINE = 'wasd move · Tab inventory · C craft · E examine · LMB dig · RMB fill · F fullscreen';
+  const HUD_LINE = 'wasd move · Tab inventory · C craft · E examine · Enter console · LMB dig · RMB fill · F fullscreen';
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();
