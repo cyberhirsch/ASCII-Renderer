@@ -1187,7 +1187,9 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   // the scene's own glyph rather than blanking to a box.
   let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
   let code = overlay[ci];
-  if (code > 32u && code < 127u) {
+  if (code == ${CFG.UI_BLANK}u) {
+    cov = 0.0;          // clear air: the gap that sets a word off from the field
+  } else if (code > 32u && code < 127u) {
     let au2 = (f32(code - 32u) + inCell.x) / 95.0;
     cov = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
   }

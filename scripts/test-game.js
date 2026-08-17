@@ -353,6 +353,39 @@ if (c.Fells) {
   G.close();
 }
 
+// ---- 9b. overlay clear air around text ----
+{
+  const O = c.Overlay;
+  const B = O.BLANK;
+  O.clear();
+  // a padded panel line: the blanks must hug the words, not the padding
+  O.write(10, 5, '  INVENTORY   ');
+  const row = 5 * O.cols;
+  const at = x => O.data[row + x];
+  // '  INVENTORY   ' at x=10: word spans 12..20, so blanks sit at 11 and 21
+  (at(11) === B && at(12) === 'I'.charCodeAt(0) && at(20) === 'Y'.charCodeAt(0)
+   && at(21) === B)
+    ? ok('blank cells hug the text, not the padding')
+    : fail(`blank placement wrong: ${at(11)},${at(12)},${at(20)},${at(21)}`);
+  // padding beyond the blanks stays space, so the world still shows there
+  (at(10) === 32 && at(22) === 32)
+    ? ok('padding outside the gap still shows the scene')
+    : fail(`padding overwritten: ${at(10)},${at(22)}`);
+  // an all-space line places no blanks at all
+  O.clear();
+  O.write(4, 6, '     ');
+  let anyBlank = false;
+  for (let i = 0; i < O.data.length; i++) if (O.data[i] === B) anyBlank = true;
+  (!anyBlank) ? ok('a blank line places no clear-air cells')
+              : fail('all-space write emitted stray blanks');
+  // internal spaces are untouched: they keep showing the world
+  O.clear();
+  O.write(3, 7, 'chop  (axe)');
+  (O.data[7 * O.cols + 7] === 32 && O.data[7 * O.cols + 8] === 32)
+    ? ok('spaces inside a line still show the scene')
+    : fail('internal spaces were cleared');
+}
+
 // ---- 10. ground materials ----
 if (c.matAt) {
   const { MATS, matAt, soilDepth, rockMat, oreItem, terrainH } = c;

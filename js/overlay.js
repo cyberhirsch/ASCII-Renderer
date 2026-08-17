@@ -4,6 +4,7 @@
 // renders that character over a dark backing chip.
 const Overlay = {
   cols: 0, rows: 0, data: null, dirty: false,
+  BLANK: CFG.UI_BLANK,   // a cell the glyph pass leaves empty
 
   resize(cols, rows) {
     this.cols = cols; this.rows = rows;
@@ -18,11 +19,23 @@ const Overlay = {
 
   write(x, y, str) {
     if (!this.data || y < 0 || y >= this.rows) return;
+    const row = y * this.cols;
+    const put = (cx, code) => {
+      if (cx >= 0 && cx < this.cols) this.data[row + cx] = code;
+    };
     for (let i = 0; i < str.length; i++) {
-      const cx = x + i;
-      if (cx < 0 || cx >= this.cols) continue;
       const code = str.charCodeAt(i);
-      this.data[y * this.cols + cx] = (code >= 32 && code < 127) ? code : 32;
+      put(x + i, (code >= 32 && code < 127) ? code : 32);
+    }
+    // One cell of clear air on each side of the text itself, so a word never
+    // runs straight into the glyph field. It hugs the trimmed extent, not
+    // the string, so a padded panel line still gets its gap around the words
+    // rather than out at the padding's edge - and spaces inside the line go
+    // on showing the scene.
+    const first = str.search(/\S/);
+    if (first >= 0) {
+      put(x + first - 1, this.BLANK);
+      put(x + str.replace(/\s+$/, '').length, this.BLANK);
     }
     this.dirty = true;
   },

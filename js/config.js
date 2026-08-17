@@ -47,6 +47,10 @@ const CFG = {
   // headlamp: camera-attached light so unlit caves are explorable; falls off
   // with distance, only applied to underground hits
   LAMP: 0.6,
+  // Overlay cell value meaning "render nothing here". 0 is transparent (the
+  // scene's own glyph) and 32 is a space (also the scene's glyph), so clear
+  // air around UI text needs a code of its own.
+  UI_BLANK: 31,
   // underground ray caps: sun is mostly absent down there, so penumbra
   // fidelity is worth less than frame time
   CAVE_SUN: 8,
