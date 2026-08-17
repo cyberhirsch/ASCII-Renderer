@@ -44,6 +44,9 @@ const CFG = {
   TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units
   // caves: view distance underground; rays in cave air stop here and fade out
   CAVE_VIEW: 60,
+  // headlamp: camera-attached light so unlit caves are explorable; falls off
+  // with distance, only applied to underground hits
+  LAMP: 0.6,
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,

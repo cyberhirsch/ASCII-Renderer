@@ -23,6 +23,23 @@ const Player = {
         if (document.fullscreenElement) document.exitFullscreen();
         else document.documentElement.requestFullscreen();
       }
+      // debug: hop into the cave system below, or back to the surface
+      if (e.code === 'KeyG') {
+        const h = World.groundZ(this.x, this.y);
+        if (this.z < h - 1.5) {
+          this.z = h;
+        } else {
+          let found = false;
+          for (let z = -1.5; z > -35; z -= 0.3) {
+            if (caveV(this.x, this.y, z, h) > 0) {
+              const fz = World.walkZ(this.x, this.y, z);
+              if (fz !== null) { this.z = fz; found = true; }
+              break;
+            }
+          }
+          if (!found) console.info('no cave below this spot');
+        }
+      }
     });
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
@@ -43,13 +60,22 @@ const Player = {
   },
 
   blocked(x, y) {
-    // water and steep terrain
+    // floor via the density field: works on the surface and underground
+    const fz = World.walkZ(x, y, this.z);
+    if (fz === null) return true;
+    if (Math.abs(fz - this.z) > 1.0) return true;
+    // headroom: refuse pinched passages
+    for (let dz = 0.5; dz <= 1.7; dz += 0.4) {
+      if (solidD(x, y, fz + dz) >= 0) return true;
+    }
     const h = World.groundZ(x, y);
-    if (h < CFG.SEA_LEVEL + 0.05) return true;
-    if (Math.abs(h - this.z) > 1.0) return true;
-    // tree trunks: circle test against nearby hash-placed trees
-    const near = World.trunkNear(x, y, 1);
-    if (near && near.dist < near.tree.trunkR + 0.22) return true;
+    const underground = this.z < h - 1.5;
+    if (!underground) {
+      // water and tree trunks are surface concerns
+      if (h < CFG.SEA_LEVEL + 0.05) return true;
+      const near = World.trunkNear(x, y, 1);
+      if (near && near.dist < near.tree.trunkR + 0.22) return true;
+    }
     return false;
   },
 
@@ -76,8 +102,8 @@ const Player = {
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
     }
-    // ride the terrain, smoothed
-    const gz = World.groundZ(this.x, this.y);
-    this.z += (gz - this.z) * Math.min(1, dt * 10);
+    // ride the floor (terrain or cave), smoothed
+    const gz = World.walkZ(this.x, this.y, this.z);
+    if (gz !== null) this.z += (gz - this.z) * Math.min(1, dt * 10);
   },
 };

@@ -7,6 +7,37 @@ const World = {
 
   isWater(x, y) { return terrainH(x, y) < CFG.SEA_LEVEL; },
 
+  // Walkable floor at (x, y) near zRef: march the density field down from
+  // just above head height to the first solid, then refine the boundary.
+  // One code path covers open terrain, cave floors, entrance ramps, and
+  // (later) dug pits. Returns null when there is no standable floor within
+  // a step of zRef - callers treat that as blocked.
+  walkZ(x, y, zRef) {
+    let z = zRef + 1.4;
+    // a start inside rock means a wall taller than a legal step: descend to
+    // air first, give up quickly if there is none
+    let guard = 0;
+    while (solidD(x, y, z) >= 0) {
+      z -= 0.15;
+      if (++guard > 12) return null;
+    }
+    const zMin = zRef - 4.0;
+    let prev = z;
+    while (z > zMin) {
+      z -= 0.15;
+      if (solidD(x, y, z) >= 0) {
+        let a = z, b = prev;
+        for (let i = 0; i < 8; i++) {
+          const m = (a + b) / 2;
+          if (solidD(x, y, m) >= 0) a = m; else b = m;
+        }
+        return (a + b) / 2;
+      }
+      prev = z;
+    }
+    return null;
+  },
+
   // nearest tree trunk within `reach` cells of (x, y), or null
   trunkNear(x, y, reach) {
     const cx = Math.floor(x), cy = Math.floor(y);

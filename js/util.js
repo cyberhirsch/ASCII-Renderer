@@ -60,19 +60,67 @@ const CAVES = {
   STEPS: 200,    // primary-ray march budget (STEP * STEPS = CAVE_VIEW)
   TSTEP: 0.55,   // occlusion-ray march step through cave air
   TSTEPS: 14,    // occlusion-ray march budget
+  BAND: 12,      // depth-band height; band k spans [k*BAND, k*BAND+BAND)
+  TOP: -1,       // no natural void above this z (highest ceiling is -1.4)
+  BOT: -36,      // deepest band floor for the slice; extensible downward
+  MASK_F: 0.006, // cave-region mask frequency (regions ~150 u across)
+  MASK_LO: 0.62, // mask gate: smoothstep(LO, HI, noise)
+  MASK_HI: 0.70,
+  FLOOR_F: 0.05, // floor ramp frequency; FLOOR_A * FLOOR_F * 1.5 bounds the
+  FLOOR_A: 3.0,  // slope (~0.23 = 13 deg) - walkability is by construction
+  PASS_F: 0.045, // passage isoline frequency (winding at ~20 u scale)
+  PASS_F2: 0.062,// second isoline family; crossings knit the network together
+  CHAM_F: 0.02,  // chamber noise frequency
+  PASS_W: 0.06,  // passage half-width in isoline value units
+  CHAM_W: 0.15,  // extra half-width inside chambers
+  PASS_SCALE: 15,// value units -> approx world units (1 / (1.5 * PASS_F))
 };
 
-// Cave void field: positive inside carved space, negative in rock and in the
-// open air above ground. Mirror of WGSL caveV. Stub until the cave phase
-// lands; -1e9 makes solidD degenerate to the plain heightfield exactly.
-function caveV(x, y, z) {
-  return -1e9;
+// Band floor: a low-frequency ramp whose slope is bounded by construction.
+// Mirror of WGSL caveFloor. KEEP IN SYNC.
+function caveFloor(k, x, y) {
+  const s = CFG.SEED >>> 0;
+  const bs = (s ^ ((8 + k) * 0x9E37)) >>> 0;
+  return k * CAVES.BAND + 1.6 +
+         vn2(x * CAVES.FLOOR_F, y * CAVES.FLOOR_F, (bs ^ 0x0F1D) >>> 0) *
+         CAVES.FLOOR_A;
+}
+
+// Cave void field: positive inside carved space (roughly world-unit
+// magnitude), very negative elsewhere. Passages are the near-median isolines
+// of a per-band value noise - the median level set of a random field
+// percolates, so the network is connected across the infinite plane. gz is
+// terrainH(x, y), passed in because every caller already has it.
+// Mirror of WGSL caveV. KEEP IN SYNC.
+function caveV(x, y, z, gz) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return -1e9;
+  const s = CFG.SEED >>> 0;
+  const m = vn2(x * CAVES.MASK_F, y * CAVES.MASK_F, (s ^ 0x33AA) >>> 0);
+  const gate = smoothstep(CAVES.MASK_LO, CAVES.MASK_HI, m) *
+               smoothstep(CFG.SEA_LEVEL + 0.5, CFG.SEA_LEVEL + 1.5, gz);
+  if (gate <= 0.001) return -1e9;
+  const k = Math.floor(z / CAVES.BAND);
+  const bs = (s ^ ((8 + k) * 0x9E37)) >>> 0;
+  const fz = caveFloor(k, x, y);
+  // two isoline families: each percolates on its own, and their crossings
+  // knit isolated contour rings into one network with natural junctions
+  const n1 = vn2(x * CAVES.PASS_F, y * CAVES.PASS_F, (bs ^ 0x5EA5) >>> 0);
+  const n2 = vn2(x * CAVES.PASS_F2, y * CAVES.PASS_F2, (bs ^ 0x7A3B) >>> 0);
+  const iso = Math.min(Math.abs(n1 - 0.5), Math.abs(n2 - 0.5));
+  const c = vn2(x * CAVES.CHAM_F, y * CAVES.CHAM_F, (bs ^ 0xC4A6) >>> 0);
+  const wide = smoothstep(0.60, 0.85, c);
+  const w = (CAVES.PASS_W + wide * CAVES.CHAM_W) * gate;
+  const ceilH = 2.6 + wide * 3.4;
+  const h = (w - iso) * CAVES.PASS_SCALE;
+  const vz = Math.min(z - fz, fz + ceilH - z);
+  return Math.min(h, vz);
 }
 
 // Layered density, the one authority on what is solid: positive in rock,
 // negative in air. Mirror of WGSL solidD. KEEP IN SYNC.
 function solidD(x, y, z) {
-  return Math.min(terrainH(x, y) - z, -caveV(x, y, z));
+  const gz = terrainH(x, y);
+  return Math.min(gz - z, -caveV(x, y, z, gz));
 }
 
 // -------- tree placement — mirror of WGSL treeAt --------

@@ -115,13 +115,49 @@ fn terrainN(p : vec2f) -> vec3f {
 const CAVE_VIEW : f32 = ${CFG.CAVE_VIEW};   // view distance underground
 const CAVE_STEP : f32 = ${CAVES.STEP};      // primary march step in cave air
 const CAVE_TSTEP : f32 = ${CAVES.TSTEP};    // occlusion march step in cave air
+const CAVE_BAND : f32 = ${CAVES.BAND};      // depth-band height
+const CAVE_TOP : f32 = ${CAVES.TOP};        // no natural void above this z
+const CAVE_BOT : f32 = ${CAVES.BOT};        // deepest band floor
+const CAVE_LAMP : f32 = ${CFG.LAMP};        // camera headlamp for cave hits
 
-fn caveV(p : vec3f) -> f32 {
-  return -1.0e9;
+// band floor: low-frequency ramp, slope bounded by construction
+fn caveFloor(k : i32, q : vec2f) -> f32 {
+  let bs = seedU() ^ (u32(8 + k) * 0x9E37u);
+  return f32(k) * CAVE_BAND + 1.6 +
+         vn2(q * ${CAVES.FLOOR_F}, bs ^ 0x0F1Du) * ${CAVES.FLOOR_A};
+}
+
+// Cave void field: positive inside carved space, very negative elsewhere.
+// Passages are near-median isolines of per-band value noise - the median
+// level set of a random field percolates, so the network is connected across
+// the infinite plane. gz = terrainH(p.xy), every caller has it already.
+fn caveV(p : vec3f, gz : f32) -> f32 {
+  if (p.z >= CAVE_TOP || p.z < CAVE_BOT) { return -1.0e9; }
+  let s = seedU();
+  let m = vn2(p.xy * ${CAVES.MASK_F}, s ^ 0x33AAu);
+  let gate = smoothstep(${CAVES.MASK_LO}, ${CAVES.MASK_HI}, m)
+           * smoothstep(U.seaLevel + 0.5, U.seaLevel + 1.5, gz);
+  if (gate <= 0.001) { return -1.0e9; }
+  let k = i32(floor(p.z / CAVE_BAND));
+  let bs = s ^ (u32(8 + k) * 0x9E37u);
+  let fz = caveFloor(k, p.xy);
+  // two isoline families: each percolates on its own, and their crossings
+  // knit isolated contour rings into one network with natural junctions
+  let n1 = vn2(p.xy * ${CAVES.PASS_F}, bs ^ 0x5EA5u);
+  let n2 = vn2(p.xy * ${CAVES.PASS_F2}, bs ^ 0x7A3Bu);
+  let iso = min(abs(n1 - 0.5), abs(n2 - 0.5));
+  let c = vn2(p.xy * ${CAVES.CHAM_F}, bs ^ 0xC4A6u);
+  let wide = smoothstep(0.60, 0.85, c);
+  let w = (${CAVES.PASS_W} + wide * ${CAVES.CHAM_W}) * gate;
+  let ceilH = 2.6 + wide * 3.4;
+  let h = (w - iso) * ${CAVES.PASS_SCALE};
+  let vz = min(p.z - fz, fz + ceilH - p.z);
+  return min(h, vz);
 }
 
 fn solidD(p : vec3f) -> f32 {
-  return min(terrainH(p.xy) - p.z, -caveV(p));
+  let gz = terrainH(p.xy);
+  return min(gz - p.z, -caveV(p, gz));
 }
 
 // gradient normal of the density field, for carved surfaces where the
@@ -153,7 +189,8 @@ fn heightMarch(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
         let pm = ro + rd * m;
         if (pm.z - terrainH(pm.xy) < 0.0) { b = m; } else { a = m; }
       }
-      if (caveV(ro + rd * b) > 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
+      let pb = ro + rd * b;
+      if (caveV(pb, terrainH(pb.xy)) > 0.0) { return vec2f(-2.0, (a + b) * 0.5); }
       return vec2f((a + b) * 0.5, 0.0);
     }
     tPrev = t;
@@ -163,7 +200,7 @@ fn heightMarch(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
 }
 
 // fixed-step density march through cave air. Returns (t, 0) on a hit,
-// (-1, 0) when the budget or view distance runs out underground, and
+// (-1, tEnd) when the budget or view distance runs out underground, and
 // (-3, tEnd) when the ray resurfaces into open air - the caller resumes the
 // heightfield march from tEnd, so distant hills stay visible through a mouth.
 fn marchCave(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
@@ -172,7 +209,9 @@ fn marchCave(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
   for (var i = 0; i < ${CAVES.STEPS}; i = i + 1) {
     if (t > tMax) { break; }
     let p = ro + rd * t;
-    if (solidD(p) > 0.0) {
+    let gzp = terrainH(p.xy);
+    let v = caveV(p, gzp);
+    if (min(gzp - p.z, -v) > 0.0) {
       var a = tPrev;
       var b = t;
       for (var j = 0; j < 6; j = j + 1) {
@@ -181,20 +220,21 @@ fn marchCave(ro : vec3f, rd : vec3f, tStart : f32, tMax : f32) -> vec2f {
       }
       return vec2f((a + b) * 0.5, 0.0);
     }
-    if (p.z - terrainH(p.xy) > 0.5 && caveV(p) <= 0.0) { return vec2f(-3.0, t); }
+    if (p.z - gzp > 0.5 && v <= 0.0) { return vec2f(-3.0, t); }
     tPrev = t;
     t = t + CAVE_STEP;
   }
-  return vec2f(-1.0, 0.0);
+  return vec2f(-1.0, t);
 }
 
 // unified march: alternate heightfield and density phases as the ray crosses
 // in and out of carved space (WGSL has no recursion; 4 phases cover a view
-// through a mouth and out another)
-fn terrainT(ro : vec3f, rd : vec3f, tMax : f32) -> f32 {
+// through a mouth and out another). A ray whose budget dies in cave air
+// returns that depth as a pseudo-hit - the shader fogs it to black, so
+// tunnels end in darkness rather than sky.
+fn terrainT(ro : vec3f, rd : vec3f, tMax : f32, startCave : bool) -> f32 {
   var t = 0.02;
-  var mode = 0;
-  if (ro.z < terrainH(ro.xy) && caveV(ro) > 0.0) { mode = 1; }
+  var mode = select(0, 1, startCave);
   for (var phase = 0; phase < 4; phase = phase + 1) {
     if (mode == 0) {
       let r = heightMarch(ro, rd, t, tMax);
@@ -205,7 +245,7 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32) -> f32 {
     let r = marchCave(ro, rd, t, min(tMax, t + CAVE_VIEW));
     if (r.x >= 0.0) { return r.x; }
     if (r.x < -2.5) { t = r.y; mode = 0; continue; }
-    return -1.0;
+    return r.y;
   }
   return -1.0;
 }
@@ -417,14 +457,17 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
   // when the budget ends are blocked - deep caves see no sky. A ray that
   // outruns maxT while still in cave air is free: nothing within radius.
   var t0 = 0.2;
-  if (ro.z < terrainH(ro.xy) && caveV(ro) > 0.0) {
+  let oGz = terrainH(ro.xy);
+  if (ro.z < oGz && caveV(ro, oGz) > 0.0) {
     var t = 0.15;
     var escaped = false;
     for (var i = 0; i < ${CAVES.TSTEPS}; i = i + 1) {
       if (t > maxT) { return 1.0; }
       let p = ro + rd * t;
-      if (solidD(p) > 0.0) { return 0.0; }
-      if (p.z - terrainH(p.xy) > 0.3) { escaped = true; t0 = t; break; }
+      let gzp = terrainH(p.xy);
+      let v = caveV(p, gzp);
+      if (min(gzp - p.z, -v) > 0.0) { return 0.0; }
+      if (p.z - gzp > 0.3) { escaped = true; t0 = t; break; }
       t = t + CAVE_TSTEP;
     }
     if (!escaped) { return 0.0; }
@@ -437,8 +480,9 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       if (t > maxT) { break; }
       let p = ro + rd * t;
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
-      let d = p.z - terrainH(p.xy);
-      if (d < 0.0 && caveV(p) <= 0.0) { return 0.0; }
+      let gzp = terrainH(p.xy);
+      let d = p.z - gzp;
+      if (d < 0.0 && caveV(p, gzp) <= 0.0) { return 0.0; }
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
@@ -563,23 +607,28 @@ struct Hit {
   t : f32, n : vec3f, albedo : vec3f, ok : bool,
   canopy : bool, tExit : f32, alpha : f32, emissive : f32,
   spec : f32,   // specular weight; zero for everything but water and metal
+  cave : bool,  // underground hit: headlamp applies, fog goes to black
 };
 
 fn trace(ro : vec3f, rd : vec3f) -> Hit {
   var hit : Hit;
   hit.ok = false; hit.canopy = false; hit.tExit = 0.0;
   hit.alpha = 1.0; hit.emissive = 0.0; hit.spec = 0.0;
+  hit.cave = false;
   hit.t = U.maxDist;
 
   // terrain
-  let tT = terrainT(ro, rd, U.maxDist);
+  let oGz = terrainH(ro.xy);
+  let oCave = ro.z < oGz && caveV(ro, oGz) > 0.0;
+  let tT = terrainT(ro, rd, U.maxDist, oCave);
   if (tT > 0.0) {
     hit.t = tT;
     let p = ro + rd * tT;
-    if (caveV(p) > -1.0) {
+    if (caveV(p, terrainH(p.xy)) > -1.0) {
       // carved surface: heightfield normal is meaningless here
       hit.n = solidN(p);
       hit.albedo = vec3f(0.44, 0.41, 0.38);
+      hit.cave = true;
     } else {
       hit.n = terrainN(p.xy);
       // grass on flats, rock on slopes, sand near the waterline
@@ -607,40 +656,45 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         hit.emissive = 0.08 + ripple * 0.10;
         hit.spec = 1.0;
         hit.canopy = false;
+        hit.cave = false;
         hit.ok = true;
       }
     }
   }
 
-  // trees
-  let ob = traceTrees(ro, rd, hit.t);
-  if (ob.ok && ob.t < hit.t) {
-    hit.t = ob.t;
-    hit.n = ob.n;
-    hit.albedo = ob.albedo;
-    hit.canopy = ob.canopy;
-    hit.tExit = ob.tExit;
-    hit.alpha = ob.alpha;
-    hit.emissive = ob.emissive;
-    hit.spec = 0.0;
-    hit.ok = true;
-  }
+  // trees and entities live on the surface: a ray that starts underground
+  // and dies underground cannot reach them, so skip the whole walk
+  if (!(oCave && hit.cave)) {
+    let ob = traceTrees(ro, rd, hit.t);
+    if (ob.ok && ob.t < hit.t) {
+      hit.t = ob.t;
+      hit.n = ob.n;
+      hit.albedo = ob.albedo;
+      hit.canopy = ob.canopy;
+      hit.tExit = ob.tExit;
+      hit.alpha = ob.alpha;
+      hit.emissive = ob.emissive;
+      hit.spec = 0.0;
+      hit.cave = false;
+      hit.ok = true;
+    }
 
-  // entities: articulated creatures (none live yet; machinery kept)
-  let n = i32(U.entCount);
-  for (var i = 0; i < n; i = i + 1) {
-    let e0 = ents[i * 2];
-    let e1 = ents[i * 2 + 1];
-    let pos = e0.xy;
-    let ca = cos(e0.z);
-    let sa = sin(e0.z);
-    let gz = e1.x;
-    let hB = hitOBB(ro, rd, vec3f(pos, gz + 0.6), vec3f(0.4, 0.4, 0.6), ca, sa);
-    if (hB.x > 0.0 && hB.x < hit.t) {
-      hit.t = hB.x; hit.n = hB.yzw;
-      hit.albedo = vec3f(0.6, 0.6, 0.65);
-      hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0;
-      hit.spec = 0.0; hit.ok = true;
+    // entities: articulated creatures (none live yet; machinery kept)
+    let n = i32(U.entCount);
+    for (var i = 0; i < n; i = i + 1) {
+      let e0 = ents[i * 2];
+      let e1 = ents[i * 2 + 1];
+      let pos = e0.xy;
+      let ca = cos(e0.z);
+      let sa = sin(e0.z);
+      let gz = e1.x;
+      let hB = hitOBB(ro, rd, vec3f(pos, gz + 0.6), vec3f(0.4, 0.4, 0.6), ca, sa);
+      if (hB.x > 0.0 && hB.x < hit.t) {
+        hit.t = hB.x; hit.n = hB.yzw;
+        hit.albedo = vec3f(0.6, 0.6, 0.65);
+        hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0;
+        hit.spec = 0.0; hit.cave = false; hit.ok = true;
+      }
     }
   }
   return hit;
@@ -699,8 +753,20 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
       lit = lit + U.sunCol * spec * 0.75 * sun * h.spec;
     }
 
+    // camera headlamp, cave hits only: sunless passages stay explorable
+    if (h.cave) {
+      lit = lit + h.albedo *
+            (CAVE_LAMP * exp(-dHit * 0.18) * max(dot(h.n, -rd), 0.0));
+    }
+
+    // fog: outdoors fades to sky; underground fades to darkness over the
+    // shorter cave view distance, so tunnels end in black, not daylight
     let fog = clamp(dHit / U.maxDist, 0.0, 1.0);
-    let shaded = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
+    var shaded = mix(lit, shadeSky(rd) * 1.02, pow(fog, 1.5));
+    if (h.cave) {
+      let fogC = clamp(dHit / CAVE_VIEW, 0.0, 1.0);
+      shaded = mix(lit, vec3f(0.0), pow(fogC, 1.5));
+    }
 
     if (h.canopy) {
       col = col + throughput * h.alpha * shaded;
