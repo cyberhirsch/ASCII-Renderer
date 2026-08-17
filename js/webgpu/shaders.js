@@ -465,12 +465,13 @@ fn shadeSky(rd : vec3f) -> vec3f {
 struct Hit {
   t : f32, n : vec3f, albedo : vec3f, ok : bool,
   canopy : bool, tExit : f32, alpha : f32, emissive : f32,
+  spec : f32,   // specular weight; zero for everything but water and metal
 };
 
 fn trace(ro : vec3f, rd : vec3f) -> Hit {
   var hit : Hit;
   hit.ok = false; hit.canopy = false; hit.tExit = 0.0;
-  hit.alpha = 1.0; hit.emissive = 0.0;
+  hit.alpha = 1.0; hit.emissive = 0.0; hit.spec = 0.0;
   hit.t = U.maxDist;
 
   // terrain
@@ -501,6 +502,7 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         hit.n = normalize(vec3f((ripple - 0.5) * 0.14, (ripple2 - 0.5) * 0.14, 1.0));
         hit.albedo = mix(vec3f(0.10, 0.17, 0.27), vec3f(0.30, 0.44, 0.58), ripple);
         hit.emissive = 0.08 + ripple * 0.10;
+        hit.spec = 1.0;
         hit.canopy = false;
         hit.ok = true;
       }
@@ -517,6 +519,7 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
     hit.tExit = ob.tExit;
     hit.alpha = ob.alpha;
     hit.emissive = ob.emissive;
+    hit.spec = 0.0;
     hit.ok = true;
   }
 
@@ -533,7 +536,8 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
     if (hB.x > 0.0 && hB.x < hit.t) {
       hit.t = hB.x; hit.n = hB.yzw;
       hit.albedo = vec3f(0.6, 0.6, 0.65);
-      hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0; hit.ok = true;
+      hit.canopy = false; hit.alpha = 1.0; hit.emissive = 0.0;
+      hit.spec = 0.0; hit.ok = true;
     }
   }
   return hit;
@@ -585,10 +589,11 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
           (U.sunI * ndl * mix(U.shadowK, 1.0, sun));
     lit = lit + h.albedo * U.sunCol * h.emissive;
 
-    if (sun > 0.0 && !h.canopy) {
+    // specular only where the material reflects: water now, metal later
+    if (sun > 0.0 && h.spec > 0.0) {
       let r = reflect(-U.sunDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 48.0);
-      lit = lit + U.sunCol * spec * 0.75 * sun;
+      lit = lit + U.sunCol * spec * 0.75 * sun * h.spec;
     }
 
     let fog = clamp(dHit / U.maxDist, 0.0, 1.0);

@@ -5,7 +5,11 @@ const CFG = {
   EYE: 1.55,          // camera height above ground
   SEED: 8151623,      // world seed; MUST stay below 2^24 so the f32 uniform
                       // carries it exactly and CPU and GPU agree on the world
-  // rendering
+  // rendering. Character cells are sized like a terminal's: monospace glyphs
+  // are roughly 0.55x as wide as tall, so cells are taller than wide - and
+  // bigger overall, which is both the look and far fewer rays.
+  CELL_W: 12,         // CSS px per cell, horizontal
+  CELL_H: 22,         // CSS px per cell, vertical
   MONO: true,         // uniform grayscale (M toggles)
   SUN_COL: [1.00, 0.86, 0.46],
   SUN_I: 1.55,

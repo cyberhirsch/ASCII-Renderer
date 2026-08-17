@@ -2,7 +2,7 @@
 // glyph-mapped upscale. This is the only renderer.
 const GPURenderer = {
   ok: false, device: null, ctx: null,
-  cols: 0, rows: 0, cellPx: 10,
+  cols: 0, rows: 0,
   reason: '',
 
   async init() {
@@ -81,9 +81,9 @@ const GPURenderer = {
   // (Re)build the glyph atlas texture. Safe to call at runtime; the render
   // bind group is recreated because the texture object changes.
   buildAtlas(setName) {
-    const atlas = GlyphAtlas.build(setName, this.cellDev);
+    const atlas = GlyphAtlas.build(setName, this.cellW, this.cellH);
     this.atlasCell = atlas.cell;
-    const text = TextAtlas.build(this.cellDev);
+    const text = TextAtlas.build(this.cellW, this.cellH);
     if (this.textTex) this.textTex.destroy();
     this.textTex = this.device.createTexture({
       size: [text.canvas.width, text.canvas.height],
@@ -141,15 +141,16 @@ const GPURenderer = {
     const canvas = document.getElementById('screen');
     const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
     this.dpr = dpr;
-    this.cellDev = Math.max(4, Math.round(this.cellPx * dpr));
+    this.cellW = Math.max(4, Math.round(CFG.CELL_W * dpr));
+    this.cellH = Math.max(6, Math.round(CFG.CELL_H * dpr));
 
-    this.cols = Math.max(40, Math.floor((innerWidth * dpr) / this.cellDev));
-    this.rows = Math.max(24, Math.floor((innerHeight * dpr) / this.cellDev));
+    this.cols = Math.max(40, Math.floor((innerWidth * dpr) / this.cellW));
+    this.rows = Math.max(20, Math.floor((innerHeight * dpr) / this.cellH));
 
     // exact whole number of cells, then displayed at exactly that many
     // device pixels so nothing is rescaled
-    canvas.width = this.cols * this.cellDev;
-    canvas.height = this.rows * this.cellDev;
+    canvas.width = this.cols * this.cellW;
+    canvas.height = this.rows * this.cellH;
     canvas.style.width = (canvas.width / dpr) + 'px';
     canvas.style.height = (canvas.height / dpr) + 'px';
   },
@@ -190,11 +191,12 @@ const GPURenderer = {
   },
 
   handleResize() {
-    const oc = this.cols, or = this.rows, ocell = this.cellDev;
+    const oc = this.cols, or = this.rows;
+    const ow = this.cellW, oh = this.cellH;
     this.resize();
     if (!this.ok) return;
     // a changed cell size means the atlas is no longer 1:1 with the display
-    if (this.cellDev !== ocell) { this.buildAtlas(CFG.GLYPH_SET); return; }
+    if (this.cellW !== ow || this.cellH !== oh) { this.buildAtlas(CFG.GLYPH_SET); return; }
     if (this.cols !== oc || this.rows !== or) this.allocTargets();
   },
 
@@ -216,7 +218,7 @@ const GPURenderer = {
     const sx = Math.cos(CFG.SUN_AZ), sy = Math.sin(CFG.SUN_AZ), sz = Math.tan(CFG.SUN_EL);
     const il = 1 / Math.hypot(sx, sy, sz);
     const tanX = CFG.PLANE_LEN;
-    const tanY = tanX * (this.rows / this.cols);
+    const tanY = tanX * (this.rows * this.cellH) / (this.cols * this.cellW);
 
     const u = new Float32Array(48);
     u[0] = Player.x;  u[1] = Player.y;
