@@ -41,6 +41,7 @@ const Game = {
   key(code) {
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
+      if (code === 'KeyC') { this.open('craft'); return true; }
       if (code === 'KeyE') { this.examine(); return true; }
       return false;
     }
@@ -59,6 +60,15 @@ const Game = {
   },
 
   confirm() {
+    if (this.mode === 'craft') {
+      const n = RECIPES.length;
+      const r = RECIPES[((this.cursor % n) + n) % n];
+      if (!this.canCraft(r)) { this.toast('missing ingredients'); return; }
+      for (const [id, cnt] of Object.entries(r.needs)) this.take(id, cnt);
+      this.give(r.out, 1);
+      this.toast('crafted: ' + ITEMS[r.out].name);
+      return;
+    }
     if (this.mode === 'examine' && this.actions.length) {
       const n = this.actions.length;
       const i = ((this.cursor % n) + n) % n;
@@ -188,6 +198,32 @@ const Game = {
     }
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
+    if (this.mode === 'craft') this.drawCraft();
+  },
+
+  canCraft(r) {
+    for (const [id, cnt] of Object.entries(r.needs)) {
+      if (this.count(id) < cnt) return false;
+    }
+    return true;
+  },
+
+  drawCraft() {
+    const lines = ['CRAFTING', ''];
+    const n = RECIPES.length;
+    const cur = ((this.cursor % n) + n) % n;
+    for (let i = 0; i < n; i++) {
+      const r = RECIPES[i];
+      const needs = Object.entries(r.needs)
+        .map(([id, cnt]) => cnt + ' ' + ITEMS[id].name).join(', ');
+      const owned = this.count(r.out) ? '  (have ' + this.count(r.out) + ')' : '';
+      const mark = this.canCraft(r) ? '' : '  - missing';
+      lines.push((i === cur ? '> ' : '  ') +
+        ITEMS[r.out].name.padEnd(12) + needs + mark + owned);
+    }
+    lines.push('');
+    lines.push('[W/S] choose  [E] craft  [Q] close');
+    this.panel(lines);
   },
 
   drawExamine() {

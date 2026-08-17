@@ -1010,6 +1010,7 @@ const Game = {
   key(code) {
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
+      if (code === 'KeyC') { this.open('craft'); return true; }
       if (code === 'KeyE') { this.examine(); return true; }
       return false;
     }
@@ -1028,6 +1029,15 @@ const Game = {
   },
 
   confirm() {
+    if (this.mode === 'craft') {
+      const n = RECIPES.length;
+      const r = RECIPES[((this.cursor % n) + n) % n];
+      if (!this.canCraft(r)) { this.toast('missing ingredients'); return; }
+      for (const [id, cnt] of Object.entries(r.needs)) this.take(id, cnt);
+      this.give(r.out, 1);
+      this.toast('crafted: ' + ITEMS[r.out].name);
+      return;
+    }
     if (this.mode === 'examine' && this.actions.length) {
       const n = this.actions.length;
       const i = ((this.cursor % n) + n) % n;
@@ -1157,6 +1167,32 @@ const Game = {
     }
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
+    if (this.mode === 'craft') this.drawCraft();
+  },
+
+  canCraft(r) {
+    for (const [id, cnt] of Object.entries(r.needs)) {
+      if (this.count(id) < cnt) return false;
+    }
+    return true;
+  },
+
+  drawCraft() {
+    const lines = ['CRAFTING', ''];
+    const n = RECIPES.length;
+    const cur = ((this.cursor % n) + n) % n;
+    for (let i = 0; i < n; i++) {
+      const r = RECIPES[i];
+      const needs = Object.entries(r.needs)
+        .map(([id, cnt]) => cnt + ' ' + ITEMS[id].name).join(', ');
+      const owned = this.count(r.out) ? '  (have ' + this.count(r.out) + ')' : '';
+      const mark = this.canCraft(r) ? '' : '  - missing';
+      lines.push((i === cur ? '> ' : '  ') +
+        ITEMS[r.out].name.padEnd(12) + needs + mark + owned);
+    }
+    lines.push('');
+    lines.push('[W/S] choose  [E] craft  [Q] close');
+    this.panel(lines);
   },
 
   drawExamine() {
@@ -1349,8 +1385,10 @@ const Player = {
     if ((this.mouse[0] || this.mouse[2]) && this.digCd <= 0) {
       const hit = this.aim();
       if (hit) {
+        // a pick cuts a wider scoop
+        const digR = Game.count('pick') > 0 ? 1.6 : CFG.DIG_R;
         if (this.mouse[0]) {
-          Edits.splat(hit[0], hit[1], hit[2], CFG.DIG_R, -100);
+          Edits.splat(hit[0], hit[1], hit[2], digR, -100);
           // dug rock yields stone; a pick loosens more of it
           const n = Game.count('pick') > 0 ? 2 : 1;
           Game.give('stone', n);
@@ -1360,9 +1398,9 @@ const Player = {
           const fy = hit[1] - hit[4] * 0.6;
           const fz = hit[2] - hit[5] * 0.6;
           const hd = Math.hypot(fx - this.x, fy - this.y);
-          const overlap = hd < CFG.DIG_R + 0.35 &&
-            fz > this.z - CFG.DIG_R && fz < this.z + 1.8 + CFG.DIG_R;
-          if (!overlap) Edits.splat(fx, fy, fz, CFG.DIG_R, 100);
+          const overlap = hd < digR + 0.35 &&
+            fz > this.z - digR && fz < this.z + 1.8 + digR;
+          if (!overlap) Edits.splat(fx, fy, fz, digR, 100);
         }
         this.digCd = 0.15;
       }
@@ -3079,7 +3117,7 @@ const GPURenderer = {
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0, fpsLine = '';
-  const HUD_LINE = 'wasd move · Tab inventory · E examine · LMB dig · RMB fill · G cave hop · F fullscreen';
+  const HUD_LINE = 'wasd move · Tab inventory · C craft · E examine · LMB dig · RMB fill · F fullscreen';
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();

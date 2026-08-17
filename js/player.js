@@ -127,8 +127,10 @@ const Player = {
     if ((this.mouse[0] || this.mouse[2]) && this.digCd <= 0) {
       const hit = this.aim();
       if (hit) {
+        // a pick cuts a wider scoop
+        const digR = Game.count('pick') > 0 ? 1.6 : CFG.DIG_R;
         if (this.mouse[0]) {
-          Edits.splat(hit[0], hit[1], hit[2], CFG.DIG_R, -100);
+          Edits.splat(hit[0], hit[1], hit[2], digR, -100);
           // dug rock yields stone; a pick loosens more of it
           const n = Game.count('pick') > 0 ? 2 : 1;
           Game.give('stone', n);
@@ -138,9 +140,9 @@ const Player = {
           const fy = hit[1] - hit[4] * 0.6;
           const fz = hit[2] - hit[5] * 0.6;
           const hd = Math.hypot(fx - this.x, fy - this.y);
-          const overlap = hd < CFG.DIG_R + 0.35 &&
-            fz > this.z - CFG.DIG_R && fz < this.z + 1.8 + CFG.DIG_R;
-          if (!overlap) Edits.splat(fx, fy, fz, CFG.DIG_R, 100);
+          const overlap = hd < digR + 0.35 &&
+            fz > this.z - digR && fz < this.z + 1.8 + digR;
+          if (!overlap) Edits.splat(fx, fy, fz, digR, 100);
         }
         this.digCd = 0.15;
       }

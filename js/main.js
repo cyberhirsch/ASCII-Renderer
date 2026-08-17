@@ -28,7 +28,7 @@
 
   let last = performance.now();
   let fpsAcc = 0, fpsN = 0, fpsLine = '';
-  const HUD_LINE = 'wasd move · Tab inventory · E examine · LMB dig · RMB fill · G cave hop · F fullscreen';
+  const HUD_LINE = 'wasd move · Tab inventory · C craft · E examine · LMB dig · RMB fill · F fullscreen';
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();

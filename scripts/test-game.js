@@ -252,5 +252,27 @@ if (c.Fells) {
   }
 }
 
+// ---- 9. crafting ----
+{
+  const { Game: G } = c;
+  G.inv.clear();
+  G.open('craft');
+  G.cursor = 0;                    // axe: 2 wood + 1 stone
+  G.confirm();
+  (G.count('axe') === 0 && G.toastMsg.includes('missing'))
+    ? ok('craft refuses without ingredients')
+    : fail('crafted from nothing');
+  G.give('wood', 2); G.give('stone', 1);
+  G.confirm();
+  (G.count('axe') === 1 && G.count('wood') === 0 && G.count('stone') === 0)
+    ? ok('craft consumes ingredients and yields the axe')
+    : fail(`craft math wrong: axe=${G.count('axe')} wood=${G.count('wood')}`);
+  // canCraft over all recipes with a rich inventory
+  G.give('wood', 10); G.give('stone', 10); G.give('lichen', 10);
+  const all = c.RECIPES.every(r => G.canCraft(r));
+  all ? ok('all recipes craftable with materials') : fail('canCraft broken');
+  G.close();
+}
+
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\ngame tests passed');

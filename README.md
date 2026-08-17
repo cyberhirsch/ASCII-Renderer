@@ -13,10 +13,16 @@ Open `dist/index.html` in a browser with WebGPU (current Chrome/Edge, recent
 Firefox/Safari), or serve the repo root and open `index.html`.
 
 **Controls:** WASD move · Shift run · click for mouse-look · **LMB** dig ·
-**RMB** fill · **G** hop into the cave below (debug) · **M** mono/color ·
-**C** glyph set · **X** raw shading (no glyphs) · **F** fullscreen.
+**RMB** fill · **Tab** inventory · **C** craft · **E** examine what you're
+looking at (**W/S** choose an action, **E** do it, **Q** close) · **G** hop
+into the cave below (debug) · **M** mono/color · **V** glyph set · **X** raw
+shading · **F** fullscreen.
 
 You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
+Examine a tree to break a branch for wood, dig for stone, craft an axe, and
+the forest is yours: chopped trees fall and stay felled. Torches (wood +
+glow lichen from cave walls) brighten your headlamp; a pick digs wider.
+Inventory, digs, and felled trees all survive reload.
 
 ## How it works
 
