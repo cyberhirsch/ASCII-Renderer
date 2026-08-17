@@ -54,6 +54,21 @@ const World = {
     return best && { tree: best, dist: bestD };
   },
 
+  // nearest boulder overlapping (x, y), or null - boulders block the way
+  rockNear(x, y) {
+    const cx = Math.floor(x), cy = Math.floor(y);
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        const rk = rockAt(cx + ox, cy + oy);
+        if (!rk) continue;
+        if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
+        const d = Math.hypot(rk.cx - x, rk.cy - y);
+        if (d < rk.r + 0.28) return { rock: rk, ix: cx + ox, iy: cy + oy, dist: d };
+      }
+    }
+    return null;
+  },
+
   // Classify what the view ray meets within examine reach. Returns
   // { kind, point, ... } or null. Trees are tested analytically against the
   // hash-placed set; everything solid is classified by asking the same
@@ -77,6 +92,30 @@ const World = {
           if (inTrunk || inCanopy) {
             return { kind: 'tree', ix: cx + ox, iy: cy + oy, tree: tr,
                      point: [px, py, pz] };
+          }
+        }
+      }
+      // loose stones and boulders: spheres resting on the ground
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const jx = cx + ox, jy = cy + oy;
+          if (typeof Removed !== 'undefined' && Removed.has(jx, jy)) continue;
+          const rk = rockAt(jx, jy);
+          if (rk) {
+            const rz = terrainH(rk.cx, rk.cy) + rk.z;
+            if ((px - rk.cx) ** 2 + (py - rk.cy) ** 2 + (pz - rz) ** 2 < rk.r ** 2) {
+              return { kind: 'boulder', ix: jx, iy: jy, rock: rk,
+                       point: [px, py, pz] };
+            }
+          }
+          const st = stoneAt(jx, jy);
+          if (st) {
+            const sz = terrainH(st.cx, st.cy) + st.r * 0.55;
+            const rr = st.r + 0.12;   // small: forgive the aim a little
+            if ((px - st.cx) ** 2 + (py - st.cy) ** 2 + (pz - sz) ** 2 < rr * rr) {
+              return { kind: 'stone', ix: jx, iy: jy, stone: st,
+                       point: [px, py, pz] };
+            }
           }
         }
       }

@@ -516,6 +516,43 @@ fn treeAt(ix : i32, iy : i32) -> Tree {
   return tr;
 }
 
+// -------- loose stones and boulders. KEEP IN SYNC with js/util.js --------
+// One prop to a cell, hash-placed like the trees, so the cleared-cell set
+// covers all of them with a single "ix,iy".
+
+struct Prop { present : bool, cx : f32, cy : f32, r : f32, z : f32 };
+
+// a loose stone: small, on the ground, free to pick up by hand
+fn stoneAt(ix : i32, iy : i32) -> Prop {
+  var p : Prop;
+  p.present = false;
+  let s = seedU();
+  if (hash01(ix, iy, s ^ 0x570Eu) >= ${PROPS.STONE_D}) { return p; }
+  let h2 = hash2i(ix, iy, s ^ 0x5C0Bu);
+  p.r = ${PROPS.STONE_R} * (1.0 + h2.x);
+  p.cx = f32(ix) + 0.2 + h2.x * 0.6;
+  p.cy = f32(iy) + 0.2 + h2.y * 0.6;
+  p.z = 0.0;
+  p.present = true;
+  return p;
+}
+
+// a boulder: too big to lift, wants a pickaxe, and stands in the way
+fn rockAt(ix : i32, iy : i32) -> Prop {
+  var p : Prop;
+  p.present = false;
+  let s = seedU();
+  if (hash01(ix, iy, s ^ 0xB017u) >= ${PROPS.ROCK_D}) { return p; }
+  if (treeAt(ix, iy).present) { return p; }   // one prop to a cell
+  let h2 = hash2i(ix, iy, s ^ 0xB0DAu);
+  p.r = ${PROPS.ROCK_R} * (1.0 + h2.x);
+  p.cx = f32(ix) + 0.5;
+  p.cy = f32(iy) + 0.5;
+  p.z = -p.r * 0.35;    // sunk in, so it reads as bedded rather than dropped
+  p.present = true;
+  return p;
+}
+
 // 3D value noise for canopy erosion
 fn uhash3v(x : i32, y : i32, z : i32) -> u32 {
   return uhash(uhash(bitcast<u32>(x), bitcast<u32>(y)), bitcast<u32>(z));
@@ -673,11 +710,50 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
   let maxD = tMax * hlen;
 
   for (var i = 0; i < 40; i = i + 1) {
+    let dHere = min(side.x, side.y) / hlen;
     // neighbourhood search around the current cell: canopies overhang
     for (var oy = -reach; oy <= reach; oy = oy + 1) {
     for (var ox = -reach; ox <= reach; ox = ox + 1) {
       let tx = mapX + ox;
       let ty = mapY + oy;
+
+      // Stones and boulders sit inside their own cell and never overhang,
+      // so the inner 3x3 is enough for them. Both fade out by distance: a
+      // stone further off than STONE_VIEW is smaller than the glyph that
+      // would have to draw it, so testing for it is wasted work.
+      if (abs(ox) <= 1 && abs(oy) <= 1 && !isRemoved(tx, ty)) {
+        if (dHere < ${PROPS.ROCK_VIEW}) {
+          let rk = rockAt(tx, ty);
+          if (rk.present) {
+            let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
+            let hs = hitSphere(ro, rd, c, rk.r);
+            let te = max(hs.x, 0.001);
+            if (hs.y > 0.001 && te < best) {
+              best = te;
+              o.t = te;
+              o.n = normalize((ro + rd * te) - c);
+              o.albedo = vec3f(0.46, 0.44, 0.41);
+              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+            }
+          }
+        }
+        if (dHere < ${PROPS.STONE_VIEW}) {
+          let st = stoneAt(tx, ty);
+          if (st.present) {
+            let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
+            let hs = hitSphere(ro, rd, c, st.r);
+            let te = max(hs.x, 0.001);
+            if (hs.y > 0.001 && te < best) {
+              best = te;
+              o.t = te;
+              o.n = normalize((ro + rd * te) - c);
+              o.albedo = vec3f(0.50, 0.48, 0.45);
+              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+            }
+          }
+        }
+      }
+
       let tr = treeAt(tx, ty);
       if (!tr.present) { continue; }
       if (isRemoved(tx, ty)) { continue; }
@@ -813,6 +889,19 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
             (tc.x == h2.x && tc.y == h2.y) || (tc.x == h3.x && tc.y == h3.y)) {
           continue;
         }
+        // Boulders block light too. Only the cell the ray is actually in is
+        // checked, not the whole window: a boulder never leaves its own
+        // cell, and this loop runs for every shadow and AO ray, so the
+        // eight neighbours are not worth their hashes here.
+        if (ox == 0 && oy == 0 && !isRemoved(tx, ty)) {
+          let rk = rockAt(tx, ty);
+          if (rk.present) {
+            let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
+            let hs = hitSphere(ro, rd, c, rk.r);
+            if (hs.y > 0.001 && hs.x * hlen < maxD) { return 0.0; }
+          }
+        }
+
         let tr = treeAt(tx, ty);
         if (!tr.present) { continue; }
         // remember this anchor whether or not the ray hits its canopy

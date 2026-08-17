@@ -16,7 +16,7 @@ const src = ['config', 'util', 'world', 'sky', 'overlay', 'edits', 'removed',
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
-   'oreItem', 'Sky'].map(grab).join(', ') + ' });';
+   'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt'].map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
 let failures = 0;
@@ -610,6 +610,120 @@ if (c.Sky) {
                         : fail('freeze command failed');
   Sky.paused = false;
   G.close();
+}
+
+// ---- 13. loose stones and boulders ----
+if (c.stoneAt) {
+  const { stoneAt, rockAt, PROPS, World, Removed, Game: G } = c;
+
+  // determinism and density
+  const a1 = stoneAt(31, -17), a2 = stoneAt(31, -17);
+  (JSON.stringify(a1) === JSON.stringify(a2))
+    ? ok('stone placement deterministic') : fail('stoneAt nondeterministic');
+
+  let st = 0, rk = 0, both = 0, cells = 0;
+  for (let ix = -220; ix < 220; ix++) {
+    for (let iy = -220; iy < 220; iy++) {
+      cells++;
+      const s = stoneAt(ix, iy), r = rockAt(ix, iy);
+      if (s) st++;
+      if (r) rk++;
+      if (r && c.treeAt(ix, iy)) both++;
+    }
+  }
+  const sd = st / cells, rd = rk / cells;
+  (sd > 0.02 && sd < 0.12)
+    ? ok(`stones scattered at ${(sd * 100).toFixed(1)}% of cells`)
+    : fail(`stone density out of range: ${(sd * 100).toFixed(2)}%`);
+  (rd > 0.002 && rd < 0.03)
+    ? ok(`boulders rarer, ${(rd * 100).toFixed(2)}% of cells`)
+    : fail(`boulder density out of range: ${(rd * 100).toFixed(3)}%`);
+  (both === 0) ? ok('no boulder shares a cell with a tree')
+               : fail(`${both} boulders inside trees`);
+
+  // sizes stay in their declared band
+  let badR = 0;
+  for (let ix = 0; ix < 200; ix++) for (let iy = 0; iy < 200; iy++) {
+    const s = stoneAt(ix, iy), r = rockAt(ix, iy);
+    if (s && (s.r < PROPS.STONE_R || s.r > PROPS.STONE_R * 2)) badR++;
+    if (r && (r.r < PROPS.ROCK_R || r.r > PROPS.ROCK_R * 2)) badR++;
+  }
+  (badR === 0) ? ok('prop radii stay in range') : fail(`${badR} props out of range`);
+
+  // a boulder blocks the way; clearing it opens the way
+  let B = null;
+  outer6:
+  for (let ix = 0; ix < 400; ix++) {
+    for (let iy = 0; iy < 400; iy++) {
+      const r = rockAt(ix, iy);
+      if (r) { B = { r, ix, iy }; break outer6; }
+    }
+  }
+  if (!B) fail('no boulder found to test collision');
+  else {
+    Removed.set.clear();
+    (World.rockNear(B.r.cx, B.r.cy) !== null)
+      ? ok('boulder blocks the way') : fail('boulder does not block');
+    (World.rockNear(B.r.cx + B.r.r + 1.5, B.r.cy) === null)
+      ? ok('the way is clear beside it') : fail('boulder blocks too wide');
+    Removed.add(B.ix, B.iy);
+    (World.rockNear(B.r.cx, B.r.cy) === null)
+      ? ok('a broken boulder stops blocking') : fail('cleared boulder still blocks');
+    Removed.set.clear();
+  }
+
+  // examine finds a stone, and picking it up pays out and clears the cell
+  let S = null;
+  outer7:
+  for (let ix = 0; ix < 200; ix++) {
+    for (let iy = 0; iy < 200; iy++) {
+      const s = stoneAt(ix, iy);
+      if (s && !c.treeAt(ix, iy) && !rockAt(ix, iy)) { S = { s, ix, iy }; break outer7; }
+    }
+  }
+  if (!S) fail('no stone found to examine');
+  else {
+    // stand a step away at eye height and look down at it, as a player does
+    // - a level ray this close to the ground just starts inside the hillside
+    const ex = S.s.cx - 1.0, ey = S.s.cy;
+    const ez = c.terrainH(ex, ey) + c.CFG.EYE;
+    const sz = c.terrainH(S.s.cx, S.s.cy) + S.s.r * 0.55;
+    let dx = S.s.cx - ex, dy = S.s.cy - ey, dz = sz - ez;
+    const L = Math.hypot(dx, dy, dz);
+    const t = World.examineRay(ex, ey, ez, dx / L, dy / L, dz / L);
+    (t && t.kind === 'stone' && t.ix === S.ix && t.iy === S.iy)
+      ? ok(`examine finds the loose stone at ${S.ix},${S.iy}`)
+      : fail('examine missed the stone: ' + JSON.stringify(t && t.kind));
+    if (t && t.kind === 'stone') {
+      G.inv.clear();
+      const acts = G.actionsFor(t);
+      const pick = acts.find(x => x.label.includes('pick up'));
+      pick ? ok('a stone offers to be picked up') : fail('no pick-up action');
+      if (pick) {
+        pick.fn();
+        (G.count('stone') === 1 && Removed.has(S.ix, S.iy))
+          ? ok('picking it up pays a stone and clears the cell')
+          : fail(`pick up wrong: stone=${G.count('stone')} cleared=${Removed.has(S.ix, S.iy)}`);
+      }
+      Removed.set.clear();
+    }
+  }
+
+  // a boulder needs the pickaxe
+  if (B) {
+    G.inv.clear();
+    const bt = { kind: 'boulder', ix: B.ix, iy: B.iy, rock: B.r,
+                 point: [B.r.cx, B.r.cy, 0] };
+    G.actionsFor(bt)[0].fn();
+    (G.count('stone') === 0 && !Removed.has(B.ix, B.iy))
+      ? ok('a boulder resists bare hands') : fail('boulder broken without a pickaxe');
+    G.give('pick', 1);
+    G.actionsFor(bt)[0].fn();
+    (G.count('stone') === 3 && Removed.has(B.ix, B.iy))
+      ? ok('a pickaxe splits the boulder for 3 stone')
+      : fail(`boulder break wrong: stone=${G.count('stone')}`);
+    Removed.set.clear();
+  }
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

@@ -238,6 +238,23 @@ const Game = {
           this.give(id, 1);
           this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
         });
+    } else if (t.kind === 'stone') {
+      acts.push({ label: 'pick up  (+1 stone)', fn: () => {
+        Removed.add(t.ix, t.iy);
+        this.give('stone', 1);
+        this.toast('+1 stone (' + this.count('stone') + ')');
+        this.close();
+      } });
+    } else if (t.kind === 'boulder') {
+      const has = this.count('pick') > 0;
+      acts.push({ label: 'break' + (has ? '  (+3 stone)' : '  (needs a pickaxe)'),
+        fn: () => {
+          if (!has) { this.toast('you need a pickaxe for that'); return; }
+          Removed.add(t.ix, t.iy);
+          this.give('stone', 3);
+          this.toast('the boulder splits  (+3 stone)');
+          this.close();
+        } });
     } else if (t.kind === 'rock' || t.kind === 'cavewall' || t.kind === 'dug') {
       // Loose scree, gathered by hand: the bootstrap out of having no tools
       // at all, since every recipe starts with stone.
@@ -266,6 +283,10 @@ const Game = {
         const sp = SPECIES[treeSpecies(t.ix, t.iy)];
         return [sp.name.toUpperCase(), sp.desc];
       }
+      case 'stone':     return ['LOOSE STONE', 'Fist-sized. It would go in a',
+                                'pocket without complaint.'];
+      case 'boulder':   return ['BOULDER', 'Half-buried and going nowhere.',
+                                'It would take a pickaxe.'];
       case 'water':     return ['WATER', 'Still, dark, patient.'];
       case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
       case 'ore':       return [ITEMS[oreItem(t.point[2])].name.toUpperCase() + ' VEIN',

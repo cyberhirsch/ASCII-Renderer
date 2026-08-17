@@ -406,6 +406,41 @@ function treeSpecies(ix, iy) {
   return Math.min(2, Math.floor(hash01(ix, iy, (CFG.SEED ^ 0x5EED) >>> 0) * 3));
 }
 
+// -------- loose stones and boulders. KEEP IN SYNC with the WGSL --------
+// One prop per cell, hash-placed like the trees, so the cleared-cell set in
+// js/removed.js covers all of them with a single "ix,iy".
+const PROPS = {
+  STONE_D: 0.055,   // chance a cell holds a loose stone
+  STONE_R: 0.10,    // stone radius, plus a hashed share again
+  STONE_VIEW: 30,   // past this a stone is smaller than a glyph: skip it
+  ROCK_D: 0.011,    // chance a cell holds a boulder
+  ROCK_R: 0.55,     // boulder radius, plus a hashed share again
+  ROCK_VIEW: 90,
+};
+
+// A loose stone: small, sits on the ground, free to pick up by hand.
+// Mirror of WGSL stoneAt. KEEP IN SYNC.
+function stoneAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  if (hash01(ix, iy, (s ^ 0x570E) >>> 0) >= PROPS.STONE_D) return null;
+  const h2 = hash2i(ix, iy, (s ^ 0x5C0B) >>> 0);
+  const r = PROPS.STONE_R * (1 + h2[0]);
+  return { cx: ix + 0.2 + h2[0] * 0.6, cy: iy + 0.2 + h2[1] * 0.6, r };
+}
+
+// A boulder: too big to lift, wants a pickaxe, and blocks the way.
+// Mirror of WGSL rockAt. KEEP IN SYNC.
+function rockAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  if (hash01(ix, iy, (s ^ 0xB017) >>> 0) >= PROPS.ROCK_D) return null;
+  if (treeAt(ix, iy)) return null;        // one prop to a cell
+  const h2 = hash2i(ix, iy, (s ^ 0xB0DA) >>> 0);
+  const r = PROPS.ROCK_R * (1 + h2[0]);
+  return { cx: ix + 0.5, cy: iy + 0.5, r,
+           // sunk into the ground so it reads as bedded, not dropped
+           z: -r * 0.35 };
+}
+
 // -------- tree placement — mirror of WGSL treeAt --------
 // returns null or { cx, cy, r, trunkH, trunkR }
 function treeAt(ix, iy) {

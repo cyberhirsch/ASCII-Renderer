@@ -564,6 +564,41 @@ function treeSpecies(ix, iy) {
   return Math.min(2, Math.floor(hash01(ix, iy, (CFG.SEED ^ 0x5EED) >>> 0) * 3));
 }
 
+// -------- loose stones and boulders. KEEP IN SYNC with the WGSL --------
+// One prop per cell, hash-placed like the trees, so the cleared-cell set in
+// js/removed.js covers all of them with a single "ix,iy".
+const PROPS = {
+  STONE_D: 0.055,   // chance a cell holds a loose stone
+  STONE_R: 0.10,    // stone radius, plus a hashed share again
+  STONE_VIEW: 30,   // past this a stone is smaller than a glyph: skip it
+  ROCK_D: 0.011,    // chance a cell holds a boulder
+  ROCK_R: 0.55,     // boulder radius, plus a hashed share again
+  ROCK_VIEW: 90,
+};
+
+// A loose stone: small, sits on the ground, free to pick up by hand.
+// Mirror of WGSL stoneAt. KEEP IN SYNC.
+function stoneAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  if (hash01(ix, iy, (s ^ 0x570E) >>> 0) >= PROPS.STONE_D) return null;
+  const h2 = hash2i(ix, iy, (s ^ 0x5C0B) >>> 0);
+  const r = PROPS.STONE_R * (1 + h2[0]);
+  return { cx: ix + 0.2 + h2[0] * 0.6, cy: iy + 0.2 + h2[1] * 0.6, r };
+}
+
+// A boulder: too big to lift, wants a pickaxe, and blocks the way.
+// Mirror of WGSL rockAt. KEEP IN SYNC.
+function rockAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  if (hash01(ix, iy, (s ^ 0xB017) >>> 0) >= PROPS.ROCK_D) return null;
+  if (treeAt(ix, iy)) return null;        // one prop to a cell
+  const h2 = hash2i(ix, iy, (s ^ 0xB0DA) >>> 0);
+  const r = PROPS.ROCK_R * (1 + h2[0]);
+  return { cx: ix + 0.5, cy: iy + 0.5, r,
+           // sunk into the ground so it reads as bedded, not dropped
+           z: -r * 0.35 };
+}
+
 // -------- tree placement — mirror of WGSL treeAt --------
 // returns null or { cx, cy, r, trunkH, trunkR }
 function treeAt(ix, iy) {
@@ -640,6 +675,21 @@ const World = {
     return best && { tree: best, dist: bestD };
   },
 
+  // nearest boulder overlapping (x, y), or null - boulders block the way
+  rockNear(x, y) {
+    const cx = Math.floor(x), cy = Math.floor(y);
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        const rk = rockAt(cx + ox, cy + oy);
+        if (!rk) continue;
+        if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
+        const d = Math.hypot(rk.cx - x, rk.cy - y);
+        if (d < rk.r + 0.28) return { rock: rk, ix: cx + ox, iy: cy + oy, dist: d };
+      }
+    }
+    return null;
+  },
+
   // Classify what the view ray meets within examine reach. Returns
   // { kind, point, ... } or null. Trees are tested analytically against the
   // hash-placed set; everything solid is classified by asking the same
@@ -663,6 +713,30 @@ const World = {
           if (inTrunk || inCanopy) {
             return { kind: 'tree', ix: cx + ox, iy: cy + oy, tree: tr,
                      point: [px, py, pz] };
+          }
+        }
+      }
+      // loose stones and boulders: spheres resting on the ground
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const jx = cx + ox, jy = cy + oy;
+          if (typeof Removed !== 'undefined' && Removed.has(jx, jy)) continue;
+          const rk = rockAt(jx, jy);
+          if (rk) {
+            const rz = terrainH(rk.cx, rk.cy) + rk.z;
+            if ((px - rk.cx) ** 2 + (py - rk.cy) ** 2 + (pz - rz) ** 2 < rk.r ** 2) {
+              return { kind: 'boulder', ix: jx, iy: jy, rock: rk,
+                       point: [px, py, pz] };
+            }
+          }
+          const st = stoneAt(jx, jy);
+          if (st) {
+            const sz = terrainH(st.cx, st.cy) + st.r * 0.55;
+            const rr = st.r + 0.12;   // small: forgive the aim a little
+            if ((px - st.cx) ** 2 + (py - st.cy) ** 2 + (pz - sz) ** 2 < rr * rr) {
+              return { kind: 'stone', ix: jx, iy: jy, stone: st,
+                       point: [px, py, pz] };
+            }
           }
         }
       }
@@ -1459,6 +1533,23 @@ const Game = {
           this.give(id, 1);
           this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
         });
+    } else if (t.kind === 'stone') {
+      acts.push({ label: 'pick up  (+1 stone)', fn: () => {
+        Removed.add(t.ix, t.iy);
+        this.give('stone', 1);
+        this.toast('+1 stone (' + this.count('stone') + ')');
+        this.close();
+      } });
+    } else if (t.kind === 'boulder') {
+      const has = this.count('pick') > 0;
+      acts.push({ label: 'break' + (has ? '  (+3 stone)' : '  (needs a pickaxe)'),
+        fn: () => {
+          if (!has) { this.toast('you need a pickaxe for that'); return; }
+          Removed.add(t.ix, t.iy);
+          this.give('stone', 3);
+          this.toast('the boulder splits  (+3 stone)');
+          this.close();
+        } });
     } else if (t.kind === 'rock' || t.kind === 'cavewall' || t.kind === 'dug') {
       // Loose scree, gathered by hand: the bootstrap out of having no tools
       // at all, since every recipe starts with stone.
@@ -1487,6 +1578,10 @@ const Game = {
         const sp = SPECIES[treeSpecies(t.ix, t.iy)];
         return [sp.name.toUpperCase(), sp.desc];
       }
+      case 'stone':     return ['LOOSE STONE', 'Fist-sized. It would go in a',
+                                'pocket without complaint.'];
+      case 'boulder':   return ['BOULDER', 'Half-buried and going nowhere.',
+                                'It would take a pickaxe.'];
       case 'water':     return ['WATER', 'Still, dark, patient.'];
       case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
       case 'ore':       return [ITEMS[oreItem(t.point[2])].name.toUpperCase() + ' VEIN',
@@ -1748,6 +1843,7 @@ const Player = {
       if (h < CFG.SEA_LEVEL + 0.05) return true;
       const near = World.trunkNear(x, y, 1);
       if (near && near.dist < near.tree.trunkR + 0.22) return true;
+      if (World.rockNear(x, y)) return true;
     }
     return false;
   },
@@ -2482,6 +2578,43 @@ fn treeAt(ix : i32, iy : i32) -> Tree {
   return tr;
 }
 
+// -------- loose stones and boulders. KEEP IN SYNC with js/util.js --------
+// One prop to a cell, hash-placed like the trees, so the cleared-cell set
+// covers all of them with a single "ix,iy".
+
+struct Prop { present : bool, cx : f32, cy : f32, r : f32, z : f32 };
+
+// a loose stone: small, on the ground, free to pick up by hand
+fn stoneAt(ix : i32, iy : i32) -> Prop {
+  var p : Prop;
+  p.present = false;
+  let s = seedU();
+  if (hash01(ix, iy, s ^ 0x570Eu) >= ${PROPS.STONE_D}) { return p; }
+  let h2 = hash2i(ix, iy, s ^ 0x5C0Bu);
+  p.r = ${PROPS.STONE_R} * (1.0 + h2.x);
+  p.cx = f32(ix) + 0.2 + h2.x * 0.6;
+  p.cy = f32(iy) + 0.2 + h2.y * 0.6;
+  p.z = 0.0;
+  p.present = true;
+  return p;
+}
+
+// a boulder: too big to lift, wants a pickaxe, and stands in the way
+fn rockAt(ix : i32, iy : i32) -> Prop {
+  var p : Prop;
+  p.present = false;
+  let s = seedU();
+  if (hash01(ix, iy, s ^ 0xB017u) >= ${PROPS.ROCK_D}) { return p; }
+  if (treeAt(ix, iy).present) { return p; }   // one prop to a cell
+  let h2 = hash2i(ix, iy, s ^ 0xB0DAu);
+  p.r = ${PROPS.ROCK_R} * (1.0 + h2.x);
+  p.cx = f32(ix) + 0.5;
+  p.cy = f32(iy) + 0.5;
+  p.z = -p.r * 0.35;    // sunk in, so it reads as bedded rather than dropped
+  p.present = true;
+  return p;
+}
+
 // 3D value noise for canopy erosion
 fn uhash3v(x : i32, y : i32, z : i32) -> u32 {
   return uhash(uhash(bitcast<u32>(x), bitcast<u32>(y)), bitcast<u32>(z));
@@ -2639,11 +2772,50 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
   let maxD = tMax * hlen;
 
   for (var i = 0; i < 40; i = i + 1) {
+    let dHere = min(side.x, side.y) / hlen;
     // neighbourhood search around the current cell: canopies overhang
     for (var oy = -reach; oy <= reach; oy = oy + 1) {
     for (var ox = -reach; ox <= reach; ox = ox + 1) {
       let tx = mapX + ox;
       let ty = mapY + oy;
+
+      // Stones and boulders sit inside their own cell and never overhang,
+      // so the inner 3x3 is enough for them. Both fade out by distance: a
+      // stone further off than STONE_VIEW is smaller than the glyph that
+      // would have to draw it, so testing for it is wasted work.
+      if (abs(ox) <= 1 && abs(oy) <= 1 && !isRemoved(tx, ty)) {
+        if (dHere < ${PROPS.ROCK_VIEW}) {
+          let rk = rockAt(tx, ty);
+          if (rk.present) {
+            let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
+            let hs = hitSphere(ro, rd, c, rk.r);
+            let te = max(hs.x, 0.001);
+            if (hs.y > 0.001 && te < best) {
+              best = te;
+              o.t = te;
+              o.n = normalize((ro + rd * te) - c);
+              o.albedo = vec3f(0.46, 0.44, 0.41);
+              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+            }
+          }
+        }
+        if (dHere < ${PROPS.STONE_VIEW}) {
+          let st = stoneAt(tx, ty);
+          if (st.present) {
+            let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
+            let hs = hitSphere(ro, rd, c, st.r);
+            let te = max(hs.x, 0.001);
+            if (hs.y > 0.001 && te < best) {
+              best = te;
+              o.t = te;
+              o.n = normalize((ro + rd * te) - c);
+              o.albedo = vec3f(0.50, 0.48, 0.45);
+              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
+            }
+          }
+        }
+      }
+
       let tr = treeAt(tx, ty);
       if (!tr.present) { continue; }
       if (isRemoved(tx, ty)) { continue; }
@@ -2779,6 +2951,19 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
             (tc.x == h2.x && tc.y == h2.y) || (tc.x == h3.x && tc.y == h3.y)) {
           continue;
         }
+        // Boulders block light too. Only the cell the ray is actually in is
+        // checked, not the whole window: a boulder never leaves its own
+        // cell, and this loop runs for every shadow and AO ray, so the
+        // eight neighbours are not worth their hashes here.
+        if (ox == 0 && oy == 0 && !isRemoved(tx, ty)) {
+          let rk = rockAt(tx, ty);
+          if (rk.present) {
+            let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
+            let hs = hitSphere(ro, rd, c, rk.r);
+            if (hs.y > 0.001 && hs.x * hlen < maxD) { return 0.0; }
+          }
+        }
+
         let tr = treeAt(tx, ty);
         if (!tr.present) { continue; }
         // remember this anchor whether or not the ray hits its canopy

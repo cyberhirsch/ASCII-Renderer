@@ -98,6 +98,7 @@ const Player = {
       if (h < CFG.SEA_LEVEL + 0.05) return true;
       const near = World.trunkNear(x, y, 1);
       if (near && near.dist < near.tree.trunkR + 0.22) return true;
+      if (World.rockNear(x, y)) return true;
     }
     return false;
   },
