@@ -773,31 +773,62 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
   }
 
   var trans = 1.0;
-  // trees: walk at cell pitch along the ray, one cell per step
+  // Trees: exact DDA over the cells the ray crosses, testing a 3x3
+  // neighbourhood at each step - canopies overhang their anchor cell, and a
+  // single-cell test shadows only disconnected slices of the crown. A short
+  // history of tested anchors keeps a tree from multiplying its
+  // transmittance in once per neighbouring window.
   let hlen = length(rd.xy);
   if (hlen > 1e-4) {
-    let treeRange = min(maxT, 14.0);
-    let steps = i32(min(treeRange * hlen, 14.0));
-    var lastCell = vec2i(99999, 99999);
-    for (var i = 0; i < steps; i = i + 1) {
-      let p = ro + rd * (f32(i) + 0.5) / hlen;
-      let cell = vec2i(i32(floor(p.x)), i32(floor(p.y)));
-      if (cell.x == lastCell.x && cell.y == lastCell.y) { continue; }
-      lastCell = cell;
-      let tr = treeAt(cell.x, cell.y);
-      if (!tr.present) { continue; }
-      let g = terrainH(vec2f(tr.cx, tr.cy));
-      let canZ = g + tr.trunkH + tr.r * 0.55;
-      if (p.z > g && p.z < g + tr.trunkH &&
-          length(p.xy - vec2f(tr.cx, tr.cy)) < 0.14) { return 0.0; }
-      let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
-      if (sph.y > 0.001 && sph.x < treeRange) {
-        let mid = ro + rd * max((sph.x + sph.y) * 0.5, 0.0);
-        let dens = vnoise(mid * 2.6) * 0.75 + vnoise(mid * 6.5) * 0.25;
-        let chord = max(sph.y - max(sph.x, 0.0), 0.0);
-        trans = trans * exp(-chord * 1.1 * (0.3 + 1.4 * dens));
-        if (trans < 0.04) { return 0.0; }
+    let treeRange = min(maxT, 16.0);
+    let rd2 = rd.xy / hlen;
+    var cx = i32(floor(ro.x));
+    var cy = i32(floor(ro.y));
+    let dD = abs(1.0 / max(abs(rd2), vec2f(1e-9)));
+    var sgn = vec2i(1, 1);
+    var side = vec2f(0.0);
+    if (rd2.x < 0.0) { sgn.x = -1; side.x = (ro.x - f32(cx)) * dD.x; }
+    else { side.x = (f32(cx) + 1.0 - ro.x) * dD.x; }
+    if (rd2.y < 0.0) { sgn.y = -1; side.y = (ro.y - f32(cy)) * dD.y; }
+    else { side.y = (f32(cy) + 1.0 - ro.y) * dD.y; }
+
+    var h0 = vec2i(1 << 28, 0);
+    var h1 = h0; var h2 = h0; var h3 = h0;
+    let maxD = treeRange * hlen;
+
+    for (var st = 0; st < 18; st = st + 1) {
+      for (var oy = -1; oy <= 1; oy = oy + 1) {
+      for (var ox = -1; ox <= 1; ox = ox + 1) {
+        let tx = cx + ox;
+        let ty = cy + oy;
+        let tc = vec2i(tx, ty);
+        if ((tc.x == h0.x && tc.y == h0.y) || (tc.x == h1.x && tc.y == h1.y) ||
+            (tc.x == h2.x && tc.y == h2.y) || (tc.x == h3.x && tc.y == h3.y)) {
+          continue;
+        }
+        let tr = treeAt(tx, ty);
+        if (!tr.present) { continue; }
+        // remember this anchor whether or not the ray hits its canopy
+        h3 = h2; h2 = h1; h1 = h0; h0 = tc;
+
+        let g = terrainH(vec2f(tr.cx, tr.cy));
+        let canZ = g + tr.trunkH + tr.r * 0.55;
+        let tTrunk = hitCylinder(ro, rd, vec2f(tr.cx, tr.cy),
+                                 0.085 + tr.r * 0.055, g, g + tr.trunkH);
+        if (tTrunk > 0.001 && tTrunk * hlen < maxD) { return 0.0; }
+        let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
+        if (sph.y > 0.001 && sph.x * hlen < maxD) {
+          let mid = ro + rd * max((sph.x + sph.y) * 0.5, 0.0);
+          let dens = vnoise(mid * 2.6) * 0.75 + vnoise(mid * 6.5) * 0.25;
+          let chord = max(sph.y - max(sph.x, 0.0), 0.0);
+          trans = trans * exp(-chord * 1.1 * (0.3 + 1.4 * dens));
+          if (trans < 0.04) { return 0.0; }
+        }
       }
+      }
+      if (min(side.x, side.y) >= maxD) { break; }
+      if (side.x < side.y) { side.x = side.x + dD.x; cx = cx + sgn.x; }
+      else { side.y = side.y + dD.y; cy = cy + sgn.y; }
     }
   }
   return trans;
