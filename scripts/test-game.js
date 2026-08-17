@@ -11,12 +11,13 @@ const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'util', 'world', 'sky', 'overlay', 'edits', 'removed',
-             'items', 'game']
+             'lore', 'items', 'game']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
-   'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt'].map(grab).join(', ') + ' });';
+   'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt']
+    .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
 let failures = 0;
@@ -724,6 +725,107 @@ if (c.stoneAt) {
       : fail(`boulder break wrong: stone=${G.count('stone')}`);
     Removed.set.clear();
   }
+}
+
+// ---- 14. the record: generated history, the goal, and the save ----
+if (c.Lore) {
+  const { Lore, Game: G } = c;
+
+  // the same seed tells the same story, twice
+  Lore._civ = null;
+  const c1 = JSON.stringify(Lore.civ());
+  Lore._civ = null;
+  const c2 = JSON.stringify(Lore.civ());
+  (c1 === c2) ? ok(`civilisation deterministic: ${Lore.civ().name}, the ${Lore.civ().people}`)
+              : fail('civ nondeterministic');
+
+  // every field got filled in, nothing reads "undefined"
+  const civ = Lore.civ();
+  const holes = Object.entries(civ).filter(([, v]) =>
+    v === undefined || v === null || v === '' || String(v).includes('undefined'));
+  (holes.length === 0) ? ok('every fact about them is filled in')
+                       : fail('gaps in the civ: ' + JSON.stringify(holes));
+
+  // an inscription exists at every depth, is deterministic, and says something
+  let badIns = 0, seen = new Set();
+  for (const k of [-1, -2, -3]) {
+    for (let i = 0; i < 40; i++) {
+      const ins = Lore.inscription(i, i * 3, k);
+      const again = Lore.inscription(i, i * 3, k);
+      if (JSON.stringify(ins) !== JSON.stringify(again)) badIns++;
+      if (!ins.lines.length || ins.lines.some(l => !l || l.includes('undefined'))) badIns++;
+      ins.lines.forEach(l => seen.add(l));
+    }
+  }
+  (badIns === 0) ? ok('inscriptions deterministic and complete at every depth')
+                 : fail(`${badIns} broken inscriptions`);
+  (seen.size >= 9)
+    ? ok(`${seen.size} distinct lines of record across the depths`)
+    : fail(`too little variety: only ${seen.size} lines`);
+
+  // the story is laid out by depth, so the bands do not share beats
+  const band = k => new Set(
+    Array.from({ length: 30 }, (_, i) => Lore.inscription(i, i * 5, k).lines[0]));
+  const b1 = band(-1), b3 = band(-3);
+  ([...b1].every(l => !b3.has(l)))
+    ? ok('the founding and the ending are told at different depths')
+    : fail('beats leak between bands');
+
+  // the goal: reading all three depths completes the record
+  G.read = []; G.done = false; G.used.clear();
+  (G.objective().includes('find')) ? ok('the goal starts by pointing you at the halls')
+                                   : fail('opening objective wrong: ' + G.objective());
+  G.readInscription(Lore.inscription(1, 1, -1));
+  G.close();
+  (!G.done && G.bandsRead().size === 1)
+    ? ok('one depth read is not the whole story') : fail('completed too early');
+  G.readInscription(Lore.inscription(2, 2, -2));
+  G.close();
+  G.readInscription(Lore.inscription(3, 3, -3));
+  (G.done === true)
+    ? ok('reading all three depths completes the record') : fail('never completed');
+  (G.objective().includes('whole'))
+    ? ok('the objective reports it is finished') : fail('objective wrong at the end');
+  G.close();
+
+  // re-reading the same hall does not double count
+  const before = G.read.length;
+  G.readInscription(Lore.inscription(3, 3, -3));
+  G.close();
+  (G.read.length === before) ? ok('re-reading a hall does not count twice')
+                             : fail('duplicate record entries');
+
+  // the journal renders the story it has
+  c.Overlay.clear();
+  G.open('journal');
+  G.drawUI();
+  {
+    let text = '';
+    for (let i = 0; i < c.Overlay.data.length; i++) {
+      if (c.Overlay.data[i] > 32) text += String.fromCharCode(c.Overlay.data[i]);
+    }
+    text.includes('RECORD') ? ok('the journal renders into the glyph grid')
+                            : fail('journal missing from overlay');
+  }
+  G.close();
+
+  // the save carries the record, the inventory, and where you stood
+  G.inv.clear(); G.give('gem', 2);
+  const snap = G.snapshot();
+  snap.at = [12.5, -7.25, 1.1, -0.2, 3.4];
+  snap.t = 0.42;
+  G.inv.clear(); G.read = []; G.done = false;
+  G.restore(JSON.parse(JSON.stringify(snap)));
+  (G.count('gem') === 2 && G.read.length === 3 && G.done === true &&
+   G.spawnAt[0] === 12.5 && Math.abs(c.Sky.t - 0.42) < 1e-9)
+    ? ok('the save round-trips items, record, position and time')
+    : fail('save round-trip lost something');
+
+  // a fresh world has no saved position, so it falls back to a spawn scan
+  G.restore({});
+  (G.spawnAt === null && G.read.length === 0 && G.done === false)
+    ? ok('an empty save starts a new world cleanly')
+    : fail('empty save did not reset');
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

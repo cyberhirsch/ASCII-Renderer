@@ -439,6 +439,17 @@ function hallV(x, y, z, gz) {
   return [v, Math.max(pillar, floorSlab)];
 }
 
+// Which hall stands at this point, or null. CPU only - the shader needs the
+// geometry, but only the gameplay side needs to know whose hall it is.
+function hallIdAt(x, y, z) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return null;
+  const k = Math.floor(z / CAVES.BAND);
+  const cx = Math.floor(x / CAVES.HALL_E);
+  const cy = Math.floor(y / CAVES.HALL_E);
+  const a = hallAt(cx, cy, k, x, y);
+  return a ? { cx, cy, k, hall: a } : null;
+}
+
 // Cave void field: natural banded passages plus carved shafts and halls,
 // minus the protected solids (stair slabs, hall floors, pillars), which win
 // over every carve. Mirror of WGSL caveV. KEEP IN SYNC.
@@ -761,9 +772,12 @@ const World = {
     }
     const hv = hallV(px, py, pz, gz);
     if (hv[1] > -0.3) {
-      // inside a hall's protected solids; a pillar is still solid overhead
+      // inside a hall's protected solids; a pillar is still solid overhead.
+      // The hall it belongs to comes back with it: its pillars carry the
+      // record its builders cut.
       const up = hallV(px, py, pz + 0.8, gz);
-      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p, mat };
+      const id = hallIdAt(px, py, pz);
+      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p, mat, hall: id };
     }
     const sv = shaftV(px, py, pz, gz);
     if (sv[0] > -0.5 || sv[1] > -0.3) return { kind: 'stair', point: p, mat };
@@ -1250,6 +1264,133 @@ const Removed = {
 };
 </script>
 <script>
+// ---- js/lore.js ----
+// The people who cut the halls.
+//
+// Nothing here is authored: a seed gives a civilisation its name, its
+// founder, the thing it dug up, and the way it ended, and the inscriptions
+// are generated from those facts. Two runs of the same seed tell exactly the
+// same story, and a different seed tells a different one.
+//
+// The record is laid out by DEPTH. Band -1 carries the founding, -2 the
+// digging, -3 the end - so reading the story in order means going down,
+// which is the whole reason the caves are there.
+// 1st, 2nd, 3rd, 4th - and 11th through 13th, which break the pattern
+function ord(n) {
+  const t = n % 100;
+  if (t >= 11 && t <= 13) return n + 'th';
+  return n + (['th', 'st', 'nd', 'rd'][n % 10] || 'th');
+}
+
+const Lore = {
+  HEAD: ['kar', 'dun', 'mor', 'thal', 'ves', 'gor', 'bal', 'rin', 'oth',
+         'urd', 'kel', 'zar', 'mun', 'fel', 'has', 'tor', 'bre', 'skal'],
+  TAIL: ['az', 'ok', 'ur', 'eth', 'im', 'ash', 'orn', 'ul', 'ek', 'ir',
+         'and', 'uz', 'in', 'ad', 'oth', 'esk'],
+
+  cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); },
+
+  // pick from a table by hash, so every name is a function of the seed
+  pick(tbl, a, b) {
+    return tbl[jsUhash((a ^ (CFG.SEED >>> 0)) >>> 0, b >>> 0) % tbl.length];
+  },
+
+  name(a, b) { return this.cap(this.pick(this.HEAD, a, b) + this.pick(this.TAIL, a, b + 1)); },
+  longName(a, b) {
+    return this.cap(this.pick(this.HEAD, a, b) + this.pick(this.HEAD, a, b + 7) +
+                    this.pick(this.TAIL, a, b + 3));
+  },
+
+  // The one civilisation this world remembers. Everything the inscriptions
+  // say is drawn from here, so they agree with each other.
+  civ() {
+    if (this._civ) return this._civ;
+    const h = (n) => jsUhash((CFG.SEED >>> 0), n >>> 0);
+    const FOUND = ['a vein of copper', 'a spring that ran warm',
+                   'stone that split clean', 'a cave already cut'];
+    const DEEP = ['the Hollow', 'the Pale Seam', 'the Quiet', 'the Blue Fire',
+                  'the Door', 'the Long Vein'];
+    const END = ['the water came', 'the lamps went out and stayed out',
+                 'the deep gallery answered', 'the stone began to move',
+                 'nothing came up the stair again'];
+    this._civ = {
+      name: this.longName(1, 2),
+      people: this.name(3, 4) + 'ai',
+      founder: this.name(5, 6),
+      last: this.name(7, 8),
+      delve: this.name(9, 10),
+      found: FOUND[h(11) % FOUND.length],
+      deep: DEEP[h(12) % DEEP.length],
+      end: END[h(13) % END.length],
+      years: 120 + (h(14) % 400),
+      depth: 3 + (h(15) % 6),
+    };
+    return this._civ;
+  },
+
+  // Beats of the story, by depth band. Each hall gets one, chosen by its
+  // own cell, so a band's halls between them tell that chapter.
+  BEATS: {
+    '-1': [
+      c => [`${c.name} began here.`,
+            `${c.founder} found ${c.found} and called it enough.`,
+            `We were ${c.people}. We cut downward because we could.`],
+      c => [`In the ${ord(c.years)} year the upper halls were finished.`,
+            `Every lamp was lit. ${c.founder} walked them all in a day`,
+            `and said the walls would outlast the walkers.`],
+      c => [`We traded metal upward and took grain down.`,
+            `The sky-folk had no name for us that we liked,`,
+            `so we kept our own: ${c.people}.`],
+      c => [`Here the first stair was cut, by hand, in the dark.`,
+            `${c.founder} cut the first step and the last of that flight.`],
+    ],
+    '-2': [
+      c => [`${c.delve} took the lower cut.`,
+            `The stone rings hollow below this floor.`,
+            `We are told this is only water. It is not water.`],
+      c => [`We reached ${c.deep} in the ${ord(c.years + 40)} year.`,
+            `${c.founder}'s law said seal it and set a watch.`,
+            `We did not seal it.`],
+      c => [`The lamps burn blue in the deep gallery.`,
+            `No one will say why. ${c.delve} has stopped going down.`],
+      c => [`Count the galleries. There should be ${c.depth}.`,
+            `There are more than ${c.depth}.`,
+            `We did not cut the others.`],
+    ],
+    '-3': [
+      c => [`${c.last} held the gate here.`,
+            `Long enough for the upper halls to empty. Not longer.`],
+      c => [`It came up through the floor we cut.`,
+            `We made the road for it. That is the whole of it.`],
+      c => [`If you are reading this, ${c.end}.`,
+            `Do not go below the ${ord(c.depth)} gallery.`,
+            `We did. There is no one left to say what we found.`],
+      c => [`${c.name} ended in the ${ord(c.years + 90)} year.`,
+            `${c.last} wrote this and put down the chisel.`,
+            `We were ${c.people}. We were here.`],
+    ],
+  },
+
+  // the inscription cut into the pillars of one hall
+  inscription(cx, cy, k) {
+    const band = String(Math.max(-3, Math.min(-1, k)));
+    const beats = this.BEATS[band] || this.BEATS['-1'];
+    const i = jsUhash(((cx * 31) ^ (cy * 17)) >>> 0,
+                      ((8 + k) ^ (CFG.SEED >>> 0)) >>> 0) % beats.length;
+    const c = this.civ();
+    return { band: k, key: cx + ',' + cy + ',' + k, lines: beats[i](c) };
+  },
+
+  // what a hall calls itself
+  hallName(cx, cy, k) {
+    const c = this.civ();
+    const KIND = ['Hall', 'Gallery', 'Delve', 'Vault', 'Stair-house', 'Cut'];
+    const kind = KIND[jsUhash((cx ^ 0x9e37) >>> 0, (cy ^ (8 + k)) >>> 0) % KIND.length];
+    return `the ${kind} of ${this.name(cx + 40, cy + 90 + k)}`;
+  },
+};
+</script>
+<script>
 // ---- js/items.js ----
 // Item, recipe, and tree-species definitions. Data only - the logic that
 // gives, takes, crafts, and examines lives in js/game.js.
@@ -1307,8 +1448,16 @@ const Game = {
   devMode: false,       // gates debug view toggles (mono/raw) behind a command
   cmdBuf: '',
   cmdHistory: [],
+  read: [],             // inscription keys already read, in the order found
+  done: false,          // the record has been pieced together
+  spawnAt: null,        // where a saved game left the player standing
 
-  init() { this.load(); },
+  init() {
+    this.load();
+    // a returning player is dropped straight back in; a new one gets told
+    // where they are and what there is to find
+    if (!this.spawnAt) this.mode = 'title';
+  },
 
   // ---- inventory ----
 
@@ -1421,9 +1570,18 @@ const Game = {
       case 'clear':
         this.cmdHistory.length = 0;
         break;
+      case 'wipe':
+        this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+        if (typeof localStorage !== 'undefined') {
+          localStorage.removeItem('ascii-save-v1');
+          localStorage.removeItem('ascii-caves-v1');
+          localStorage.removeItem('ascii-removed-v1');
+        }
+        this.cmdHistory.push('save wiped - reload to start over');
+        break;
       case 'help':
         this.cmdHistory.push('commands: devmode, time <h>, freeze, daylen <s>,');
-        this.cmdHistory.push('clear, help');
+        this.cmdHistory.push('wipe, clear, help');
         break;
       default:
         this.cmdHistory.push('unknown command: ' + cmd);
@@ -1437,9 +1595,16 @@ const Game = {
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
       if (code === 'KeyC') { this.open('craft'); return true; }
+      if (code === 'KeyJ') { this.open('journal'); return true; }
       if (code === 'KeyE') { this.examine(); return true; }
       return false;
     }
+    // the title is dismissed by anything, and offers nothing else
+    if (this.mode === 'title') {
+      if (code !== 'F11') this.close();
+      return true;
+    }
+    if (code === 'KeyJ' && this.mode !== 'journal') { this.open('journal'); return true; }
     if (code === 'KeyQ' || code === 'Escape' || code === 'Tab') {
       this.close();
       return true;
@@ -1557,10 +1722,46 @@ const Game = {
         this.give('stone', 1);
         this.toast('+1 stone (' + this.count('stone') + ')');
       });
+    } else if (t.kind === 'pillar' && t.hall) {
+      const ins = Lore.inscription(t.hall.cx, t.hall.cy, t.hall.k);
+      const seen = this.read.includes(ins.key);
+      acts.push({ label: seen ? 'read again' : 'read the inscription',
+        fn: () => this.readInscription(ins) });
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
     return acts;
+  },
+
+  // ---- the record ----
+
+  // Which depths the player has read from. The story runs founding, digging,
+  // end down the three bands, so holding all three is holding the whole of
+  // it - and it can only be done by going down.
+  bandsRead() {
+    const b = new Set();
+    for (const k of this.read) b.add(k.split(',')[2]);
+    return b;
+  },
+
+  objective() {
+    if (this.done) return 'the record is whole';
+    const n = this.bandsRead().size;
+    if (this.read.length === 0) return 'find the carved halls, and read what they cut';
+    return 'the record runs deeper: ' + n + ' of 3 depths read';
+  },
+
+  readInscription(ins) {
+    this.reading = ins;
+    if (!this.read.includes(ins.key)) {
+      this.read.push(ins.key);
+      this.needSave = true;
+    }
+    this.open('reading');
+    if (!this.done && this.bandsRead().size >= 3) {
+      this.done = true;
+      this.needSave = true;
+    }
   },
 
   chop(t, sp) {
@@ -1642,6 +1843,70 @@ const Game = {
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
     if (this.mode === 'console') this.drawConsole();
+    if (this.mode === 'reading') this.drawReading();
+    if (this.mode === 'journal') this.drawJournal();
+    if (this.mode === 'title') this.drawTitle();
+  },
+
+  drawTitle() {
+    this.panel([
+      'A S C I I   W O R L D',
+      '',
+      'Every hill, cave and stone here is a',
+      'number, worked out the moment you look',
+      'at it. Nothing is stored. It goes on as',
+      'far as you care to walk.',
+      '',
+      'You are standing at a cave mouth. Someone',
+      'cut the stair below you, a long time ago,',
+      'and left their record on the walls.',
+      '',
+      'Find out who they were.',
+      '',
+      'E    look at what is in front of you',
+      'WASD walk    LMB dig    Tab your things',
+      'C    craft   J record   Enter console',
+      '',
+      'press any key',
+    ]);
+  },
+
+  drawReading() {
+    if (!this.reading) return;
+    const lines = ['CUT INTO THE PILLAR', ''];
+    for (const l of this.reading.lines) lines.push(l);
+    lines.push('');
+    if (this.done && this.bandsRead().size >= 3) {
+      lines.push('That is the last of it. The record is whole.');
+      lines.push('[J] read it through  [Q] close');
+    } else {
+      lines.push(this.objective());
+      lines.push('[Q] close');
+    }
+    this.panel(lines);
+  },
+
+  drawJournal() {
+    const c = Lore.civ();
+    const lines = ['THE RECORD OF ' + c.name.toUpperCase(), ''];
+    if (this.read.length === 0) {
+      lines.push('Nothing yet. Somewhere below, someone');
+      lines.push('cut their history into the stone.');
+    } else {
+      // in the order the story happened, not the order it was found
+      const order = [...this.read].sort((a, b) =>
+        Number(b.split(',')[2]) - Number(a.split(',')[2]));
+      for (const key of order) {
+        const [cx, cy, k] = key.split(',').map(Number);
+        for (const l of Lore.inscription(cx, cy, k).lines) lines.push(l);
+        lines.push('');
+      }
+      lines.push(this.done
+        ? 'Nothing else is written. They did not come back up.'
+        : this.objective());
+    }
+    lines.push('[Q] close');
+    this.panel(lines);
   },
 
   drawConsole() {
@@ -1720,24 +1985,43 @@ const Game = {
 
   // ---- persistence ----
 
+  // Everything the player accumulated, including where they were standing:
+  // a world you return to has to still have you in it.
+  snapshot() {
+    const inv = {};
+    for (const [k, v] of this.inv) inv[k] = v;
+    return {
+      inv, read: this.read, done: this.done,
+      at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
+                                           Player.pitch, Player.z] : null,
+      t: typeof Sky !== 'undefined' ? Sky.t : null,
+      used: [...this.used],
+    };
+  },
+
+  restore(s) {
+    this.inv.clear();
+    for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
+    this.read = Array.isArray(s.read) ? s.read : [];
+    this.done = !!s.done;
+    this.used = new Set(s.used || []);
+    this.spawnAt = Array.isArray(s.at) ? s.at : null;
+    if (typeof s.t === 'number' && typeof Sky !== 'undefined') Sky.t = s.t;
+  },
+
   save() {
     if (typeof localStorage === 'undefined') { this.needSave = false; return; }
-    const obj = {};
-    for (const [k, v] of this.inv) obj[k] = v;
-    try { localStorage.setItem('ascii-inv-v1', JSON.stringify(obj)); }
-    catch (e) { console.warn('inventory save failed: ' + e.message); }
+    try { localStorage.setItem('ascii-save-v1', JSON.stringify(this.snapshot())); }
+    catch (e) { console.warn('save failed: ' + e.message); }
     this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-inv-v1');
+    const s = localStorage.getItem('ascii-save-v1');
     if (!s) return;
-    try {
-      const obj = JSON.parse(s);
-      this.inv.clear();
-      for (const k of Object.keys(obj)) this.inv.set(k, obj[k]);
-    } catch (e) { console.warn('inventory load failed'); }
+    try { this.restore(JSON.parse(s)); }
+    catch (e) { console.warn('load failed'); }
   },
 };
 </script>
@@ -1751,9 +2035,17 @@ const Player = {
   keys: {},
 
   init() {
-    const [sx, sy] = World.findSpawn();
-    this.x = sx; this.y = sy;
-    this.z = World.groundZ(sx, sy);
+    // a saved game puts you back where you stopped, facing where you looked
+    const at = Game.spawnAt;
+    if (at) {
+      this.x = at[0]; this.y = at[1];
+      this.angle = at[2]; this.pitch = at[3];
+      this.z = at[4];
+    } else {
+      const [sx, sy] = World.findSpawn();
+      this.x = sx; this.y = sy;
+      this.z = World.groundZ(sx, sy);
+    }
 
     addEventListener('keydown', e => {
       // the console wants raw typed characters, not just key codes - route
@@ -1796,7 +2088,10 @@ const Player = {
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
     const canvas = document.getElementById('screen');
-    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    canvas.addEventListener('click', () => {
+      if (Game.mode === 'title') Game.close();
+      canvas.requestPointerLock();
+    });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
     const locked = () => document.pointerLockElement === canvas;
     this.mouse = {};
@@ -1872,6 +2167,7 @@ const Player = {
       // axis-separated collision so we slide along obstacles
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
+      Game.needSave = true;   // where you are is part of the save
     }
     // digging: LMB carves, RMB fills; fills never engulf the player
     this.digCd = Math.max(0, (this.digCd || 0) - dt);
@@ -3875,7 +4171,7 @@ const GPURenderer = {
   let fpsAcc = 0, fpsN = 0, fpsLine = '';
   // ASCII only: the text atlas covers 32..126, and anything outside it
   // clears to a gap rather than drawing
-  const HUD_LINE = 'wasd move - Tab inventory - C craft - E examine - Enter console - LMB dig - RMB fill - F fullscreen';
+  const HUD_LINE = 'wasd move - E examine - Tab items - C craft - J record - Enter console - LMB dig - F fullscreen';
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();
@@ -3909,6 +4205,7 @@ const GPURenderer = {
     if (Game.uiDirty) {
       Overlay.clear();
       Overlay.writeRight(0, fpsLine);
+      Overlay.write(1, 0, Game.objective());
       Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       Game.drawUI();
       Game.uiDirty = false;

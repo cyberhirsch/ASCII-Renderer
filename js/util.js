@@ -281,6 +281,17 @@ function hallV(x, y, z, gz) {
   return [v, Math.max(pillar, floorSlab)];
 }
 
+// Which hall stands at this point, or null. CPU only - the shader needs the
+// geometry, but only the gameplay side needs to know whose hall it is.
+function hallIdAt(x, y, z) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return null;
+  const k = Math.floor(z / CAVES.BAND);
+  const cx = Math.floor(x / CAVES.HALL_E);
+  const cy = Math.floor(y / CAVES.HALL_E);
+  const a = hallAt(cx, cy, k, x, y);
+  return a ? { cx, cy, k, hall: a } : null;
+}
+
 // Cave void field: natural banded passages plus carved shafts and halls,
 // minus the protected solids (stair slabs, hall floors, pillars), which win
 // over every carve. Mirror of WGSL caveV. KEEP IN SYNC.

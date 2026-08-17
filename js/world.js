@@ -140,9 +140,12 @@ const World = {
     }
     const hv = hallV(px, py, pz, gz);
     if (hv[1] > -0.3) {
-      // inside a hall's protected solids; a pillar is still solid overhead
+      // inside a hall's protected solids; a pillar is still solid overhead.
+      // The hall it belongs to comes back with it: its pillars carry the
+      // record its builders cut.
       const up = hallV(px, py, pz + 0.8, gz);
-      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p, mat };
+      const id = hallIdAt(px, py, pz);
+      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p, mat, hall: id };
     }
     const sv = shaftV(px, py, pz, gz);
     if (sv[0] > -0.5 || sv[1] > -0.3) return { kind: 'stair', point: p, mat };

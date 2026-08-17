@@ -24,6 +24,14 @@ shading · **F** fullscreen.
 
 You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
 
+**There is something to find down there.** Someone cut those halls, and they
+left their record on the pillars. Examine one to read it. The story is laid
+out by depth — the founding near the surface, the digging below that, and the
+end in the deepest galleries — so reading it through means going down, which
+is the whole reason the caves are there. **J** keeps what you have read.
+Nothing about them is authored: the seed decides who they were, what they dug
+up, and how it ended, and the inscriptions are generated from those facts.
+
 The ground is made of something specific everywhere you stand. Soil lies deep
 on flats and thins to nothing on steep ground, which is why hillsides show
 bare rock — and you need a **shovel** for soil, a **pickaxe** for stone. Bare

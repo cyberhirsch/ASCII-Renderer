@@ -6,9 +6,17 @@ const Player = {
   keys: {},
 
   init() {
-    const [sx, sy] = World.findSpawn();
-    this.x = sx; this.y = sy;
-    this.z = World.groundZ(sx, sy);
+    // a saved game puts you back where you stopped, facing where you looked
+    const at = Game.spawnAt;
+    if (at) {
+      this.x = at[0]; this.y = at[1];
+      this.angle = at[2]; this.pitch = at[3];
+      this.z = at[4];
+    } else {
+      const [sx, sy] = World.findSpawn();
+      this.x = sx; this.y = sy;
+      this.z = World.groundZ(sx, sy);
+    }
 
     addEventListener('keydown', e => {
       // the console wants raw typed characters, not just key codes - route
@@ -51,7 +59,10 @@ const Player = {
     addEventListener('keyup', e => { this.keys[e.code] = false; });
 
     const canvas = document.getElementById('screen');
-    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    canvas.addEventListener('click', () => {
+      if (Game.mode === 'title') Game.close();
+      canvas.requestPointerLock();
+    });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
     const locked = () => document.pointerLockElement === canvas;
     this.mouse = {};
@@ -127,6 +138,7 @@ const Player = {
       // axis-separated collision so we slide along obstacles
       if (!this.blocked(this.x + mx, this.y)) this.x += mx;
       if (!this.blocked(this.x, this.y + my)) this.y += my;
+      Game.needSave = true;   // where you are is part of the save
     }
     // digging: LMB carves, RMB fills; fills never engulf the player
     this.digCd = Math.max(0, (this.digCd || 0) - dt);

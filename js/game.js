@@ -12,8 +12,16 @@ const Game = {
   devMode: false,       // gates debug view toggles (mono/raw) behind a command
   cmdBuf: '',
   cmdHistory: [],
+  read: [],             // inscription keys already read, in the order found
+  done: false,          // the record has been pieced together
+  spawnAt: null,        // where a saved game left the player standing
 
-  init() { this.load(); },
+  init() {
+    this.load();
+    // a returning player is dropped straight back in; a new one gets told
+    // where they are and what there is to find
+    if (!this.spawnAt) this.mode = 'title';
+  },
 
   // ---- inventory ----
 
@@ -126,9 +134,18 @@ const Game = {
       case 'clear':
         this.cmdHistory.length = 0;
         break;
+      case 'wipe':
+        this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+        if (typeof localStorage !== 'undefined') {
+          localStorage.removeItem('ascii-save-v1');
+          localStorage.removeItem('ascii-caves-v1');
+          localStorage.removeItem('ascii-removed-v1');
+        }
+        this.cmdHistory.push('save wiped - reload to start over');
+        break;
       case 'help':
         this.cmdHistory.push('commands: devmode, time <h>, freeze, daylen <s>,');
-        this.cmdHistory.push('clear, help');
+        this.cmdHistory.push('wipe, clear, help');
         break;
       default:
         this.cmdHistory.push('unknown command: ' + cmd);
@@ -142,9 +159,16 @@ const Game = {
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
       if (code === 'KeyC') { this.open('craft'); return true; }
+      if (code === 'KeyJ') { this.open('journal'); return true; }
       if (code === 'KeyE') { this.examine(); return true; }
       return false;
     }
+    // the title is dismissed by anything, and offers nothing else
+    if (this.mode === 'title') {
+      if (code !== 'F11') this.close();
+      return true;
+    }
+    if (code === 'KeyJ' && this.mode !== 'journal') { this.open('journal'); return true; }
     if (code === 'KeyQ' || code === 'Escape' || code === 'Tab') {
       this.close();
       return true;
@@ -262,10 +286,46 @@ const Game = {
         this.give('stone', 1);
         this.toast('+1 stone (' + this.count('stone') + ')');
       });
+    } else if (t.kind === 'pillar' && t.hall) {
+      const ins = Lore.inscription(t.hall.cx, t.hall.cy, t.hall.k);
+      const seen = this.read.includes(ins.key);
+      acts.push({ label: seen ? 'read again' : 'read the inscription',
+        fn: () => this.readInscription(ins) });
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
     return acts;
+  },
+
+  // ---- the record ----
+
+  // Which depths the player has read from. The story runs founding, digging,
+  // end down the three bands, so holding all three is holding the whole of
+  // it - and it can only be done by going down.
+  bandsRead() {
+    const b = new Set();
+    for (const k of this.read) b.add(k.split(',')[2]);
+    return b;
+  },
+
+  objective() {
+    if (this.done) return 'the record is whole';
+    const n = this.bandsRead().size;
+    if (this.read.length === 0) return 'find the carved halls, and read what they cut';
+    return 'the record runs deeper: ' + n + ' of 3 depths read';
+  },
+
+  readInscription(ins) {
+    this.reading = ins;
+    if (!this.read.includes(ins.key)) {
+      this.read.push(ins.key);
+      this.needSave = true;
+    }
+    this.open('reading');
+    if (!this.done && this.bandsRead().size >= 3) {
+      this.done = true;
+      this.needSave = true;
+    }
   },
 
   chop(t, sp) {
@@ -347,6 +407,70 @@ const Game = {
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
     if (this.mode === 'console') this.drawConsole();
+    if (this.mode === 'reading') this.drawReading();
+    if (this.mode === 'journal') this.drawJournal();
+    if (this.mode === 'title') this.drawTitle();
+  },
+
+  drawTitle() {
+    this.panel([
+      'A S C I I   W O R L D',
+      '',
+      'Every hill, cave and stone here is a',
+      'number, worked out the moment you look',
+      'at it. Nothing is stored. It goes on as',
+      'far as you care to walk.',
+      '',
+      'You are standing at a cave mouth. Someone',
+      'cut the stair below you, a long time ago,',
+      'and left their record on the walls.',
+      '',
+      'Find out who they were.',
+      '',
+      'E    look at what is in front of you',
+      'WASD walk    LMB dig    Tab your things',
+      'C    craft   J record   Enter console',
+      '',
+      'press any key',
+    ]);
+  },
+
+  drawReading() {
+    if (!this.reading) return;
+    const lines = ['CUT INTO THE PILLAR', ''];
+    for (const l of this.reading.lines) lines.push(l);
+    lines.push('');
+    if (this.done && this.bandsRead().size >= 3) {
+      lines.push('That is the last of it. The record is whole.');
+      lines.push('[J] read it through  [Q] close');
+    } else {
+      lines.push(this.objective());
+      lines.push('[Q] close');
+    }
+    this.panel(lines);
+  },
+
+  drawJournal() {
+    const c = Lore.civ();
+    const lines = ['THE RECORD OF ' + c.name.toUpperCase(), ''];
+    if (this.read.length === 0) {
+      lines.push('Nothing yet. Somewhere below, someone');
+      lines.push('cut their history into the stone.');
+    } else {
+      // in the order the story happened, not the order it was found
+      const order = [...this.read].sort((a, b) =>
+        Number(b.split(',')[2]) - Number(a.split(',')[2]));
+      for (const key of order) {
+        const [cx, cy, k] = key.split(',').map(Number);
+        for (const l of Lore.inscription(cx, cy, k).lines) lines.push(l);
+        lines.push('');
+      }
+      lines.push(this.done
+        ? 'Nothing else is written. They did not come back up.'
+        : this.objective());
+    }
+    lines.push('[Q] close');
+    this.panel(lines);
   },
 
   drawConsole() {
@@ -425,23 +549,42 @@ const Game = {
 
   // ---- persistence ----
 
+  // Everything the player accumulated, including where they were standing:
+  // a world you return to has to still have you in it.
+  snapshot() {
+    const inv = {};
+    for (const [k, v] of this.inv) inv[k] = v;
+    return {
+      inv, read: this.read, done: this.done,
+      at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
+                                           Player.pitch, Player.z] : null,
+      t: typeof Sky !== 'undefined' ? Sky.t : null,
+      used: [...this.used],
+    };
+  },
+
+  restore(s) {
+    this.inv.clear();
+    for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
+    this.read = Array.isArray(s.read) ? s.read : [];
+    this.done = !!s.done;
+    this.used = new Set(s.used || []);
+    this.spawnAt = Array.isArray(s.at) ? s.at : null;
+    if (typeof s.t === 'number' && typeof Sky !== 'undefined') Sky.t = s.t;
+  },
+
   save() {
     if (typeof localStorage === 'undefined') { this.needSave = false; return; }
-    const obj = {};
-    for (const [k, v] of this.inv) obj[k] = v;
-    try { localStorage.setItem('ascii-inv-v1', JSON.stringify(obj)); }
-    catch (e) { console.warn('inventory save failed: ' + e.message); }
+    try { localStorage.setItem('ascii-save-v1', JSON.stringify(this.snapshot())); }
+    catch (e) { console.warn('save failed: ' + e.message); }
     this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-inv-v1');
+    const s = localStorage.getItem('ascii-save-v1');
     if (!s) return;
-    try {
-      const obj = JSON.parse(s);
-      this.inv.clear();
-      for (const k of Object.keys(obj)) this.inv.set(k, obj[k]);
-    } catch (e) { console.warn('inventory load failed'); }
+    try { this.restore(JSON.parse(s)); }
+    catch (e) { console.warn('load failed'); }
   },
 };

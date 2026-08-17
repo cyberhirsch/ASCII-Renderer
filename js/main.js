@@ -38,7 +38,7 @@
   let fpsAcc = 0, fpsN = 0, fpsLine = '';
   // ASCII only: the text atlas covers 32..126, and anything outside it
   // clears to a gap rather than drawing
-  const HUD_LINE = 'wasd move - Tab inventory - C craft - E examine - Enter console - LMB dig - RMB fill - F fullscreen';
+  const HUD_LINE = 'wasd move - E examine - Tab items - C craft - J record - Enter console - LMB dig - F fullscreen';
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();
@@ -72,6 +72,7 @@
     if (Game.uiDirty) {
       Overlay.clear();
       Overlay.writeRight(0, fpsLine);
+      Overlay.write(1, 0, Game.objective());
       Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       Game.drawUI();
       Game.uiDirty = false;
