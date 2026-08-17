@@ -41,6 +41,7 @@ const Game = {
   key(code) {
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
+      if (code === 'KeyE') { this.examine(); return true; }
       return false;
     }
     if (code === 'KeyQ' || code === 'Escape' || code === 'Tab') {
@@ -58,7 +59,103 @@ const Game = {
   },
 
   confirm() {
-    // panel-specific confirm actions land with their phases
+    if (this.mode === 'examine' && this.actions.length) {
+      const n = this.actions.length;
+      const i = ((this.cursor % n) + n) % n;
+      this.actions[i].fn();
+      // actions may consume themselves (once-per-target); rebuild the list
+      this.actions = this.actionsFor(this.target);
+      this.cursor = Math.min(i, Math.max(0, this.actions.length - 1));
+      this.uiDirty = true;
+    }
+  },
+
+  // ---- examine ----
+
+  target: null, actions: [],
+  used: new Set(),   // once-per-target actions spent this session
+
+  examine() {
+    const p = Player;
+    const cp = Math.cos(p.pitch), sp = Math.sin(p.pitch);
+    const t = World.examineRay(p.x, p.y, p.z + CFG.EYE,
+      Math.cos(p.angle) * cp, Math.sin(p.angle) * cp, sp);
+    if (!t) { this.toast('nothing within reach'); return; }
+    this.target = t;
+    this.actions = this.actionsFor(t);
+    this.open('examine');
+  },
+
+  useKey(t, what) {
+    return what + ':' + (t.kind === 'tree'
+      ? t.ix + ',' + t.iy
+      : t.point.map(v => Math.round(v)).join(','));
+  },
+
+  actionsFor(t) {
+    const acts = [];
+    const once = (what, label, fn) => {
+      if (this.used.has(this.useKey(t, what))) return;
+      acts.push({ label, fn: () => { this.used.add(this.useKey(t, what)); fn(); } });
+    };
+    if (t.kind === 'tree') {
+      const sp = SPECIES[treeSpecies(t.ix, t.iy)];
+      acts.push({ label: 'chop' + (this.count('axe') ? '' : '  (needs an axe)'),
+        fn: () => this.chop(t, sp) });
+      if (sp.harvest) {
+        once('harvest', 'harvest  (+' + sp.harvest[1] + ' ' +
+          ITEMS[sp.harvest[0]].name + ')', () => {
+            this.give(sp.harvest[0], sp.harvest[1]);
+            this.toast('+' + sp.harvest[1] + ' ' + ITEMS[sp.harvest[0]].name);
+          });
+      }
+      once('branch', 'break branch  (+1 wood)', () => {
+        this.give('wood', 1);
+        this.toast('+1 wood (' + this.count('wood') + ')');
+      });
+      acts.push({ label: 'hug', fn: () => this.toast(sp.hug) });
+    } else if (t.kind === 'lichen') {
+      once('pick', 'harvest  (+1 glow lichen)', () => {
+        this.give('lichen', 1);
+        this.toast('+1 glow lichen (' + this.count('lichen') + ')');
+      });
+    } else if (t.kind === 'water') {
+      acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
+    }
+    return acts;
+  },
+
+  chop(t, sp) {
+    if (!this.count('axe')) { this.toast('you need an axe for that'); return; }
+    if (typeof Fells === 'undefined') { this.toast('the axe is not sharp yet'); return; }
+    Fells.add(t.ix, t.iy);
+    this.give('wood', sp.chop);
+    this.toast('the ' + sp.name + ' falls  (+' + sp.chop + ' wood)');
+    this.close();
+  },
+
+  describe(t) {
+    switch (t.kind) {
+      case 'tree': {
+        const sp = SPECIES[treeSpecies(t.ix, t.iy)];
+        return [sp.name.toUpperCase(), sp.desc];
+      }
+      case 'water':     return ['WATER', 'Still, dark, patient.'];
+      case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
+      case 'cavewall':  return ['CAVE WALL', 'Water-worn stone. It has been',
+                                'down here longer than anything.'];
+      case 'dug':       return ['HEWN ROCK', 'Tool marks. Yours.'];
+      case 'stair':     return ['STAIR WELL', 'Old, deliberate, patient work.',
+                                'Someone cut this. Long ago.'];
+      case 'pillar':    return ['CARVED PILLAR', 'Tool marks spiral upward.',
+                                'It is holding the mountain up.'];
+      case 'hallfloor': return ['CARVED FLOOR', 'Dead flat. Nothing natural',
+                                'is this flat.'];
+      case 'sand':      return ['SHORE SAND', 'Fine and pale.'];
+      case 'rock':      return ['BARE ROCK', 'Too steep for anything to root.'];
+      case 'grass':     return ['MEADOW', 'Wind-combed grass.'];
+      default:          return [t.kind.toUpperCase(), ''];
+    }
   },
 
   // ---- per-frame ----
@@ -90,6 +187,24 @@ const Game = {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
     if (this.mode === 'inventory') this.drawInventory();
+    if (this.mode === 'examine') this.drawExamine();
+  },
+
+  drawExamine() {
+    if (!this.target) return;
+    const lines = [...this.describe(this.target), ''];
+    if (this.actions.length) {
+      const n = this.actions.length;
+      const cur = ((this.cursor % n) + n) % n;
+      for (let i = 0; i < n; i++) {
+        lines.push((i === cur ? '> ' : '  ') + this.actions[i].label);
+      }
+      lines.push('');
+      lines.push('[W/S] choose  [E] do  [Q] close');
+    } else {
+      lines.push('[Q] close');
+    }
+    this.panel(lines);
   },
 
   drawInventory() {

@@ -302,6 +302,43 @@ function solidD(x, y, z) {
   return d;
 }
 
+// -------- 3D value noise — mirror of WGSL vnoise --------
+// Used by the shader for canopy erosion and glow lichen; mirrored here so
+// the examine system can recognise a lichen patch at a hit point.
+function jsUhash3(x, y, z) {
+  return jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, z >>> 0) >>> 0;
+}
+
+function vnoise(px, py, pz) {
+  const ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz);
+  const fx = px - ix, fy = py - iy, fz = pz - iz;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const uz = fz * fz * (3 - 2 * fz);
+  const s = 1 / 4294967296;
+  const c000 = jsUhash3(ix, iy, iz) * s;
+  const c100 = jsUhash3(ix + 1, iy, iz) * s;
+  const c010 = jsUhash3(ix, iy + 1, iz) * s;
+  const c110 = jsUhash3(ix + 1, iy + 1, iz) * s;
+  const c001 = jsUhash3(ix, iy, iz + 1) * s;
+  const c101 = jsUhash3(ix + 1, iy, iz + 1) * s;
+  const c011 = jsUhash3(ix, iy + 1, iz + 1) * s;
+  const c111 = jsUhash3(ix + 1, iy + 1, iz + 1) * s;
+  const x00 = c000 + (c100 - c000) * ux;
+  const x10 = c010 + (c110 - c010) * ux;
+  const x01 = c001 + (c101 - c001) * ux;
+  const x11 = c011 + (c111 - c011) * ux;
+  const y0 = x00 + (x10 - x00) * uy;
+  const y1 = x01 + (x11 - x01) * uy;
+  return y0 + (y1 - y0) * uz;
+}
+
+// species index for the tree anchored in cell (ix, iy) - deterministic,
+// independent of the placement hash so size and species do not correlate
+function treeSpecies(ix, iy) {
+  return Math.min(2, Math.floor(hash01(ix, iy, (CFG.SEED ^ 0x5EED) >>> 0) * 3));
+}
+
 // -------- tree placement — mirror of WGSL treeAt --------
 // returns null or { cx, cy, r, trunkH, trunkR }
 function treeAt(ix, iy) {

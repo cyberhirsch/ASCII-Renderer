@@ -53,6 +53,71 @@ const World = {
     return best && { tree: best, dist: bestD };
   },
 
+  // Classify what the view ray meets within examine reach. Returns
+  // { kind, point, ... } or null. Trees are tested analytically against the
+  // hash-placed set; everything solid is classified by asking the same
+  // field functions the renderer draws with.
+  examineRay(ex, ey, ez, dx, dy, dz) {
+    for (let t = 0.4; t < 4.5; t += 0.07) {
+      const px = ex + dx * t, py = ey + dy * t, pz = ez + dz * t;
+      // trees: trunk cylinder or canopy sphere in nearby cells
+      const cx = Math.floor(px), cy = Math.floor(py);
+      for (let oy = -2; oy <= 2; oy++) {
+        for (let ox = -2; ox <= 2; ox++) {
+          const tr = treeAt(cx + ox, cy + oy);
+          if (!tr) continue;
+          if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
+          const g = terrainH(tr.cx, tr.cy);
+          const d2 = (px - tr.cx) ** 2 + (py - tr.cy) ** 2;
+          const canZ = g + tr.trunkH + tr.r * 0.55;
+          const inTrunk = d2 < (tr.trunkR + 0.15) ** 2 &&
+                          pz > g && pz < g + tr.trunkH;
+          const inCanopy = d2 + (pz - canZ) ** 2 < tr.r * tr.r;
+          if (inTrunk || inCanopy) {
+            return { kind: 'tree', ix: cx + ox, iy: cy + oy, tree: tr,
+                     point: [px, py, pz] };
+          }
+        }
+      }
+      // open water
+      if (pz < CFG.SEA_LEVEL && terrainH(px, py) < CFG.SEA_LEVEL) {
+        return { kind: 'water', point: [px, py, pz] };
+      }
+      if (solidD(px, py, pz) >= 0) return this.classifySolid(px, py, pz);
+    }
+    return null;
+  },
+
+  classifySolid(px, py, pz) {
+    const gz = terrainH(px, py);
+    const p = [px, py, pz];
+    if (typeof Edits !== 'undefined' && Edits.bounds &&
+        Math.abs(Edits.sample(px, py, pz)) > 0.05) {
+      return { kind: 'dug', point: p };
+    }
+    const hv = hallV(px, py, pz, gz);
+    if (hv[1] > -0.3) {
+      // inside a hall's protected solids; a pillar is still solid overhead
+      const up = hallV(px, py, pz + 0.8, gz);
+      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p };
+    }
+    const sv = shaftV(px, py, pz, gz);
+    if (sv[0] > -0.5 || sv[1] > -0.3) return { kind: 'stair', point: p };
+    if (pz < gz - 1.0) {
+      if (vnoise(px * 1.9, py * 1.9, pz * 1.9) > 0.8) {
+        return { kind: 'lichen', point: p };
+      }
+      return { kind: 'cavewall', point: p };
+    }
+    if (gz < CFG.SEA_LEVEL + 0.55) return { kind: 'sand', point: p };
+    // slope decides grass vs bare rock, same threshold family as the shader
+    const e = 0.35;
+    const hx = terrainH(px + e, py) - terrainH(px - e, py);
+    const hy = terrainH(px, py + e) - terrainH(px, py - e);
+    const nz = 2 * e / Math.hypot(hx, hy, 2 * e);
+    return { kind: (1 - nz) > 0.25 ? 'rock' : 'grass', point: p };
+  },
+
   // Spawn beside a cave entrance when one exists nearby: scan shaft
   // placement cells ring by ring from the origin, then stand on dry, gentle
   // ground at the rim of the first entrance found.

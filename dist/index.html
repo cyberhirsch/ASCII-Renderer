@@ -389,6 +389,43 @@ function solidD(x, y, z) {
   return d;
 }
 
+// -------- 3D value noise — mirror of WGSL vnoise --------
+// Used by the shader for canopy erosion and glow lichen; mirrored here so
+// the examine system can recognise a lichen patch at a hit point.
+function jsUhash3(x, y, z) {
+  return jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, z >>> 0) >>> 0;
+}
+
+function vnoise(px, py, pz) {
+  const ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz);
+  const fx = px - ix, fy = py - iy, fz = pz - iz;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const uz = fz * fz * (3 - 2 * fz);
+  const s = 1 / 4294967296;
+  const c000 = jsUhash3(ix, iy, iz) * s;
+  const c100 = jsUhash3(ix + 1, iy, iz) * s;
+  const c010 = jsUhash3(ix, iy + 1, iz) * s;
+  const c110 = jsUhash3(ix + 1, iy + 1, iz) * s;
+  const c001 = jsUhash3(ix, iy, iz + 1) * s;
+  const c101 = jsUhash3(ix + 1, iy, iz + 1) * s;
+  const c011 = jsUhash3(ix, iy + 1, iz + 1) * s;
+  const c111 = jsUhash3(ix + 1, iy + 1, iz + 1) * s;
+  const x00 = c000 + (c100 - c000) * ux;
+  const x10 = c010 + (c110 - c010) * ux;
+  const x01 = c001 + (c101 - c001) * ux;
+  const x11 = c011 + (c111 - c011) * ux;
+  const y0 = x00 + (x10 - x00) * uy;
+  const y1 = x01 + (x11 - x01) * uy;
+  return y0 + (y1 - y0) * uz;
+}
+
+// species index for the tree anchored in cell (ix, iy) - deterministic,
+// independent of the placement hash so size and species do not correlate
+function treeSpecies(ix, iy) {
+  return Math.min(2, Math.floor(hash01(ix, iy, (CFG.SEED ^ 0x5EED) >>> 0) * 3));
+}
+
 // -------- tree placement — mirror of WGSL treeAt --------
 // returns null or { cx, cy, r, trunkH, trunkR }
 function treeAt(ix, iy) {
@@ -462,6 +499,71 @@ const World = {
       }
     }
     return best && { tree: best, dist: bestD };
+  },
+
+  // Classify what the view ray meets within examine reach. Returns
+  // { kind, point, ... } or null. Trees are tested analytically against the
+  // hash-placed set; everything solid is classified by asking the same
+  // field functions the renderer draws with.
+  examineRay(ex, ey, ez, dx, dy, dz) {
+    for (let t = 0.4; t < 4.5; t += 0.07) {
+      const px = ex + dx * t, py = ey + dy * t, pz = ez + dz * t;
+      // trees: trunk cylinder or canopy sphere in nearby cells
+      const cx = Math.floor(px), cy = Math.floor(py);
+      for (let oy = -2; oy <= 2; oy++) {
+        for (let ox = -2; ox <= 2; ox++) {
+          const tr = treeAt(cx + ox, cy + oy);
+          if (!tr) continue;
+          if (typeof Fells !== 'undefined' && Fells.has(cx + ox, cy + oy)) continue;
+          const g = terrainH(tr.cx, tr.cy);
+          const d2 = (px - tr.cx) ** 2 + (py - tr.cy) ** 2;
+          const canZ = g + tr.trunkH + tr.r * 0.55;
+          const inTrunk = d2 < (tr.trunkR + 0.15) ** 2 &&
+                          pz > g && pz < g + tr.trunkH;
+          const inCanopy = d2 + (pz - canZ) ** 2 < tr.r * tr.r;
+          if (inTrunk || inCanopy) {
+            return { kind: 'tree', ix: cx + ox, iy: cy + oy, tree: tr,
+                     point: [px, py, pz] };
+          }
+        }
+      }
+      // open water
+      if (pz < CFG.SEA_LEVEL && terrainH(px, py) < CFG.SEA_LEVEL) {
+        return { kind: 'water', point: [px, py, pz] };
+      }
+      if (solidD(px, py, pz) >= 0) return this.classifySolid(px, py, pz);
+    }
+    return null;
+  },
+
+  classifySolid(px, py, pz) {
+    const gz = terrainH(px, py);
+    const p = [px, py, pz];
+    if (typeof Edits !== 'undefined' && Edits.bounds &&
+        Math.abs(Edits.sample(px, py, pz)) > 0.05) {
+      return { kind: 'dug', point: p };
+    }
+    const hv = hallV(px, py, pz, gz);
+    if (hv[1] > -0.3) {
+      // inside a hall's protected solids; a pillar is still solid overhead
+      const up = hallV(px, py, pz + 0.8, gz);
+      return { kind: up[1] > -0.3 ? 'pillar' : 'hallfloor', point: p };
+    }
+    const sv = shaftV(px, py, pz, gz);
+    if (sv[0] > -0.5 || sv[1] > -0.3) return { kind: 'stair', point: p };
+    if (pz < gz - 1.0) {
+      if (vnoise(px * 1.9, py * 1.9, pz * 1.9) > 0.8) {
+        return { kind: 'lichen', point: p };
+      }
+      return { kind: 'cavewall', point: p };
+    }
+    if (gz < CFG.SEA_LEVEL + 0.55) return { kind: 'sand', point: p };
+    // slope decides grass vs bare rock, same threshold family as the shader
+    const e = 0.35;
+    const hx = terrainH(px + e, py) - terrainH(px - e, py);
+    const hy = terrainH(px, py + e) - terrainH(px, py - e);
+    const nz = 2 * e / Math.hypot(hx, hy, 2 * e);
+    return { kind: (1 - nz) > 0.25 ? 'rock' : 'grass', point: p };
   },
 
   // Spawn beside a cave entrance when one exists nearby: scan shaft
@@ -847,6 +949,7 @@ const Game = {
   key(code) {
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
+      if (code === 'KeyE') { this.examine(); return true; }
       return false;
     }
     if (code === 'KeyQ' || code === 'Escape' || code === 'Tab') {
@@ -864,7 +967,103 @@ const Game = {
   },
 
   confirm() {
-    // panel-specific confirm actions land with their phases
+    if (this.mode === 'examine' && this.actions.length) {
+      const n = this.actions.length;
+      const i = ((this.cursor % n) + n) % n;
+      this.actions[i].fn();
+      // actions may consume themselves (once-per-target); rebuild the list
+      this.actions = this.actionsFor(this.target);
+      this.cursor = Math.min(i, Math.max(0, this.actions.length - 1));
+      this.uiDirty = true;
+    }
+  },
+
+  // ---- examine ----
+
+  target: null, actions: [],
+  used: new Set(),   // once-per-target actions spent this session
+
+  examine() {
+    const p = Player;
+    const cp = Math.cos(p.pitch), sp = Math.sin(p.pitch);
+    const t = World.examineRay(p.x, p.y, p.z + CFG.EYE,
+      Math.cos(p.angle) * cp, Math.sin(p.angle) * cp, sp);
+    if (!t) { this.toast('nothing within reach'); return; }
+    this.target = t;
+    this.actions = this.actionsFor(t);
+    this.open('examine');
+  },
+
+  useKey(t, what) {
+    return what + ':' + (t.kind === 'tree'
+      ? t.ix + ',' + t.iy
+      : t.point.map(v => Math.round(v)).join(','));
+  },
+
+  actionsFor(t) {
+    const acts = [];
+    const once = (what, label, fn) => {
+      if (this.used.has(this.useKey(t, what))) return;
+      acts.push({ label, fn: () => { this.used.add(this.useKey(t, what)); fn(); } });
+    };
+    if (t.kind === 'tree') {
+      const sp = SPECIES[treeSpecies(t.ix, t.iy)];
+      acts.push({ label: 'chop' + (this.count('axe') ? '' : '  (needs an axe)'),
+        fn: () => this.chop(t, sp) });
+      if (sp.harvest) {
+        once('harvest', 'harvest  (+' + sp.harvest[1] + ' ' +
+          ITEMS[sp.harvest[0]].name + ')', () => {
+            this.give(sp.harvest[0], sp.harvest[1]);
+            this.toast('+' + sp.harvest[1] + ' ' + ITEMS[sp.harvest[0]].name);
+          });
+      }
+      once('branch', 'break branch  (+1 wood)', () => {
+        this.give('wood', 1);
+        this.toast('+1 wood (' + this.count('wood') + ')');
+      });
+      acts.push({ label: 'hug', fn: () => this.toast(sp.hug) });
+    } else if (t.kind === 'lichen') {
+      once('pick', 'harvest  (+1 glow lichen)', () => {
+        this.give('lichen', 1);
+        this.toast('+1 glow lichen (' + this.count('lichen') + ')');
+      });
+    } else if (t.kind === 'water') {
+      acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
+    }
+    return acts;
+  },
+
+  chop(t, sp) {
+    if (!this.count('axe')) { this.toast('you need an axe for that'); return; }
+    if (typeof Fells === 'undefined') { this.toast('the axe is not sharp yet'); return; }
+    Fells.add(t.ix, t.iy);
+    this.give('wood', sp.chop);
+    this.toast('the ' + sp.name + ' falls  (+' + sp.chop + ' wood)');
+    this.close();
+  },
+
+  describe(t) {
+    switch (t.kind) {
+      case 'tree': {
+        const sp = SPECIES[treeSpecies(t.ix, t.iy)];
+        return [sp.name.toUpperCase(), sp.desc];
+      }
+      case 'water':     return ['WATER', 'Still, dark, patient.'];
+      case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
+      case 'cavewall':  return ['CAVE WALL', 'Water-worn stone. It has been',
+                                'down here longer than anything.'];
+      case 'dug':       return ['HEWN ROCK', 'Tool marks. Yours.'];
+      case 'stair':     return ['STAIR WELL', 'Old, deliberate, patient work.',
+                                'Someone cut this. Long ago.'];
+      case 'pillar':    return ['CARVED PILLAR', 'Tool marks spiral upward.',
+                                'It is holding the mountain up.'];
+      case 'hallfloor': return ['CARVED FLOOR', 'Dead flat. Nothing natural',
+                                'is this flat.'];
+      case 'sand':      return ['SHORE SAND', 'Fine and pale.'];
+      case 'rock':      return ['BARE ROCK', 'Too steep for anything to root.'];
+      case 'grass':     return ['MEADOW', 'Wind-combed grass.'];
+      default:          return [t.kind.toUpperCase(), ''];
+    }
   },
 
   // ---- per-frame ----
@@ -896,6 +1095,24 @@ const Game = {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
     if (this.mode === 'inventory') this.drawInventory();
+    if (this.mode === 'examine') this.drawExamine();
+  },
+
+  drawExamine() {
+    if (!this.target) return;
+    const lines = [...this.describe(this.target), ''];
+    if (this.actions.length) {
+      const n = this.actions.length;
+      const cur = ((this.cursor % n) + n) % n;
+      for (let i = 0; i < n; i++) {
+        lines.push((i === cur ? '> ' : '  ') + this.actions[i].label);
+      }
+      lines.push('');
+      lines.push('[W/S] choose  [E] do  [Q] close');
+    } else {
+      lines.push('[Q] close');
+    }
+    this.panel(lines);
   },
 
   drawInventory() {
