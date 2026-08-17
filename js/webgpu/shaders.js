@@ -1125,13 +1125,15 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   }
   var col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
 
-  // text overlay: replaces the scene glyph in this cell, over a dark chip
+  // Text overlay, embedded in the glyph field: the scene keeps rendering
+  // beneath a UI cell, dimmed just enough for contrast, so panels read as
+  // brighter text woven into the world rather than boxes floating over it.
   let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
   let code = overlay[ci];
   if (code >= 32u && code < 127u) {
     let au2 = (f32(code - 32u) + inCell.x) / 95.0;
     let cov2 = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
-    col = mix(col * 0.15, vec3f(0.92, 0.96, 1.0), cov2);
+    col = mix(col * ${CFG.UI_CHIP}, vec3f(1.0), cov2);
   }
   return vec4f(col, 1.0);
 }
