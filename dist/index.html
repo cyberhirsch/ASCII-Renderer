@@ -750,14 +750,13 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
 }
 
 // -------- occlusion for shadows and AO --------
-// This runs for every one of the dozens of shadow/AO rays per pixel, so it is
-// strictly budgeted: a short coarse terrain march and a small tree walk that
-// tests only the cells the ray actually crosses. The full-fidelity search
-// (neighbourhood reach, exact canopies) is reserved for primary rays —
-// occlusion rays trade a slightly loose canopy for two orders of magnitude
-// less hashing, which is the difference between 60fps and a device timeout.
+// Occlusion rays return TRANSMITTANCE, not a boolean: solid hits give 0,
+// canopies multiply in their translucency. A stochastic canopy test would
+// need many rays to average clean - with near-parallel sun rays it dithers
+// into blocky speckle - while transmittance is deterministic and smooth at
+// the same cost. Budgeted: coarse terrain march, single-cell tree walk.
 
-fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
+fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
   // terrain: coarse march, few steps
   if (!(ro.z >= U.maxHeight && rd.z >= 0.0)) {
     var t = 0.2;
@@ -766,35 +765,40 @@ fn occluded(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
       let p = ro + rd * t;
       if (p.z >= U.maxHeight && rd.z >= 0.0) { break; }
       let d = p.z - terrainH(p.xy);
-      if (d < 0.0) { return true; }
+      if (d < 0.0) { return 0.0; }
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
 
-  // trees: walk at cell pitch along the ray, testing one cell per step with
-  // a radius-inflated sphere so overhang from neighbours still registers
+  var trans = 1.0;
+  // trees: walk at cell pitch along the ray, one cell per step
   let hlen = length(rd.xy);
   if (hlen > 1e-4) {
     let treeRange = min(maxT, 14.0);
     let steps = i32(min(treeRange * hlen, 14.0));
+    var lastCell = vec2i(99999, 99999);
     for (var i = 0; i < steps; i = i + 1) {
       let p = ro + rd * (f32(i) + 0.5) / hlen;
-      let tr = treeAt(i32(floor(p.x)), i32(floor(p.y)));
+      let cell = vec2i(i32(floor(p.x)), i32(floor(p.y)));
+      if (cell.x == lastCell.x && cell.y == lastCell.y) { continue; }
+      lastCell = cell;
+      let tr = treeAt(cell.x, cell.y);
       if (!tr.present) { continue; }
       let g = terrainH(vec2f(tr.cx, tr.cy));
       let canZ = g + tr.trunkH + tr.r * 0.55;
-      // trunk: 2D point-to-segment shortcut at this sample
       if (p.z > g && p.z < g + tr.trunkH &&
-          length(p.xy - vec2f(tr.cx, tr.cy)) < 0.14) { return true; }
+          length(p.xy - vec2f(tr.cx, tr.cy)) < 0.14) { return 0.0; }
       let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
       if (sph.y > 0.001 && sph.x < treeRange) {
+        let mid = ro + rd * max((sph.x + sph.y) * 0.5, 0.0);
+        let dens = vnoise(mid * 2.6) * 0.75 + vnoise(mid * 6.5) * 0.25;
         let chord = max(sph.y - max(sph.x, 0.0), 0.0);
-        let opacity = clamp(1.0 - exp(-chord * 1.1), 0.0, 0.9);
-        if (hash1f(ro.xy * 37.0 + rd.xy * 91.0) < opacity) { return true; }
+        trans = trans * exp(-chord * 1.1 * (0.3 + 1.4 * dens));
+        if (trans < 0.04) { return 0.0; }
       }
     }
   }
-  return false;
+  return trans;
 }
 
 fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
@@ -810,7 +814,7 @@ fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
     let rad = sqrt(u) * U.sunAngle;
     let ang = rot + f32(i) * 2.39996323;
     let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
-    if (!occluded(p, d, 60.0)) { lit = lit + 1.0; }
+    lit = lit + transmit(p, d, 60.0);
   }
   return lit / f32(n);
 }
@@ -829,7 +833,7 @@ fn tracedAO(p : vec3f, nrm : vec3f, seed : vec2f, nRays : i32) -> f32 {
     let zz = sqrt(max(0.0, 1.0 - u));
     let ang = rot + f32(i) * 2.39996323;
     let d = b1 * (cos(ang) * rr) + b2 * (sin(ang) * rr) + nrm * zz;
-    if (!occluded(p, normalize(d), U.aoRadius)) { vis = vis + 1.0; }
+    vis = vis + transmit(p, normalize(d), U.aoRadius);
   }
   return vis / f32(n);
 }
