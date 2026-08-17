@@ -88,7 +88,7 @@ const CFG = {
   // bigger overall, which is both the look and far fewer rays.
   CELL_W: 12,         // CSS px per cell, horizontal
   CELL_H: 22,         // CSS px per cell, vertical
-  MONO: true,         // uniform grayscale (M toggles)
+  MONO: false,        // uniform grayscale; devmode + M toggles
   SUN_COL: [1.00, 0.86, 0.46],
   SUN_I: 1.55,
   AMB_COL: [0.20, 0.31, 0.55],
@@ -1072,6 +1072,7 @@ const Game = {
   consoleInput(e) {
     if (e.code === 'Escape') { this.close(); return; }
     if (e.code === 'Enter') {
+      if (!this.cmdBuf.trim()) { this.close(); return; }
       this.runCommand(this.cmdBuf);
       this.cmdBuf = '';
       this.uiDirty = true;
@@ -2815,10 +2816,12 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   // WHICH character this cell renders. A UI cell looks up the text atlas
   // instead of the tone-selected glyph atlas, before the shared ink step
   // below runs - so a letter is shaded exactly like any other glyph in the
-  // field, and a word reads as ascii-art that happens to spell it.
+  // field, and a word reads as ascii-art that happens to spell it. A space
+  // (the panel's padding) leaves cov untouched, so gaps between words show
+  // the scene's own glyph rather than blanking to a box.
   let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
   let code = overlay[ci];
-  if (code >= 32u && code < 127u) {
+  if (code > 32u && code < 127u) {
     let au2 = (f32(code - 32u) + inCell.x) / 95.0;
     cov = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
   }

@@ -295,6 +295,20 @@ if (c.Fells) {
   G.consoleInput({ code: 'Escape', key: 'Escape' });
   (G.mode === 'play') ? ok('Escape closes the console') : fail('Escape did not close console');
 
+  // Enter on an empty buffer also closes, rather than running a blank command
+  const histLenBefore = G.cmdHistory.length;
+  G.openConsole();
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (G.mode === 'play' && G.cmdHistory.length === histLenBefore)
+    ? ok('Enter on an empty buffer closes the console without logging a command')
+    : fail('empty Enter did not close cleanly: mode=' + G.mode);
+  // Enter on whitespace-only input behaves the same way
+  G.openConsole();
+  G.cmdBuf = '   ';
+  G.consoleInput({ code: 'Enter', key: 'Enter' });
+  (G.mode === 'play') ? ok('Enter on whitespace-only input closes the console')
+                      : fail('whitespace Enter did not close');
+
   // console panel renders into the overlay
   G.openConsole();
   G.cmdBuf = 'hello';

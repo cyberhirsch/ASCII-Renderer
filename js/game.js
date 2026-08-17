@@ -48,6 +48,7 @@ const Game = {
   consoleInput(e) {
     if (e.code === 'Escape') { this.close(); return; }
     if (e.code === 'Enter') {
+      if (!this.cmdBuf.trim()) { this.close(); return; }
       this.runCommand(this.cmdBuf);
       this.cmdBuf = '';
       this.uiDirty = true;

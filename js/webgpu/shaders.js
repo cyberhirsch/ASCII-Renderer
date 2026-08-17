@@ -1116,10 +1116,12 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   // WHICH character this cell renders. A UI cell looks up the text atlas
   // instead of the tone-selected glyph atlas, before the shared ink step
   // below runs - so a letter is shaded exactly like any other glyph in the
-  // field, and a word reads as ascii-art that happens to spell it.
+  // field, and a word reads as ascii-art that happens to spell it. A space
+  // (the panel's padding) leaves cov untouched, so gaps between words show
+  // the scene's own glyph rather than blanking to a box.
   let ci = i32(cell.y) * i32(R.gridRes.x) + i32(cell.x);
   let code = overlay[ci];
-  if (code >= 32u && code < 127u) {
+  if (code > 32u && code < 127u) {
     let au2 = (f32(code - 32u) + inCell.x) / 95.0;
     cov = textureSampleLevel(textAtlas, samp, vec2f(au2, inCell.y), 0.0).r;
   }

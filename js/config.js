@@ -10,7 +10,7 @@ const CFG = {
   // bigger overall, which is both the look and far fewer rays.
   CELL_W: 12,         // CSS px per cell, horizontal
   CELL_H: 22,         // CSS px per cell, vertical
-  MONO: true,         // uniform grayscale (M toggles)
+  MONO: false,        // uniform grayscale; devmode + M toggles
   SUN_COL: [1.00, 0.86, 0.46],
   SUN_I: 1.55,
   AMB_COL: [0.20, 0.31, 0.55],
