@@ -57,6 +57,8 @@ struct Uniforms {
   skyAngle  : f32,   // the celestial sphere's rotation for this instant
   moonDir   : vec3f, // the moon runs opposite the sun
   night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
+  keyDir    : vec3f, // what is actually lighting the scene: sun, then moon
+  pad7      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -936,9 +938,9 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
 
 fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
   var tt = vec3f(0.0, 0.0, 1.0);
-  if (abs(U.sunDir.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
-  let b1 = normalize(cross(tt, U.sunDir));
-  let b2 = cross(U.sunDir, b1);
+  if (abs(U.keyDir.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
+  let b1 = normalize(cross(tt, U.keyDir));
+  let b2 = cross(U.keyDir, b1);
   let n = nRays;
   let rot = hash1f(seed) * 6.2831853;
   var lit = 0.0;
@@ -946,7 +948,7 @@ fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
     let u = (f32(i) + 0.5) / f32(n);
     let rad = sqrt(u) * U.sunAngle;
     let ang = rot + f32(i) * 2.39996323;
-    let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
+    let d = normalize(U.keyDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
     lit = lit + transmit(p, d, 60.0);
   }
   return lit / f32(n);
@@ -1229,8 +1231,8 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     if (nSun > 0) { sun = softShadow(p, seed, nSun); }
     var ao = 0.88;
     if (nAO > 0) { ao = tracedAO(p, h.n, seed, nAO); }
-    let ndl = select(max(dot(h.n, U.sunDir), 0.0),
-                     mix(abs(dot(h.n, U.sunDir)), 1.0, 0.35), h.canopy);
+    let ndl = select(max(dot(h.n, U.keyDir), 0.0),
+                     mix(abs(dot(h.n, U.keyDir)), 1.0, 0.35), h.canopy);
 
     let skyAmt = mix(0.55, 1.0, h.n.z * 0.5 + 0.5) * ao;
     var lit = h.albedo * U.ambCol * (U.ambI * skyAmt);
@@ -1240,7 +1242,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 
     // specular only where the material reflects: water now, metal later
     if (sun > 0.0 && h.spec > 0.0) {
-      let r = reflect(-U.sunDir, h.n);
+      let r = reflect(-U.keyDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 48.0);
       lit = lit + U.sunCol * spec * 0.75 * sun * h.spec;
     }

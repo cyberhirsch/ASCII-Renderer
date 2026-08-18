@@ -635,6 +635,28 @@ if (c.Sky) {
     ? ok(`first star waits until the sun is under (sin el ${firstStarH.toFixed(3)})`)
     : fail(`first star too early: ${firstStarH}`);
 
+  // The key light must always be ABOVE the horizon, or it lights nothing and
+  // the scene collapses onto the bottom of the glyph ramp. This is the bug
+  // that painted shaded ground pure black at night.
+  let lowKey = 0, worstKey = 1;
+  for (let i = 0; i <= 200; i++) {
+    Sky.t = i / 200;
+    const kz = Sky.keyDir()[2];
+    if (kz < -0.02) lowKey++;
+    worstKey = Math.min(worstKey, kz);
+  }
+  (lowKey === 0)
+    ? ok(`the key light stays above the horizon all cycle (lowest ${worstKey.toFixed(2)})`)
+    : fail(`key light drops below the horizon at ${lowKey} points`);
+  // by day it is the sun; by night it is the moon
+  Sky.setHour(12);
+  (Math.abs(Sky.keyDir()[2] - Sky.sunDir()[2]) < 1e-9)
+    ? ok('the sun is the key light by day') : fail('day key is not the sun');
+  Sky.setHour(0);
+  (Math.abs(Sky.keyDir()[2] - Sky.moonDir()[2]) < 1e-9)
+    ? ok('the moon takes over as key light at night')
+    : fail('night key is not the moon');
+
   // the sky turns once a day, in the same sense the sun travels
   Sky.t = 0;
   const a0 = Sky.skyAngle();

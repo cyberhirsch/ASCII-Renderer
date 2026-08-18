@@ -67,7 +67,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -268,7 +268,7 @@ const GPURenderer = {
       Removed.gpuDirty = false;
     }
 
-    const u = new Float32Array(64);
+    const u = new Float32Array(68);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -304,6 +304,7 @@ const GPURenderer = {
     u[59] = sky.skyAngle;
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
+    u.set(sky.keyDir, 64);
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

@@ -70,6 +70,17 @@ const Sky = {
     return this.dir(CFG.SUN_AZ + this.t * Math.PI * 2, el);
   },
 
+  // Where the light actually comes from. Once the sun is down it stops
+  // lighting anything - it is under the world - so the moon takes over as
+  // the key. Without this the night has no directional light at all: only
+  // ambient survives, the whole scene collapses into the bottom two or three
+  // glyphs of a 24-step ramp, and any shaded pocket falls off the end into
+  // solid black. The handover happens at the horizon, where both are grazing
+  // and neither casts much, so it costs nothing to switch there.
+  keyDir() {
+    return this.sunHeight() > 0 ? this.sunDir() : this.moonDir();
+  },
+
   // the moon runs opposite the sun, so it is up when the sun is not
   moonDir() {
     const el = Math.asin(clamp(-this.sunHeight(), -1, 1)) * 0.75;
@@ -108,6 +119,7 @@ const Sky = {
     // up), while the red in the sky follows the narrower dusk curve.
     return {
       sunDir: this.sunDir(),
+      keyDir: this.keyDir(),
       moonDir: this.moonDir(),
       night: n,
       starAmt: this.starAmt(),

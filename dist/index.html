@@ -927,6 +927,17 @@ const Sky = {
     return this.dir(CFG.SUN_AZ + this.t * Math.PI * 2, el);
   },
 
+  // Where the light actually comes from. Once the sun is down it stops
+  // lighting anything - it is under the world - so the moon takes over as
+  // the key. Without this the night has no directional light at all: only
+  // ambient survives, the whole scene collapses into the bottom two or three
+  // glyphs of a 24-step ramp, and any shaded pocket falls off the end into
+  // solid black. The handover happens at the horizon, where both are grazing
+  // and neither casts much, so it costs nothing to switch there.
+  keyDir() {
+    return this.sunHeight() > 0 ? this.sunDir() : this.moonDir();
+  },
+
   // the moon runs opposite the sun, so it is up when the sun is not
   moonDir() {
     const el = Math.asin(clamp(-this.sunHeight(), -1, 1)) * 0.75;
@@ -965,6 +976,7 @@ const Sky = {
     // up), while the red in the sky follows the narrower dusk curve.
     return {
       sunDir: this.sunDir(),
+      keyDir: this.keyDir(),
       moonDir: this.moonDir(),
       night: n,
       starAmt: this.starAmt(),
@@ -2463,6 +2475,8 @@ struct Uniforms {
   skyAngle  : f32,   // the celestial sphere's rotation for this instant
   moonDir   : vec3f, // the moon runs opposite the sun
   night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
+  keyDir    : vec3f, // what is actually lighting the scene: sun, then moon
+  pad7      : f32,
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -3342,9 +3356,9 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
 
 fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
   var tt = vec3f(0.0, 0.0, 1.0);
-  if (abs(U.sunDir.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
-  let b1 = normalize(cross(tt, U.sunDir));
-  let b2 = cross(U.sunDir, b1);
+  if (abs(U.keyDir.z) > 0.9) { tt = vec3f(1.0, 0.0, 0.0); }
+  let b1 = normalize(cross(tt, U.keyDir));
+  let b2 = cross(U.keyDir, b1);
   let n = nRays;
   let rot = hash1f(seed) * 6.2831853;
   var lit = 0.0;
@@ -3352,7 +3366,7 @@ fn softShadow(p : vec3f, seed : vec2f, nRays : i32) -> f32 {
     let u = (f32(i) + 0.5) / f32(n);
     let rad = sqrt(u) * U.sunAngle;
     let ang = rot + f32(i) * 2.39996323;
-    let d = normalize(U.sunDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
+    let d = normalize(U.keyDir + b1 * (cos(ang) * rad) + b2 * (sin(ang) * rad));
     lit = lit + transmit(p, d, 60.0);
   }
   return lit / f32(n);
@@ -3635,8 +3649,8 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
     if (nSun > 0) { sun = softShadow(p, seed, nSun); }
     var ao = 0.88;
     if (nAO > 0) { ao = tracedAO(p, h.n, seed, nAO); }
-    let ndl = select(max(dot(h.n, U.sunDir), 0.0),
-                     mix(abs(dot(h.n, U.sunDir)), 1.0, 0.35), h.canopy);
+    let ndl = select(max(dot(h.n, U.keyDir), 0.0),
+                     mix(abs(dot(h.n, U.keyDir)), 1.0, 0.35), h.canopy);
 
     let skyAmt = mix(0.55, 1.0, h.n.z * 0.5 + 0.5) * ao;
     var lit = h.albedo * U.ambCol * (U.ambI * skyAmt);
@@ -3646,7 +3660,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 
     // specular only where the material reflects: water now, metal later
     if (sun > 0.0 && h.spec > 0.0) {
-      let r = reflect(-U.sunDir, h.n);
+      let r = reflect(-U.keyDir, h.n);
       let spec = pow(max(dot(r, -rd), 0.0), 48.0);
       lit = lit + U.sunCol * spec * 0.75 * sun * h.spec;
     }
@@ -3878,7 +3892,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -4079,7 +4093,7 @@ const GPURenderer = {
       Removed.gpuDirty = false;
     }
 
-    const u = new Float32Array(64);
+    const u = new Float32Array(68);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -4115,6 +4129,7 @@ const GPURenderer = {
     u[59] = sky.skyAngle;
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
+    u.set(sky.keyDir, 64);
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
