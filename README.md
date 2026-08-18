@@ -44,7 +44,7 @@ intersect, copper near the surface, iron deeper — and in the core of a deep
 vein, **gems**, which glint out of cave walls and are worth walking toward.
 A torch (wood + cave lichen) brightens your headlamp; a gem lantern brightens
 it far more — and above ground that matters, because the sun sets. A full
-day/night cycle runs in five minutes: warm key light by day, red at the
+day/night cycle runs in fifty minutes: warm key light by day, red at the
 horizons, then a night lit blue by a yellow crescent moon under a field of
 `*` `+` `x` `.` stars. The stars are fixed to a celestial sphere that turns
 about a tilted pole, so they genuinely rise and set — the ones near the pole

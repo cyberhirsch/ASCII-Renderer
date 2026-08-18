@@ -86,7 +86,7 @@ through means going deeper. Discovery, not combat, is the intended verb.
 | **Materials** | Soil depth falls off with slope (bare rock on hillsides); stone below. Ore veins are the intersection curves of two noise fields — branching tubes, 0.25% of rock — copper shallow, iron deep, gems in deep vein cores at 0.008%. |
 | **Digging** | Sparse 32³ signed-byte chunks at 0.5 u, allocated only where dug, sampled trilinearly, streamed to the GPU as the 32 chunks nearest the player. Persisted. |
 | **Lighting** | Soft shadows (16 rays, wide sun disc), traced AO (32 rays), both as transmittance. Full budgets within 40 m then a hard cut. Underground: light shafts through mouths, AO-driven depth darkness, glow lichen, emissive gems, headlamp. |
-| **Day/night** | Five-minute cycle; sun arc, twilight palettes, yellow crescent moon that occludes stars, a four-glyph star field (`.` `+` `x` `*`), night-scaled headlamp. |
+| **Day/night** | Fifty-minute cycle; sun arc, twilight palettes, yellow crescent moon that occludes stars, a four-glyph star field (`.` `+` `x` `*`), night-scaled headlamp. |
 | **Gameplay** | Inventory, 5 recipes, tool-gated digging (shovel/pickaxe), examine with context actions, three tree species, felling, loose stones, boulders. |
 | **The record** | A seeded civilisation — name, people, founder, what they dug up, how it ended — with inscriptions generated from those facts and laid out by depth. Reading all three depths completes it. Journal panel. |
 | **Shell** | Boot screen, title screen, in-grid HUD and panels, command console with devmode/time/freeze/daylen/wipe. Save carries inventory, position, facing, time, record, digs and cleared cells. |
