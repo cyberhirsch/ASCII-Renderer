@@ -768,11 +768,16 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       let tx = mapX + ox;
       let ty = mapY + oy;
 
-      // Stones and boulders sit inside their own cell and never overhang,
-      // so the inner 3x3 is enough for them. Both fade out by distance: a
-      // stone further off than STONE_VIEW is smaller than the glyph that
-      // would have to draw it, so testing for it is wasted work.
-      if (abs(ox) <= 1 && abs(oy) <= 1 && !isRemoved(tx, ty)) {
+      // Props get the SAME window as the canopies, not a tighter one. They
+      // never overhang their cell, so 3x3 looks sufficient - but this loop
+      // advances four cells at a time to amortise the search, and a 3-wide
+      // window over a 4-cell stride leaves one cell in four never tested.
+      // That is a stone winking in and out as you walk past it.
+      if (!isRemoved(tx, ty)) {
+        // The view cutoffs are set from each prop's biggest possible size,
+        // at the range where it stops covering even one character cell. Cut
+        // any nearer and the prop pops out of existence while it is still
+        // drawable, which is its own kind of flicker.
         if (dHere < ${PROPS.ROCK_VIEW}) {
           let rk = rockAt(tx, ty);
           if (rk.present) {

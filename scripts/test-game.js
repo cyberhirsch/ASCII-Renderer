@@ -740,6 +740,47 @@ if (c.stoneAt) {
   }
   (badR === 0) ? ok('prop radii stay in range') : fail(`${badR} props out of range`);
 
+  // The prop search window must cover the ray walk's stride. The walk
+  // advances four cells at a time to amortise the neighbourhood search, so
+  // a window narrower than that leaves cells on the ray never tested - and
+  // a stone in one of them is invisible until you move and the gap shifts,
+  // which is a prop flickering in and out. Replicated here in 2D.
+  {
+    const reach = 2;                    // must match U.treeReach in the shader
+    let missed = 0, crossed = 0;
+    for (let a = 0; a < 200; a++) {
+      const ang = a * 0.0157 + 0.013;   // never exactly axis-aligned
+      const rd = [Math.cos(ang), Math.sin(ang)], ro = [0.37, 0.21];
+      const onRay = new Set();
+      for (let t = 0; t < 40; t += 0.02) {
+        onRay.add(Math.floor(ro[0] + rd[0] * t) + ',' + Math.floor(ro[1] + rd[1] * t));
+      }
+      const tested = new Set();
+      let mx = Math.floor(ro[0]), my = Math.floor(ro[1]);
+      const dD = [Math.abs(1 / rd[0]), Math.abs(1 / rd[1])];
+      const sg = [rd[0] < 0 ? -1 : 1, rd[1] < 0 ? -1 : 1];
+      const side = [rd[0] < 0 ? (ro[0] - mx) * dD[0] : (mx + 1 - ro[0]) * dD[0],
+                    rd[1] < 0 ? (ro[1] - my) * dD[1] : (my + 1 - ro[1]) * dD[1]];
+      for (let i = 0; i < 40; i++) {
+        for (let oy = -reach; oy <= reach; oy++) {
+          for (let ox = -reach; ox <= reach; ox++) tested.add((mx + ox) + ',' + (my + oy));
+        }
+        let ended = false;
+        for (let k = 0; k < 4; k++) {
+          if (Math.min(side[0], side[1]) >= 40) { ended = true; break; }
+          if (side[0] < side[1]) { side[0] += dD[0]; mx += sg[0]; }
+          else { side[1] += dD[1]; my += sg[1]; }
+        }
+        if (ended) break;
+      }
+      for (const cell of onRay) { crossed++; if (!tested.has(cell)) missed++; }
+    }
+    const gap = 100 * missed / crossed;
+    (gap < 0.5)
+      ? ok(`the prop window covers the ray walk (${gap.toFixed(1)}% of cells missed)`)
+      : fail(`prop window too narrow for the stride: ${gap.toFixed(1)}% of cells never tested`);
+  }
+
   // a boulder blocks the way; clearing it opens the way
   let B = null;
   outer6:

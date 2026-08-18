@@ -423,10 +423,14 @@ function treeSpecies(ix, iy) {
 const PROPS = {
   STONE_D: 0.055,   // chance a cell holds a loose stone
   STONE_R: 0.13,    // stone bounding radius, plus a hashed share again
-  STONE_VIEW: 30,   // past this a stone is smaller than a glyph: skip it
+  // View cutoffs, set from each prop's LARGEST possible size at the range
+  // where it stops covering even one character cell (a cell is ~0.0106 rad
+  // at the default field of view). Cut any nearer and a prop vanishes while
+  // it is still drawable, which reads as flicker as you walk.
+  STONE_VIEW: 52,   // biggest stone is under a cell past 49
   ROCK_D: 0.011,    // chance a cell holds a boulder
   ROCK_R: 0.68,     // boulder bounding radius, plus a hashed share again
-  ROCK_VIEW: 90,
+  ROCK_VIEW: 140,   // biggest boulder holds a cell to 256; MAX_DIST cuts first
   // Stones are not spheres: each is a bounding sphere with this many flat
   // cuts taken out of it, giving a faceted silhouette and flat per-face
   // normals. Measured over 30 boulders, this leaves 89% of the surface flat
