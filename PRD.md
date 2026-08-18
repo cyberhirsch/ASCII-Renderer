@@ -1,97 +1,160 @@
-# PRD: ASCII Cyberpunk City Engine
+# PRD: ASCII World
+
+**Status:** playable vertical slice, not released.
+**Last revised:** 2026-08-18 · 72 commits · 5,700 lines · ships as a 164 KB HTML file.
+
+---
 
 ## 1. Summary
-A browser-based, single-HTML-file engine that renders a walkable, grid-based 3D city entirely in ASCII/Unicode characters. A custom raycaster (JavaScript + Canvas, no game engine, no 3D models/textures/shaders) determines perspective, depth, occlusion, and visibility per frame, then draws the result as styled text — letters, numbers, and symbols standing in for geometry, lighting, and material.
 
-Status: working prototype ("Asciity" per community naming), single HTML file, publicly demoed via video, not yet released.
+An infinite procedural world rendered entirely in ASCII characters, raymarched
+one ray per character cell in a WebGPU compute shader. You walk it, dig it,
+craft from it, and descend through caves someone else cut long ago to find out
+who they were.
 
-## 2. Background
-Source material for this PRD is a YouTube devlog ("A Walkable ASCII Cyberpunk City in One HTML File," Grow Now! Games) plus its comment section. The video demonstrates a first-person walk through a night-time cyberpunk city block: roads, multi-story buildings, trees, parked/moving cars, and pedestrians, all rendered as ASCII with a glow/dither aesthetic and a synced ambient soundtrack.
+The defining constraint: **nothing about the world is stored.** Every hill,
+cave, ore vein and boulder is a pure function of one seed, evaluated in the
+shader as rays cross it. There is no heightmap, no chunk cache, no mesh, no
+texture. The only bytes that exist are the ones the player changed.
 
-Core technical claims from the creator (transcript):
-- Single HTML file; vanilla JavaScript + Canvas 2D. No Unity/Unreal, no 3D assets.
-- World model is a grid: cells store road/building/tree/car/pedestrian occupancy plus attributes like building height.
-- Per-frame rendering casts rays from the camera across the grid; first-hit distance drives perspective, scale, and occlusion (painter's-algorithm-style depth sorting).
-- Distance-based character/brightness falloff: near objects render as larger, brighter character clusters; distant objects shrink and fade to black.
-- Engine also handles basic simulation: collision, car movement, pedestrian movement.
+## 2. History
 
-## 3. Goals
-- Ship a self-contained, dependency-free ASCII city walking demo that is genuinely playable/exploitable (not just a rendered clip).
-- Preserve and deepen the "alive" quality reviewers responded to: motion, density, atmosphere, and legibility despite the ASCII constraint.
-- Keep the project technically minimal and inspectable — single file, no build step, no external engine — as a deliberate constraint/aesthetic, not a limitation to "graduate" out of.
+This project has pivoted twice. The record matters because the constraints
+that survived each pivot are the ones worth defending.
 
-## 4. Non-Goals (for this iteration)
-- Full game systems (quests, combat, inventory, NPC AI beyond ambient wandering).
-- Multiplayer.
-- Porting off Canvas 2D/vanilla JS to a framework or engine, unless a specific performance wall is hit.
-- Photorealism or leaving the ASCII-only rendering constraint.
+| Date | Era | What it was |
+|---|---|---|
+| 2026-08-13 | **City** | Canvas 2D column raycaster over a 192² grid; a night-time cyberpunk city block, built from a YouTube devlog brief. Baked lighting, painter's-algorithm depth. |
+| 2026-08-15 | **WebGPU** | Renderer thrown out and rebuilt as a per-pixel 3D compute raymarch. True three-point perspective, traced shadows and AO. The CPU raycaster was deleted outright. |
+| 2026-08-16 | **World** | The city was deleted too. Replaced by an infinite, storage-free procedural landscape — then caves, materials, and the first gameplay systems on top. |
 
-## 5. Target Audience
-- Primary: creative-coding / demoscene / indie-dev audience who value visible technique (raycasting, procedural cities, ASCII art) over production polish.
-- Secondary: players who want an atmospheric, explorable "cyberspace" toy — comparisons drawn by viewers include Neuromancer/Sprawl trilogy, Blade Runner, Dwarf Fortress adventure mode, and early Wolfenstein/DOOM raycasting.
+What survived all three: single shippable HTML file, no engine, no assets,
+everything reduces to (glyph, colour, brightness) in a character grid.
 
-## 6. Current Feature Set (as demonstrated)
-| Feature | Description |
+## 3. Vision
+
+Most procedural worlds are *generated* — computed once, stored, streamed. This
+one is *evaluated*, continuously, at the moment of looking. That difference is
+the whole pitch, and it produces properties a stored world cannot have: no
+loading, no seams, no world edge, a 164 KB download, and a world that is
+byte-identical for every player on every visit.
+
+On top of that sits the second idea: **a world that remembers people who are
+gone.** The caves are not a dungeon to clear. They are a record, cut into the
+pillars by a civilisation the seed invented, laid out so that reading it
+through means going deeper. Discovery, not combat, is the intended verb.
+
+## 4. Design pillars
+
+1. **The world is a function, not a file.** Any feature that requires storing
+   the world is wrong by default. Player edits are the sole exception, and
+   they are stored *sparsely, as deltas.*
+2. **The CPU and the GPU must agree exactly.** What you see, what you collide
+   with, and what the game tells you are the same functions, mirrored
+   bit-for-bit. Divergence here is the project's most dangerous bug class.
+3. **ASCII is the medium, not a filter.** UI text substitutes the character a
+   cell renders rather than drawing over it, so a word is woven into the field
+   instead of floating above it. The ~24-step glyph ramp is a real constraint
+   on lighting design and is honoured as one.
+4. **Art-direct, don't simulate.** Night is bright moonlit blue, not dark,
+   because physical darkness collapses the glyph ramp into nothing. Legibility
+   beats realism whenever they conflict.
+5. **Shipped blind, so verified statically.** The dev environment has no GPU.
+   Every shader change is gated by a static harness and by node tests against
+   the CPU mirrors before a human ever sees it.
+
+## 5. Audience
+
+- **Primary:** creative-coding, procgen, demoscene and graphics-programming
+  audiences who value visible technique. The technical story — a world with no
+  stored data, caves whose passage network provably percolates, UI woven into
+  the glyph field — is the draw.
+- **Secondary:** roguelike and Dwarf Fortress players drawn to generated
+  history and ASCII presentation, who will engage with lore-through-exploration.
+- **Explicitly not:** players expecting a conventional action game. There is no
+  combat, and the intended pace is slow.
+
+## 6. Current state — shipped
+
+| System | What works |
 |---|---|
-| Grid-based city model | Stores road/building/tree/car/pedestrian placement and building height per cell |
-| Raycast renderer | Per-frame rays from camera resolve first hit, distance, and occlusion |
-| ASCII character mapping | Distance/brightness mapped to character size, density, and glyph choice |
-| Depth fade | Near = large/bright clusters; far = small, dim, fading to black |
-| Object sorting | Correct front/behind ordering for overlapping objects (buildings, trees, cars, pedestrians) |
-| Transparency | Foliage (trees) rendered with a see-through/dithered effect — called out repeatedly as a standout detail |
-| Basic simulation | Car and pedestrian movement, collision handling |
-| Player movement | First-person walk-through with camera-driven raycasting |
-| Audio | Ambient synced soundtrack (viewer-noted "'80s tom toms" percussion vibe) |
+| **Renderer** | WebGPU compute raymarch, one true 3D ray per character cell; glyph-mapped upscale with a measured-coverage atlas and ordered dither. Terminal-shaped 12×22 cells sized 1:1 with device pixels. |
+| **Terrain** | Infinite domain-warped fractal value noise; sea level, shorelines, slope-driven materials. Verified smooth (no terracing) and sane at 10⁵ units out. |
+| **Caves** | Three 12-unit depth bands. Passages open along the median isolines of two noise fields — the median level set percolates, so the network is connected across the infinite plane (97% of interior cells in one component, flood-fill verified). Slope-bounded floors make them walkable by construction (~13° worst case). |
+| **Access** | Helical stair wells (~16° grade) from surface to band and band to band, always daylighting into a passage. Spawn is placed at an entrance rim. A node walk-bot proves a legal walking path from spawn to the band floor. |
+| **Halls** | Hash-placed rooms with dead-flat floors and pillar lattices; passages puncture the walls as doorways. Protected solids survive overlapping caverns, leaving freestanding pillars. |
+| **Materials** | Soil depth falls off with slope (bare rock on hillsides); stone below. Ore veins are the intersection curves of two noise fields — branching tubes, 0.25% of rock — copper shallow, iron deep, gems in deep vein cores at 0.008%. |
+| **Digging** | Sparse 32³ signed-byte chunks at 0.5 u, allocated only where dug, sampled trilinearly, streamed to the GPU as the 32 chunks nearest the player. Persisted. |
+| **Lighting** | Soft shadows (16 rays, wide sun disc), traced AO (32 rays), both as transmittance. Full budgets within 40 m then a hard cut. Underground: light shafts through mouths, AO-driven depth darkness, glow lichen, emissive gems, headlamp. |
+| **Day/night** | Five-minute cycle; sun arc, twilight palettes, yellow crescent moon that occludes stars, a four-glyph star field (`.` `+` `x` `*`), night-scaled headlamp. |
+| **Gameplay** | Inventory, 5 recipes, tool-gated digging (shovel/pickaxe), examine with context actions, three tree species, felling, loose stones, boulders. |
+| **The record** | A seeded civilisation — name, people, founder, what they dug up, how it ended — with inscriptions generated from those facts and laid out by depth. Reading all three depths completes it. Journal panel. |
+| **Shell** | Boot screen, title screen, in-grid HUD and panels, command console with devmode/time/freeze/daylen/wipe. Save carries inventory, position, facing, time, record, digs and cleared cells. |
+| **Verification** | Static harness (WGSL balance, operator precedence, struct layout vs buffer sizes, binding parity, shared-constant parity) plus 132 assertions across four node suites. |
 
-## 7. Requested / Candidate Features (sourced from viewer feedback)
-Ranked informally by frequency/specificity of the ask:
+## 7. Non-goals
 
-1. **Day/night cycle** with sky dithering using Unicode shade block characters (░▒▓) — most specific, most-repeated request.
-2. **Water/rivers** — a waterfront or river running through the city, for visual variety and scene composition.
-3. **Deeper atmosphere pass** — more detail density, lighting variation, weather, or fog to extend the cyberpunk mood.
-4. **Public/playable release** — many commenters explicitly ask for a downloadable or web-hosted build, not just video capture.
-5. **Expanded interaction** — turning the tech demo into an actual small game (a "low-end robot" player character concept was suggested), possibly with a specific creative direction rather than open-world wandering.
-6. **Scale showcase** — feedback that the city already communicates scale well; a candidate direction is leaning into bigger/denser environments.
+- **Combat as the core loop.** One creature is planned as *tension*, not as a
+  combat system. No weapons tree, no damage numbers.
+- **Multiplayer.**
+- **Leaving ASCII**, or leaving the single-file no-dependency constraint.
+- **Mobile.** Pointer lock and a keyboard are required.
+- **Stored/streamed world chunks.** See pillar 1.
+- **Audio** — deferred since the first milestone, still deferred.
 
-## 8. Proposed Scope for Next Milestone
-Given the above, a reasonable next milestone (subject to the creator's own priorities — this is not yet confirmed) breaks into:
+## 8. Technical constraints
 
-**8.1 Rendering/Atmosphere**
-- Implement day/night cycle: time-of-day state driving a sky gradient rendered via Unicode shade characters, plus corresponding changes to ambient brightness/character palette used for buildings and street-level objects.
-- Add a water tile type (river/canal) to the grid model with its own render treatment (e.g., animated glyph flicker to suggest reflections/movement).
+- **WebGPU is required** and is the hard gate on audience: Chrome/Edge 113+,
+  Firefox 141+, Safari 26. There is no fallback renderer and none is planned.
+- **Seed must stay below 2²⁴** so an f32 uniform carries it exactly; otherwise
+  CPU and GPU disagree about where the world is.
+- **Every shared constant is interpolated into the WGSL from JS**, never
+  duplicated as a literal. `scripts/verify.js` fails the build otherwise.
+- **Cost scales with cells, not pixels** — a hi-dpi 1080p window costs the same
+  as a 1× one, but 4K costs 4× 1080p (~31k rays/frame). GPU buffers total
+  ~1 MB; CPU load is negligible.
+- **Driver watchdog is the real hardware risk.** A frame that runs too long
+  kills the device; the on-screen device-lost panel exists because this has
+  happened.
 
-**8.2 Release**
-- Package the single HTML file for public/static hosting (no server dependency beyond static file serving) so it can be shared as a playable link rather than only a video.
-- Define minimum browser/perf target (desktop Chrome/Firefox, target frame rate at a given grid/view-distance size).
+## 9. Roadmap
 
-**8.3 Simulation depth (stretch)**
-- Extend pedestrian/car behavior beyond ambient wandering (basic pathing along road grid, simple traffic rules) if it doesn't compromise frame rate.
+**Next — makes it releasable**
+1. **The warden.** One creature guarding the deep halls: hovering, lit eye,
+   pursues on sight and line-of-sight. Purpose is dread on the descent, so the
+   inscriptions' warnings pay off. Needs entity geometry in the shader plus a
+   CPU state machine.
+2. **Death and consequence.** Something to lose. Respawn at the surface,
+   inventory dropped or kept — to be decided with playtesting.
+3. **itch.io release.** Static HTML5 embed; page must state the WebGPU
+   requirement prominently to manage bounce.
 
-## 9. Technical Constraints & Principles
-- Single HTML file, vanilla JS + Canvas — maintain as a hard constraint unless proven unworkable.
-- No 3D engine, no model/texture assets — all visual output must reduce to character + color + brightness.
-- Performance budget must accommodate raycasting per-frame over the full grid at interactive frame rates in-browser with no build/compile step.
+**Later**
+4. Ruins and lore props on the surface, so the record starts above ground.
+5. More of the history graph: multiple civilisations, sites that reference each
+   other by direction, a connected discovery graph.
+6. Placeable light sources (needs point-light shading, capped count).
+7. Audio.
 
-## 10. Decisions (2026-08-15)
-- **Scope:** Walkable tech demo only — raycast ASCII city with roads, buildings, trees, cars, pedestrians, first-person movement. No game loop.
-- **World:** Fully procedural, seeded generation (road grid, building heights, tree placement).
-- **File layout:** Develop as split JS modules; a minimal build step inlines everything into one shippable `index.html` for release.
-- **Audio:** Skipped for this milestone.
+**Not scheduled:** z-level digging beyond the current bands, roofed interiors,
+weather, seasons.
 
-## 10b. Sunlight + AO — SHIPPED (2026-08-15)
-- **Sunlight:** per-cell shadow-height map baked at generation (`js/light.js`); a point at height z is sunlit iff z ≥ shadowH. Directional face term + cast shadows, one lookup per sample.
-- **Ambient occlusion:** neighbor-occupancy bake, height-faded (contact darkening at building bases).
-- **Day mode** (default; `N` toggles night): dithered sky gradient + sun disc, buildings desaturate to concrete gray, distance fades to bright haze with far surfaces tinting sky-blue (aerial perspective). Night keeps neon/lit-windows/starfield.
-- Also shipped: fullscreen (grid sized from window, `F` key) and free mouse-look (pitch via horizon offset).
+## 10. Success criteria
 
-## 10a. Remaining Open Questions
-- Controls: WASD + mouse-look vs. keyboard-only turning (default assumption: WASD move, arrow keys/mouse turn).
-- Target frame rate and canvas resolution (default assumption: 60 fps desktop, character grid ~160×90).
+- **Technical:** holds 60 fps at 1080p on integrated graphics from the last
+  ~5 years; no device-lost reports; CPU/GPU parity maintained (all suites green
+  on every shader commit).
+- **Design:** a first-time player reaches a cave entrance without being told,
+  and completes the record, in under 30 minutes.
+- **Distribution:** a publicly playable build with an honest browser-support
+  notice; the technical write-up reaches the procgen/graphics audience.
 
-## 11. Success Metrics
-- Qualitative: maintain or grow the "feels alive" response — motion, density, atmosphere — in future demos/releases.
-- Distribution: at least one publicly playable (non-video) build available.
-- Technical: day/night cycle and water tiles integrated without breaking the single-file/no-dependency constraint or dropping frame rate below the established baseline.
+## 11. Open risks
 
-## 12. Source
-Compiled from a YouTube devlog transcript, video description, and public comments (Grow Now! Games channel, "A Walkable ASCII Cyberpunk City in One HTML File," published 2026-08-13). All feature requests in Section 7 are third-party viewer suggestions, not confirmed roadmap commitments.
+| Risk | Assessment |
+|---|---|
+| WebGPU gate excludes much of itch's traffic | Accepted. Framing the page as an experiment for a technical audience is the mitigation, not a fallback renderer. |
+| No threat means no tension | The known gap. Item 1 on the roadmap. |
+| Shader ships blind | Mitigated by the harness, which has already caught the class of bug it was built for twice. Residual risk is real and permanent. |
+| Perf on weak GPUs unmeasured | No fps numbers from real hardware yet. Knobs (`AO_SAMPLES`, `SUN_SAMPLES`, `SHADE_NEAR`, cell size) all scale cost roughly linearly. |
+| Content depth is thin | One civilisation, twelve inscription beats. Enough to finish once; not enough to replay. Roadmap item 5. |
