@@ -63,7 +63,10 @@ const World = {
         if (!rk) continue;
         if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
         const d = Math.hypot(rk.cx - x, rk.cy - y);
-        if (d < rk.r + 0.28) return { rock: rk, ix: cx + ox, iy: cy + oy, dist: d };
+        // the cut shape, not the bounding sphere - see PROPS.SOLID
+        if (d < rk.r * PROPS.SOLID + 0.28) {
+          return { rock: rk, ix: cx + ox, iy: cy + oy, dist: d };
+        }
       }
     }
     return null;

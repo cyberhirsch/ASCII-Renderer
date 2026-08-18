@@ -79,15 +79,28 @@ function precedenceMix(code) {
   return mixesIn(t);
 }
 
+// A statement wrapped across several source lines has to be judged whole.
+// Half of `hash01(a, b, seedU() ^ 0xC07Au) * 0.28` looks like a mix and is
+// not one - and a checker that cries wolf is a checker people stop reading.
+// So lines are accumulated until the parentheses balance, then analysed.
 for (const [name, src] of Object.entries(wgsl)) {
   let bad = 0;
+  let buf = '', depth = 0, startLine = 0;
   src.split('\n').forEach((ln, i) => {
     const code = ln.split('//')[0];
-    if (!code.trim()) return;
-    if (precedenceMix(code)) {
-      fail(`${name}:${i + 1}: possible precedence mix: ${code.trim()}`);
+    if (!buf && !code.trim()) return;
+    if (!buf) startLine = i + 1;
+    buf += ' ' + code;
+    for (const ch of code) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth = Math.max(0, depth - 1);
+    }
+    if (depth > 0) return;              // the statement carries on below
+    if (precedenceMix(buf)) {
+      fail(`${name}:${startLine}: possible precedence mix: ${buf.trim()}`);
       bad++;
     }
+    buf = '';
   });
   if (!bad) ok(`${name}: no operator-precedence mixes`);
 }

@@ -539,6 +539,55 @@ fn stoneAt(ix : i32, iy : i32) -> Prop {
   return p;
 }
 
+// one of a rock's cutting planes: a hashed direction, uniform on the sphere
+fn facetNormal(ix : i32, iy : i32, k : i32) -> vec3f {
+  let h = hash2i(ix * 7 + k * 131, iy * 13 - k * 71, seedU() ^ 0xFACEu);
+  let z = h.x * 2.0 - 1.0;
+  let a = h.y * 6.2831853;
+  let s = sqrt(max(0.0, 1.0 - z * z));
+  return vec3f(cos(a) * s, sin(a) * s, z);
+}
+
+// A stone is a sphere with flat cuts taken out of it. The ray's interval is
+// clipped by each half-space in turn - the same slab method hitOBB uses,
+// generalised from three axis-aligned pairs to arbitrary plane normals - so
+// the silhouette is faceted and every face has one flat normal, out of
+// nothing but hashes. No mesh, no vertices, no data.
+//
+// The bounding sphere is tested first and rejects nearly every ray for the
+// price of the sphere test this replaces, so the plane loop only runs where
+// a rock is actually in the way. Returns (t, normal) or t < 0.
+fn hitFaceted(ro : vec3f, rd : vec3f, c : vec3f, r : f32,
+              ix : i32, iy : i32) -> vec4f {
+  let miss = vec4f(-1.0, 0.0, 0.0, 0.0);
+  let bs = hitSphere(ro, rd, c, r);
+  if (bs.y <= 0.001) { return miss; }
+  var tmin = max(bs.x, 0.001);
+  var tmax = bs.y;
+  // where no plane cuts, the bounding sphere itself is the surface
+  var nrm = normalize((ro + rd * tmin) - c);
+  for (var k = 0; k < ${PROPS.FACES}; k = k + 1) {
+    let pn = facetNormal(ix, iy, k);
+    let cut = r * (${PROPS.CUT_MIN} + hash01(ix * 5 + k, iy * 3 - k,
+                   seedU() ^ 0xC07Au) * ${PROPS.CUT_MAX - PROPS.CUT_MIN});
+    let dn = dot(pn, rd);
+    let po = dot(pn, ro - c) - cut;
+    if (abs(dn) < 1e-6) {
+      if (po > 0.0) { return miss; }   // parallel and outside: no hit
+      continue;
+    }
+    let t = -po / dn;
+    if (dn < 0.0) {
+      // entering this half-space: the latest entry wins, and owns the face
+      if (t > tmin) { tmin = t; nrm = pn; }
+    } else {
+      tmax = min(tmax, t);
+    }
+    if (tmin > tmax) { return miss; }
+  }
+  return vec4f(tmin, nrm.x, nrm.y, nrm.z);
+}
+
 // a boulder: too big to lift, wants a pickaxe, and stands in the way
 fn rockAt(ix : i32, iy : i32) -> Prop {
   var p : Prop;
@@ -728,12 +777,11 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
           let rk = rockAt(tx, ty);
           if (rk.present) {
             let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
-            let hs = hitSphere(ro, rd, c, rk.r);
-            let te = max(hs.x, 0.001);
-            if (hs.y > 0.001 && te < best) {
-              best = te;
-              o.t = te;
-              o.n = normalize((ro + rd * te) - c);
+            let hf = hitFaceted(ro, rd, c, rk.r, tx, ty);
+            if (hf.x > 0.0 && hf.x < best) {
+              best = hf.x;
+              o.t = hf.x;
+              o.n = hf.yzw;
               o.albedo = vec3f(0.46, 0.44, 0.41);
               o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
             }
@@ -743,12 +791,13 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
           let st = stoneAt(tx, ty);
           if (st.present) {
             let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
-            let hs = hitSphere(ro, rd, c, st.r);
-            let te = max(hs.x, 0.001);
-            if (hs.y > 0.001 && te < best) {
-              best = te;
-              o.t = te;
-              o.n = normalize((ro + rd * te) - c);
+            // offset the cell key so a stone and a boulder in the same cell
+            // do not end up cut to the same shape
+            let hf = hitFaceted(ro, rd, c, st.r, tx + 4096, ty - 4096);
+            if (hf.x > 0.0 && hf.x < best) {
+              best = hf.x;
+              o.t = hf.x;
+              o.n = hf.yzw;
               o.albedo = vec3f(0.50, 0.48, 0.45);
               o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
             }
@@ -894,13 +943,19 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         // Boulders block light too. Only the cell the ray is actually in is
         // checked, not the whole window: a boulder never leaves its own
         // cell, and this loop runs for every shadow and AO ray, so the
-        // eight neighbours are not worth their hashes here.
+        // eight neighbours are not worth their hashes here. The bounding
+        // sphere is used rather than the cut shape - a facet's worth of
+        // difference is not visible in a shadow, and this is the hot loop.
         if (ox == 0 && oy == 0 && !isRemoved(tx, ty)) {
           let rk = rockAt(tx, ty);
           if (rk.present) {
             let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
             let hs = hitSphere(ro, rd, c, rk.r);
-            if (hs.y > 0.001 && hs.x * hlen < maxD) { return 0.0; }
+            // hs.x ahead of the origin, not merely hs.y: boulders are bedded
+            // into the ground, so a point on the earth beneath one starts
+            // INSIDE the sphere, and without this it would report itself
+            // shadowed and fully occluded from every direction at once
+            if (hs.x > 0.001 && hs.x * hlen < maxD) { return 0.0; }
           }
         }
 
