@@ -53,10 +53,10 @@ struct Uniforms {
   pad4      : f32,
   lampI     : f32,   // headlamp intensity (a carried torch raises it)
   removedCount : f32,   // cleared cells in the removed buffer
-  pad5      : f32,
-  pad6      : f32,
+  starAmt   : f32,   // how far out the stars are; lags night through dusk
+  skyAngle  : f32,   // the celestial sphere's rotation for this instant
   moonDir   : vec3f, // the moon runs opposite the sun
-  night     : f32,   // 0 by day, 1 in full night; gates moon and stars
+  night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -999,19 +999,37 @@ fn moonAt(rd : vec3f) -> i32 {
 // an ASCII code or 0. Faint dots are common and big bright stars are rare,
 // which is what keeps a field of them from reading as uniform noise.
 fn starAt(rd : vec3f) -> u32 {
-  if (U.night < 0.05 || rd.z < 0.015) { return 0u; }
+  if (U.starAmt < 0.02 || rd.z < 0.015) { return 0u; }
   if (moonAt(rd) > 0) { return 0u; }   // hidden behind the moon
-  let q = vec3i(floor(rd * ${CFG.STAR_GRID}));
+  // The stars are fixed to a sphere that turns; the ground is what moves
+  // under it. Rotating the ray back into that sphere's own frame before
+  // hashing is what makes a star keep its identity as it crosses the sky -
+  // hashing the world direction would just repaint a new star every frame.
+  let pa = ${CFG.STAR_POLE_AZ};
+  let pe = ${CFG.STAR_POLE_EL};
+  let pole = normalize(vec3f(cos(pa) * cos(pe), sin(pa) * cos(pe), sin(pe)));
+  let a = -U.skyAngle;
+  let ca = cos(a);
+  let sa = sin(a);
+  // Rodrigues: spin rd about the pole, so the pole itself stands still and
+  // everything further from it sweeps a wider arc - stars near the pole
+  // circle it all night, stars far from it rise and set.
+  let cd = rd * ca + cross(pole, rd) * sa + pole * dot(pole, rd) * (1.0 - ca);
+  let q = vec3i(floor(cd * ${CFG.STAR_GRID}));
   let h = uhash(uhash(bitcast<u32>(q.x), bitcast<u32>(q.y)), bitcast<u32>(q.z));
   let r = f32(h) * (1.0 / 4294967296.0);
-  // fewer stars at dusk, the full field at midnight
-  let gate = mix(1.0, ${CFG.STAR_RARE}, U.night);
+  // the brightest few at dusk, the whole field once it is properly dark
+  let gate = mix(1.0, ${CFG.STAR_RARE}, U.starAmt);
   if (r < gate) { return 0u; }
-  let pick = f32((h >> 8u) & 0xffffu) * (1.0 / 65536.0);
-  if (pick < 0.50) { return 46u; }   // '.'  faint
-  if (pick < 0.78) { return 43u; }   // '+'
-  if (pick < 0.93) { return 120u; }  // 'x'
-  return 42u;                        // '*'  rare and bright
+  // How deep into the rare tail this star sits. Brightness follows rarity,
+  // and so does the order they appear: the gate comes down from 1 as the sky
+  // darkens, so the rarest stars clear it first - which is exactly how the
+  // brightest ones are the first out at dusk.
+  let rank = (r - ${CFG.STAR_RARE}) / (1.0 - ${CFG.STAR_RARE});
+  if (rank > 0.93) { return 42u; }    // '*'  rare and bright
+  if (rank > 0.78) { return 120u; }   // 'x'
+  if (rank > 0.50) { return 43u; }    // '+'
+  return 46u;                         // '.'  faint and everywhere
 }
 
 fn shadeSky(rd : vec3f) -> vec3f {

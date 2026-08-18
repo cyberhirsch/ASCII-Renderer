@@ -18,6 +18,18 @@ const Sky = {
   // 0 by day, 1 in full night, smooth through the twilights
   night() { return 1 - smoothstep(-0.10, 0.16, this.sunHeight()); },
 
+  // How far out the stars are. Deliberately behind night(): the lighting has
+  // already gone blue by sunset, but the sky is still far too bright to see
+  // anything in it. The first stars wait until the sun is properly under.
+  starAmt() {
+    return smoothstep(CFG.STAR_DUSK, CFG.STAR_DARK, -this.sunHeight());
+  },
+
+  // The celestial sphere's rotation. One turn a day, in the same sense the
+  // sun travels, so the stars and the sun agree about which way the world
+  // is turning.
+  skyAngle() { return this.t * Math.PI * 2; },
+
   // how much of the twilight colour to mix in: peaks as the sun crosses over
   dusk() {
     const h = this.sunHeight();
@@ -82,6 +94,8 @@ const Sky = {
       sunDir: this.sunDir(),
       moonDir: this.moonDir(),
       night: n,
+      starAmt: this.starAmt(),
+      skyAngle: this.skyAngle(),
       sunCol: this.mix3(base.sun, this.DUSK.sun, d * 0.85),
       sunI: base.sunI + (this.DUSK.sunI - base.sunI) * d * 0.6,
       ambCol: this.mix3(base.amb, this.DUSK.amb, d * 0.6),

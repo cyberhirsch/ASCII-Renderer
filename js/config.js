@@ -35,7 +35,16 @@ const CFG = {
   MOON_GLOW_P: 400,   // halo tightness; higher is a smaller halo
   MOON_DARK: 0.04,    // earthshine lift on the unlit limb
   STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
-  STAR_RARE: 0.976,   // hash above this is a star, at full night
+  STAR_RARE: 0.976,   // hash above this is a star, at full dark
+  // Stars do not arrive at sunset. The first show once the sun is a little
+  // way under, and the field fills in as it sinks further - these are the
+  // two depths, measured as sin(elevation) below the horizon.
+  STAR_DUSK: 0.06,    // ~3.5 deg down: the brightest few
+  STAR_DARK: 0.30,    // ~17 deg down: the whole field
+  // The celestial pole the sky turns about. Tilted well off vertical, so
+  // stars rise and set instead of just wheeling around the zenith.
+  STAR_POLE_AZ: 2.2,
+  STAR_POLE_EL: 0.85,
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   // wide sun disc: broad, soft penumbrae that grow with distance from the
   // occluder (0.05 rad is the "soft shadows" look; the real sun is 0.0047)

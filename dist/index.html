@@ -113,7 +113,16 @@ const CFG = {
   MOON_GLOW_P: 400,   // halo tightness; higher is a smaller halo
   MOON_DARK: 0.04,    // earthshine lift on the unlit limb
   STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
-  STAR_RARE: 0.976,   // hash above this is a star, at full night
+  STAR_RARE: 0.976,   // hash above this is a star, at full dark
+  // Stars do not arrive at sunset. The first show once the sun is a little
+  // way under, and the field fills in as it sinks further - these are the
+  // two depths, measured as sin(elevation) below the horizon.
+  STAR_DUSK: 0.06,    // ~3.5 deg down: the brightest few
+  STAR_DARK: 0.30,    // ~17 deg down: the whole field
+  // The celestial pole the sky turns about. Tilted well off vertical, so
+  // stars rise and set instead of just wheeling around the zenith.
+  STAR_POLE_AZ: 2.2,
+  STAR_POLE_EL: 0.85,
   SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
   // wide sun disc: broad, soft penumbrae that grow with distance from the
   // occluder (0.05 rad is the "soft shadows" look; the real sun is 0.0047)
@@ -858,6 +867,18 @@ const Sky = {
   // 0 by day, 1 in full night, smooth through the twilights
   night() { return 1 - smoothstep(-0.10, 0.16, this.sunHeight()); },
 
+  // How far out the stars are. Deliberately behind night(): the lighting has
+  // already gone blue by sunset, but the sky is still far too bright to see
+  // anything in it. The first stars wait until the sun is properly under.
+  starAmt() {
+    return smoothstep(CFG.STAR_DUSK, CFG.STAR_DARK, -this.sunHeight());
+  },
+
+  // The celestial sphere's rotation. One turn a day, in the same sense the
+  // sun travels, so the stars and the sun agree about which way the world
+  // is turning.
+  skyAngle() { return this.t * Math.PI * 2; },
+
   // how much of the twilight colour to mix in: peaks as the sun crosses over
   dusk() {
     const h = this.sunHeight();
@@ -922,6 +943,8 @@ const Sky = {
       sunDir: this.sunDir(),
       moonDir: this.moonDir(),
       night: n,
+      starAmt: this.starAmt(),
+      skyAngle: this.skyAngle(),
       sunCol: this.mix3(base.sun, this.DUSK.sun, d * 0.85),
       sunI: base.sunI + (this.DUSK.sunI - base.sunI) * d * 0.6,
       ambCol: this.mix3(base.amb, this.DUSK.amb, d * 0.6),
@@ -2411,10 +2434,10 @@ struct Uniforms {
   pad4      : f32,
   lampI     : f32,   // headlamp intensity (a carried torch raises it)
   removedCount : f32,   // cleared cells in the removed buffer
-  pad5      : f32,
-  pad6      : f32,
+  starAmt   : f32,   // how far out the stars are; lags night through dusk
+  skyAngle  : f32,   // the celestial sphere's rotation for this instant
   moonDir   : vec3f, // the moon runs opposite the sun
-  night     : f32,   // 0 by day, 1 in full night; gates moon and stars
+  night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -3357,19 +3380,37 @@ fn moonAt(rd : vec3f) -> i32 {
 // an ASCII code or 0. Faint dots are common and big bright stars are rare,
 // which is what keeps a field of them from reading as uniform noise.
 fn starAt(rd : vec3f) -> u32 {
-  if (U.night < 0.05 || rd.z < 0.015) { return 0u; }
+  if (U.starAmt < 0.02 || rd.z < 0.015) { return 0u; }
   if (moonAt(rd) > 0) { return 0u; }   // hidden behind the moon
-  let q = vec3i(floor(rd * ${CFG.STAR_GRID}));
+  // The stars are fixed to a sphere that turns; the ground is what moves
+  // under it. Rotating the ray back into that sphere's own frame before
+  // hashing is what makes a star keep its identity as it crosses the sky -
+  // hashing the world direction would just repaint a new star every frame.
+  let pa = ${CFG.STAR_POLE_AZ};
+  let pe = ${CFG.STAR_POLE_EL};
+  let pole = normalize(vec3f(cos(pa) * cos(pe), sin(pa) * cos(pe), sin(pe)));
+  let a = -U.skyAngle;
+  let ca = cos(a);
+  let sa = sin(a);
+  // Rodrigues: spin rd about the pole, so the pole itself stands still and
+  // everything further from it sweeps a wider arc - stars near the pole
+  // circle it all night, stars far from it rise and set.
+  let cd = rd * ca + cross(pole, rd) * sa + pole * dot(pole, rd) * (1.0 - ca);
+  let q = vec3i(floor(cd * ${CFG.STAR_GRID}));
   let h = uhash(uhash(bitcast<u32>(q.x), bitcast<u32>(q.y)), bitcast<u32>(q.z));
   let r = f32(h) * (1.0 / 4294967296.0);
-  // fewer stars at dusk, the full field at midnight
-  let gate = mix(1.0, ${CFG.STAR_RARE}, U.night);
+  // the brightest few at dusk, the whole field once it is properly dark
+  let gate = mix(1.0, ${CFG.STAR_RARE}, U.starAmt);
   if (r < gate) { return 0u; }
-  let pick = f32((h >> 8u) & 0xffffu) * (1.0 / 65536.0);
-  if (pick < 0.50) { return 46u; }   // '.'  faint
-  if (pick < 0.78) { return 43u; }   // '+'
-  if (pick < 0.93) { return 120u; }  // 'x'
-  return 42u;                        // '*'  rare and bright
+  // How deep into the rare tail this star sits. Brightness follows rarity,
+  // and so does the order they appear: the gate comes down from 1 as the sky
+  // darkens, so the rarest stars clear it first - which is exactly how the
+  // brightest ones are the first out at dusk.
+  let rank = (r - ${CFG.STAR_RARE}) / (1.0 - ${CFG.STAR_RARE});
+  if (rank > 0.93) { return 42u; }    // '*'  rare and bright
+  if (rank > 0.78) { return 120u; }   // 'x'
+  if (rank > 0.50) { return 43u; }    // '+'
+  return 46u;                         // '.'  faint and everywhere
 }
 
 fn shadeSky(rd : vec3f) -> vec3f {
@@ -4045,6 +4086,8 @@ const GPURenderer = {
     u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
                       : Game.count('torch') > 0 ? 2.2 : 1);
     u[57] = this.removedCount;
+    u[58] = sky.starAmt;
+    u[59] = sky.skyAngle;
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
     dev.queue.writeBuffer(this.uniBuf, 0, u);

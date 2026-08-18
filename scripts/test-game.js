@@ -576,6 +576,36 @@ if (c.Sky) {
   (badCol === 0) ? ok('every colour stays finite and in range across the cycle')
                  : fail(`${badCol} bad colour components over the cycle`);
 
+  // stars lag nightfall: blue light before anything is visible overhead
+  Sky.setHour(18);                    // sun exactly on the horizon
+  const setStars = Sky.starAmt(), setNight = Sky.night();
+  (setStars < 0.02 && setNight > 0.3)
+    ? ok(`at sunset the light has turned but no stars are out (${setStars.toFixed(2)} vs night ${setNight.toFixed(2)})`)
+    : fail(`stars too early at sunset: ${setStars.toFixed(2)}`);
+  Sky.setHour(0);
+  (Sky.starAmt() > 0.99) ? ok('the whole field is out at midnight')
+                         : fail(`stars never fill in: ${Sky.starAmt()}`);
+  // and they trail night() the whole way down, never lead it
+  let leads = 0, firstStarH = null;
+  for (let i = 0; i <= 200; i++) {
+    Sky.t = 0.70 + (i / 200) * 0.3;   // dusk through to midnight
+    if (Sky.starAmt() > Sky.night() + 1e-9) leads++;
+    if (firstStarH === null && Sky.starAmt() > 0.02) firstStarH = Sky.sunHeight();
+  }
+  (leads === 0) ? ok('stars never come out ahead of nightfall')
+                : fail(`stars lead night at ${leads} points`);
+  (firstStarH !== null && firstStarH < -0.03)
+    ? ok(`first star waits until the sun is under (sin el ${firstStarH.toFixed(3)})`)
+    : fail(`first star too early: ${firstStarH}`);
+
+  // the sky turns once a day, in the same sense the sun travels
+  Sky.t = 0;
+  const a0 = Sky.skyAngle();
+  Sky.t = 1;
+  (Math.abs(Sky.skyAngle() - a0 - Math.PI * 2) < 1e-9)
+    ? ok('the celestial sphere turns exactly once a day')
+    : fail('sky rotation is not one turn per day');
+
   // night never crushes the scene: the key light keeps the glyph ramp alive
   let dimmest = Infinity;
   for (let i = 0; i <= 96; i++) {

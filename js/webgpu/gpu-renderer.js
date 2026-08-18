@@ -300,6 +300,8 @@ const GPURenderer = {
     u[56] = CFG.LAMP * (Game.count('lantern') > 0 ? 3.4
                       : Game.count('torch') > 0 ? 2.2 : 1);
     u[57] = this.removedCount;
+    u[58] = sky.starAmt;
+    u[59] = sky.skyAngle;
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
     dev.queue.writeBuffer(this.uniBuf, 0, u);

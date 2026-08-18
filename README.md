@@ -46,7 +46,11 @@ A torch (wood + cave lichen) brightens your headlamp; a gem lantern brightens
 it far more — and above ground that matters, because the sun sets. A full
 day/night cycle runs in five minutes: warm key light by day, red at the
 horizons, then a night lit blue by a yellow crescent moon under a field of
-`*` `+` `x` `.` stars. Inventory, digs, and felled trees all survive reload.
+`*` `+` `x` `.` stars. The stars are fixed to a celestial sphere that turns
+about a tilted pole, so they genuinely rise and set — the ones near the pole
+wheel around it all night and never touch the horizon. They also keep you
+waiting: the light has gone blue well before the first of them shows, and the
+brightest come out first. Inventory, digs, and felled trees all survive reload.
 
 Night is art-directed, not simulated. The glyph ramp has only ~24 brightness
 steps, so a physically dark night would crush the whole scene into the bottom
