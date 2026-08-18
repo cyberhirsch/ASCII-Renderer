@@ -15,8 +15,27 @@ const Sky = {
   // sun height above the horizon, -1..1; the whole cycle keys off this
   sunHeight() { return Math.sin((this.t - 0.25) * Math.PI * 2); },
 
-  // 0 by day, 1 in full night, smooth through the twilights
-  night() { return 1 - smoothstep(-0.10, 0.16, this.sunHeight()); },
+  // 0 by day, 1 in full night. Held back until the sun is actually down, so
+  // the warm twilight owns the crossing instead of the blue taking over
+  // while the sun is still on the horizon.
+  night() { return 1 - smoothstep(-0.18, 0.06, this.sunHeight()); },
+
+  // How far the key light has warmed. Asymmetric on purpose: sunlight
+  // reddens over a long approach as its path through the air lengthens,
+  // then goes quickly once the sun is under and only the afterglow is left.
+  warmth() {
+    const h = this.sunHeight();
+    return h >= 0 ? 1 - smoothstep(0, CFG.WARM_UP, h)
+                  : 1 - smoothstep(0, CFG.WARM_DOWN, -h);
+  },
+
+  // The red in the sky itself - a narrower thing than the warmth of the
+  // light, and one that outlives the sun by a little.
+  dusk() {
+    const h = this.sunHeight();
+    return h >= 0 ? 1 - smoothstep(0, CFG.DUSK_UP, h)
+                  : 1 - smoothstep(0, CFG.DUSK_DOWN, -h);
+  },
 
   // How far out the stars are. Deliberately behind night(): the lighting has
   // already gone blue by sunset, but the sky is still far too bright to see
@@ -29,12 +48,6 @@ const Sky = {
   // sun travels, so the stars and the sun agree about which way the world
   // is turning.
   skyAngle() { return this.t * Math.PI * 2; },
-
-  // how much of the twilight colour to mix in: peaks as the sun crosses over
-  dusk() {
-    const h = this.sunHeight();
-    return Math.max(0, 1 - Math.abs(h) / 0.28);
-  },
 
   update(dt) {
     if (this.paused) return;
@@ -69,9 +82,9 @@ const Sky = {
   DAY:   { sun: [1.00, 0.94, 0.78], sunI: 1.55,
            amb: [0.30, 0.42, 0.62], ambI: 0.55,
            lo:  [0.42, 0.56, 0.76], hi: [0.10, 0.22, 0.50] },
-  DUSK:  { sun: [1.00, 0.62, 0.30], sunI: 1.30,
-           amb: [0.34, 0.34, 0.52], ambI: 0.55,
-           lo:  [0.62, 0.46, 0.44], hi: [0.10, 0.16, 0.42] },
+  DUSK:  { sun: [1.00, 0.55, 0.22], sunI: 1.30,
+           amb: [0.42, 0.34, 0.44], ambI: 0.55,
+           lo:  [0.74, 0.42, 0.32], hi: [0.14, 0.16, 0.44] },
   NIGHT: { sun: [0.52, 0.68, 1.00], sunI: 0.62,
            amb: [0.24, 0.36, 0.66], ambI: 0.62,
            lo:  [0.14, 0.22, 0.44], hi: [0.03, 0.07, 0.20] },
@@ -80,7 +93,7 @@ const Sky = {
 
   // the full lighting state for this instant
   state() {
-    const n = this.night(), d = this.dusk();
+    const n = this.night(), d = this.dusk(), w = this.warmth();
     const base = {
       sun: this.mix3(this.DAY.sun, this.NIGHT.sun, n),
       sunI: this.DAY.sunI + (this.NIGHT.sunI - this.DAY.sunI) * n,
@@ -89,19 +102,23 @@ const Sky = {
       lo: this.mix3(this.DAY.lo, this.NIGHT.lo, n),
       hi: this.mix3(this.DAY.hi, this.NIGHT.hi, n),
     };
-    // twilight rides on top of the day/night blend
+    // Twilight rides on top of the day/night blend, and the two halves of it
+    // are driven separately: the key light follows the long warmth curve
+    // (this is the golden hour, and it starts while the sun is still well
+    // up), while the red in the sky follows the narrower dusk curve.
     return {
       sunDir: this.sunDir(),
       moonDir: this.moonDir(),
       night: n,
       starAmt: this.starAmt(),
       skyAngle: this.skyAngle(),
-      sunCol: this.mix3(base.sun, this.DUSK.sun, d * 0.85),
-      sunI: base.sunI + (this.DUSK.sunI - base.sunI) * d * 0.6,
-      ambCol: this.mix3(base.amb, this.DUSK.amb, d * 0.6),
+      sunCol: this.mix3(base.sun, this.DUSK.sun, w * 0.92),
+      // and a low sun is a dimmer one - it is shining through more air
+      sunI: (base.sunI + (this.DUSK.sunI - base.sunI) * w * 0.6) * (1 - w * 0.22),
+      ambCol: this.mix3(base.amb, this.DUSK.amb, d * 0.7),
       ambI: base.ambI + (this.DUSK.ambI - base.ambI) * d * 0.5,
-      skyLo: this.mix3(base.lo, this.DUSK.lo, d * 0.8),
-      skyHi: this.mix3(base.hi, this.DUSK.hi, d * 0.5),
+      skyLo: this.mix3(base.lo, this.DUSK.lo, d * 0.85),
+      skyHi: this.mix3(base.hi, this.DUSK.hi, d * 0.45),
     };
   },
 };

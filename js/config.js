@@ -28,6 +28,14 @@ const CFG = {
   SUN_AZ: 0.9,        // sun azimuth at t=0 (rad); the cycle sweeps from here
   SUN_EL: 0.7,        // legacy static elevation; Sky drives elevation now
   DAY_LEN: 3000,      // seconds for a full day/night cycle (50 min)
+  // Twilight reach, as sin(sun elevation) either side of the horizon. Low
+  // sun means a long path through air, so the light warms well before it
+  // touches down - the golden hour is long on the way in, and the afterglow
+  // that follows it is shorter.
+  WARM_UP: 0.70,      // ~44 deg up: the light starts to turn warm
+  WARM_DOWN: 0.26,    // ~15 deg down: the last of the warmth is gone
+  DUSK_UP: 0.30,      // the red band in the sky, before the sun is down
+  DUSK_DOWN: 0.26,    // and lingering after it
   // night sky: the moon's angular radius and how thick its crescent is
   MOON_R: 0.085,
   MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii

@@ -576,11 +576,48 @@ if (c.Sky) {
   (badCol === 0) ? ok('every colour stays finite and in range across the cycle')
                  : fail(`${badCol} bad colour components over the cycle`);
 
-  // stars lag nightfall: blue light before anything is visible overhead
+  // the golden hour: the light warms long before the sun is down
   Sky.setHour(18);                    // sun exactly on the horizon
-  const setStars = Sky.starAmt(), setNight = Sky.night();
-  (setStars < 0.02 && setNight > 0.3)
-    ? ok(`at sunset the light has turned but no stars are out (${setStars.toFixed(2)} vs night ${setNight.toFixed(2)})`)
+  (Sky.warmth() > 0.95 && Sky.dusk() > 0.95)
+    ? ok('the light is fully warm as the sun touches the horizon')
+    : fail(`not warm at sunset: warmth ${Sky.warmth().toFixed(2)}`);
+  // the golden hour should be a stretch of the afternoon, not a moment
+  let warmFrom = null, redFrom = null;
+  for (let hh = 12; hh <= 18; hh += 0.02) {
+    Sky.setHour(hh);
+    if (warmFrom === null && Sky.warmth() > 0.05) warmFrom = hh;
+    if (redFrom === null && Sky.dusk() > 0.05) redFrom = hh;
+  }
+  (warmFrom !== null && warmFrom < 16.5 && warmFrom > 13)
+    ? ok(`the light starts warming at ${warmFrom.toFixed(1)}h - ${(18 - warmFrom).toFixed(1)}h of golden hour`)
+    : fail(`golden hour is the wrong length: starts ${warmFrom}`);
+  // the sky reddens later than the light warms: two separate curves
+  (redFrom > warmFrom)
+    ? ok(`the sky only reddens at ${redFrom.toFixed(1)}h, after the light has warmed`)
+    : fail(`sky red leads the light warmth: ${redFrom} vs ${warmFrom}`);
+  Sky.setHour(12);
+  (Sky.warmth() < 0.02) ? ok('noon light is not warm at all')
+                        : fail(`noon is tinted: ${Sky.warmth().toFixed(2)}`);
+  // warmth rises monotonically through the afternoon - no flicker back
+  let dips = 0, prev = -1;
+  for (let hh = 12; hh <= 18; hh += 0.1) {
+    Sky.setHour(hh);
+    if (Sky.warmth() < prev - 1e-9) dips++;
+    prev = Sky.warmth();
+  }
+  (dips === 0) ? ok('the light warms steadily all afternoon, never back')
+               : fail(`warmth is not monotonic: ${dips} reversals`);
+  // and it is gone once the sun is properly under, so moonlight stays blue
+  Sky.setHour(20);
+  (Sky.warmth() < 0.02)
+    ? ok('the warmth is gone by full dark, so moonlight stays blue')
+    : fail(`night light still warm: ${Sky.warmth().toFixed(2)}`);
+
+  // stars still wait for the sun to be under
+  Sky.setHour(18);
+  const setStars = Sky.starAmt();
+  (setStars < 0.02)
+    ? ok('no stars are out while the sun is on the horizon')
     : fail(`stars too early at sunset: ${setStars.toFixed(2)}`);
   Sky.setHour(0);
   (Sky.starAmt() > 0.99) ? ok('the whole field is out at midnight')
