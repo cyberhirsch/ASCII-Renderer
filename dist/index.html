@@ -89,12 +89,6 @@ const CFG = {
   CELL_W: 12,         // CSS px per cell, horizontal
   CELL_H: 22,         // CSS px per cell, vertical
   MONO: false,        // uniform grayscale; devmode + M toggles
-  SUN_COL: [1.00, 0.86, 0.46],
-  SUN_I: 1.55,
-  AMB_COL: [0.20, 0.31, 0.55],
-  AMB_I: 0.55,
-  SKY_HORIZON: [0.34, 0.46, 0.66],
-  SKY_ZENITH: [0.04, 0.10, 0.32],
   GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
   // Tone curve applied before glyph selection. White sits at the luminance
   // sunlit surfaces actually reach; above that the brightest glyphs go
@@ -104,7 +98,6 @@ const CFG = {
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth at t=0 (rad); the cycle sweeps from here
-  SUN_EL: 0.7,        // legacy static elevation; Sky drives elevation now
   DAY_LEN: 3000,      // seconds for a full day/night cycle (50 min)
   // Twilight reach, as sin(sun elevation) either side of the horizon. Low
   // sun means a long path through air, so the light warms well before it
@@ -170,6 +163,161 @@ const CFG = {
   // props may visually reappear until this rises in a later phase
   REMOVED_MAX: 64,
 };
+
+// The seed is the whole world, so it is worth being able to hand someone
+// else. ?seed=<n> picks one at load; the console's "seed" command sets that
+// query and reloads, because every module caches something derived from it.
+// Out-of-range values are ignored rather than silently wrapped: a seed at or
+// above 2^24 does not survive the f32 uniform, and CPU and GPU would then
+// disagree about where the world is.
+const SEED_MAX = 1 << 24;
+CFG.SEED_DEFAULT = CFG.SEED;
+(function () {
+  if (typeof location === 'undefined' || !location.search) return;
+  const m = /[?&]seed=([^&]*)/.exec(location.search);
+  if (!m) return;
+  const v = Number(decodeURIComponent(m[1]));
+  if (Number.isInteger(v) && v >= 0 && v < SEED_MAX) CFG.SEED = v;
+  else console.warn('[ASCII World] ignoring seed ' + m[1] +
+    ' - must be a whole number in 0..' + (SEED_MAX - 1));
+})();
+
+// Saves are per world: two seeds are two different places, and their digs,
+// inventories and records have nothing to say to each other. The default
+// seed keeps the original unsuffixed keys so an existing save survives.
+function saveKey(base) {
+  return CFG.SEED === CFG.SEED_DEFAULT ? base : base + ':' + CFG.SEED;
+}
+</script>
+<script>
+// ---- js/quality.js ----
+// Render quality: how many rays a frame is allowed, and who decides.
+//
+// SUN_SAMPLES, AO_SAMPLES and the shading cutoff all travel to the GPU as
+// per-frame uniforms, so changing them costs nothing beyond the next frame -
+// no recompile, no reallocation. That is what makes an automatic setting
+// possible at all, and it is the only lever a player has: the shipped build
+// is a single HTML file with no js/config.js inside it to edit.
+//
+// The cost of a frame is very close to linear in these numbers, which is
+// why stepping down a level is a reliable way out of a watchdog reset
+// rather than a guess.
+const Quality = {
+  LEVELS: {
+    low:    { sun: 4,  ao: 8,  near: 18 },
+    medium: { sun: 8,  ao: 16, near: 28 },
+    high:   { sun: 16, ao: 32, near: 40 },   // the shipped defaults
+  },
+  ORDER: ['low', 'medium', 'high'],
+  name: 'high',
+  auto: true,
+
+  ms: 16.7,        // smoothed frame time
+  hold: 0,         // seconds since the last change
+  capped: null,    // a level that already proved too slow to hold
+  easy: 0,         // seconds of comfortable frames since the last hard one
+
+  // Thresholds are deliberately far apart. Anything in between is a frame
+  // rate worth keeping, and a rule that fires inside that band would spend
+  // the session walking up and down the ladder.
+  DOWN_MS: 22,     // slower than ~45 fps: give something up
+  UP_MS: 11,       // faster than ~90 fps: there is headroom to spend
+  SETTLE: 2.5,     // seconds a verdict has to hold before it counts
+  // How long the good frames have to keep coming before a level that once
+  // failed is worth another try. What a frame costs depends on where the
+  // player is standing - a dense forest at noon is not a verdict on the
+  // open plain beyond it - so the cap has to be able to lift. Half a minute
+  // makes a retry rare enough that a genuinely slow machine settles down
+  // and stays there.
+  RELAX: 30,
+
+  init() {
+    this.load();
+    this.apply();
+  },
+
+  apply() {
+    const q = this.LEVELS[this.name];
+    CFG.SUN_SAMPLES = q.sun;
+    CFG.AO_SAMPLES = q.ao;
+    // SHADE_FAR sits a hair past SHADE_NEAR: the budget is a hard cut, not
+    // a taper, because past it a penumbra is smaller than one glyph
+    CFG.SHADE_NEAR = q.near;
+    CFG.SHADE_FAR = q.near + 0.001;
+  },
+
+  // Returns false for anything that is not a level or "auto".
+  set(name) {
+    if (name === 'auto') {
+      this.auto = true;
+      this.capped = null;
+      this.hold = 0;
+      this.save();
+      return true;
+    }
+    if (!this.LEVELS[name]) return false;
+    this.auto = false;
+    this.name = name;
+    this.apply();
+    this.save();
+    return true;
+  },
+
+  describe() {
+    return 'quality ' + this.name + (this.auto ? ' (auto)' : ' (fixed)') +
+      ' - ' + this.ms.toFixed(1) + ' ms, ' +
+      CFG.SUN_SAMPLES + ' sun / ' + CFG.AO_SAMPLES + ' ao rays';
+  },
+
+  tick(dt) {
+    // the smoothing is slow on purpose: one heavy frame is not a verdict
+    this.ms += (dt * 1000 - this.ms) * Math.min(1, dt * 2);
+    if (!this.auto) return;
+    if (this.ms < this.UP_MS) {
+      this.easy += dt;
+      if (this.easy > this.RELAX) { this.capped = null; this.easy = 0; }
+    } else {
+      this.easy = 0;
+    }
+    this.hold += dt;
+    if (this.hold < this.SETTLE) return;
+    const i = this.ORDER.indexOf(this.name);
+    if (this.ms > this.DOWN_MS && i > 0) {
+      // remember what did not hold, so the step back up below cannot walk
+      // straight into it again and start the ladder oscillating
+      this.capped = this.name;
+      this.name = this.ORDER[i - 1];
+      this.apply();
+      this.hold = 0;
+    } else if (this.ms < this.UP_MS && i < this.ORDER.length - 1 &&
+               this.ORDER[i + 1] !== this.capped) {
+      this.name = this.ORDER[i + 1];
+      this.apply();
+      this.hold = 0;
+    }
+  },
+
+  // Not part of the world save: how fast this machine is has nothing to do
+  // with which seed is being walked, and it should survive a change of world.
+  save() {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem('ascii-quality',
+        JSON.stringify({ name: this.name, auto: this.auto }));
+    } catch (e) { /* a lost preference is not worth a warning */ }
+  },
+
+  load() {
+    if (typeof localStorage === 'undefined') return;
+    const s = localStorage.getItem('ascii-quality');
+    if (!s) return;
+    try {
+      const o = JSON.parse(s);
+      if (this.LEVELS[o.name]) this.name = o.name;
+      if (typeof o.auto === 'boolean') this.auto = o.auto;
+    } catch (e) { console.warn('quality load failed'); }
+  },
+};
 </script>
 <script>
 // ---- js/util.js ----
@@ -212,16 +360,36 @@ function vn2(px, py, s) {
 }
 
 // -------- terrain height — mirror of WGSL terrainH --------
+// Shape constants live here and are interpolated into the WGSL, never
+// retyped there. Two hand-kept copies of terrainH is the divergence that
+// would move the ground out from under collision without changing a single
+// pixel of the sky, so scripts/verify.js rejects a bare float literal in
+// either mirrored function.
+const TERR = {
+  WARP_F: 0.013,     // frequency of the field that warps the domain
+  WARP_OX: 37.0,     // and the offsets that decorrelate its two channels
+  WARP_OY: 91.0,
+  WARP_A: 1.4,       // warp amplitude, in base-frequency units
+  BASE_F: 0.023,     // base frequency of the heightfield
+  OCT1_W: 0.62,      // octave weights, summing to 1
+  OCT2_W: 0.26,
+  OCT3_W: 0.12,
+  OCT2_F: 2.7,       // and their frequency ratios
+  OCT3_F: 6.1,
+  RIDGE: 1.55,       // exponent: deepens valleys, sharpens ridges
+};
+
 function terrainH(px, py) {
   const s = CFG.SEED >>> 0;
-  const wx = vn2(px * 0.013, py * 0.013, (s ^ 0x77) >>> 0);
-  const wy = vn2(px * 0.013 + 37.0, py * 0.013 + 91.0, (s ^ 0x77) >>> 0);
-  const qx = px * 0.023 + (wx - 0.5) * 1.4;
-  const qy = py * 0.023 + (wy - 0.5) * 1.4;
-  let h = vn2(qx, qy, s) * 0.62 +
-          vn2(qx * 2.7, qy * 2.7, (s ^ 0x9e37) >>> 0) * 0.26 +
-          vn2(qx * 6.1, qy * 6.1, (s ^ 0x51ed) >>> 0) * 0.12;
-  h = Math.pow(h, 1.55);
+  const wx = vn2(px * TERR.WARP_F, py * TERR.WARP_F, (s ^ 0x77) >>> 0);
+  const wy = vn2(px * TERR.WARP_F + TERR.WARP_OX,
+                 py * TERR.WARP_F + TERR.WARP_OY, (s ^ 0x77) >>> 0);
+  const qx = px * TERR.BASE_F + (wx - 0.5) * TERR.WARP_A;
+  const qy = py * TERR.BASE_F + (wy - 0.5) * TERR.WARP_A;
+  let h = vn2(qx, qy, s) * TERR.OCT1_W +
+          vn2(qx * TERR.OCT2_F, qy * TERR.OCT2_F, (s ^ 0x9e37) >>> 0) * TERR.OCT2_W +
+          vn2(qx * TERR.OCT3_F, qy * TERR.OCT3_F, (s ^ 0x51ed) >>> 0) * TERR.OCT3_W;
+  h = Math.pow(h, TERR.RIDGE);
   return h * CFG.TERRAIN_MAX;
 }
 
@@ -537,6 +705,12 @@ const MATS = {
   GEM_CORE: 0.22,   // fraction of the vein width that is gem, not ore
   GEM_Z: -6.0,      // gems only form below this depth
   IRON_Z: -14.0,    // ore below this is iron, above it copper
+  // Glow lichen on cave rock. Mirrored: the shader decides where it grows
+  // and World.classifySolid decides where you may pick it, so a divergence
+  // here offers a harvest off a bare wall.
+  LICHEN_F: 1.9,    // frequency of the patch noise
+  LICHEN_T: 0.8,    // noise above this is a patch
+  LICHEN_GAIN: 9.0, // how fast a patch brightens past the threshold
 };
 
 // Soil depth below the surface at (x, y): deep on flats, zero on steep
@@ -643,20 +817,49 @@ function rockAt(ix, iy) {
 }
 
 // -------- tree placement — mirror of WGSL treeAt --------
-// returns null or { cx, cy, r, trunkH, trunkR }
+// Shared with the shader the same way the terrain constants are: the
+// canopy's shape and its erosion noise are written down once. The erosion
+// numbers matter twice over, because the primary ray and the shadow ray
+// each carve the canopy's holes independently - if those two drifted, a
+// tree would shadow gaps the eye can see straight through.
+const TREE = {
+  FOREST_F: 0.021,   // frequency of the forest-region field
+  DENS_LO: 0.45,     // region gate: below LO is open ground
+  DENS_HI: 0.72,
+  DENS_A: 0.16,      // per-cell tree chance deep inside a forest
+  DENS_MIN: 0.004,   // and out on the open ground, the occasional lone tree
+  OFF: 0.3,          // anchor jitter within the cell
+  OFF_VAR: 0.4,
+  R_MIN: 1.0,        // canopy radius
+  R_VAR: 0.5,
+  TRUNK_H: 2.6,      // trunk height
+  TRUNK_H_VAR: 1.2,
+  TRUNK_R: 0.085,    // trunk radius: a constant plus a share of the canopy
+  TRUNK_R_K: 0.055,
+  CAN_Z: 0.55,       // canopy centre above the trunk top, in canopy radii
+  // canopy erosion: two octaves of 3D noise thin the sphere into foliage
+  DENS_F1: 2.6, DENS_W1: 0.75,
+  DENS_F2: 6.5, DENS_W2: 0.25,
+  EXT: 1.35,         // extinction along the chord through the canopy
+  EXT_MIN: 0.35,     // floor and gain applied to the density before it
+  EXT_K: 1.3,
+  ALPHA_MIN: 0.03,   // below this the canopy is a hole, not foliage
+};
+
 function treeAt(ix, iy) {
   const s = CFG.SEED >>> 0;
-  const forest = vn2(ix * 0.021, iy * 0.021, (s ^ 0xF0F0) >>> 0);
-  const density = smoothstep(0.45, 0.72, forest) * 0.16 + 0.004;
+  const forest = vn2(ix * TREE.FOREST_F, iy * TREE.FOREST_F, (s ^ 0xF0F0) >>> 0);
+  const density = smoothstep(TREE.DENS_LO, TREE.DENS_HI, forest) * TREE.DENS_A +
+                  TREE.DENS_MIN;
   if (hash01(ix, iy, (s ^ 0x7EE7) >>> 0) >= density) return null;
   const h2 = hash2i(ix, iy, (s ^ 0xA11C) >>> 0);
-  const r = 1.0 + h2[0] * 0.5;
+  const r = TREE.R_MIN + h2[0] * TREE.R_VAR;
   return {
-    cx: ix + 0.3 + h2[0] * 0.4,
-    cy: iy + 0.3 + h2[1] * 0.4,
+    cx: ix + TREE.OFF + h2[0] * TREE.OFF_VAR,
+    cy: iy + TREE.OFF + h2[1] * TREE.OFF_VAR,
     r,
-    trunkH: 2.6 + h2[1] * 1.2,
-    trunkR: 0.085 + r * 0.055,
+    trunkH: TREE.TRUNK_H + h2[1] * TREE.TRUNK_H_VAR,
+    trunkR: TREE.TRUNK_R + r * TREE.TRUNK_R_K,
   };
 }
 </script>
@@ -820,7 +1023,10 @@ const World = {
       // ore and gems outrank the lichen growing over them
       if (mat === MATS.GEM) return { kind: 'gem', point: p, mat };
       if (mat === MATS.ORE) return { kind: 'ore', point: p, mat };
-      if (vnoise(px * 1.9, py * 1.9, pz * 1.9) > 0.8) {
+      // the same patch field the shader grows lichen from, so a harvest is
+      // only ever offered off a wall that visibly has some
+      const lf = MATS.LICHEN_F;
+      if (vnoise(px * lf, py * lf, pz * lf) > MATS.LICHEN_T) {
         return { kind: 'lichen', point: p, mat };
       }
       return { kind: 'cavewall', point: p, mat };
@@ -1080,13 +1286,21 @@ const Entities = {
 // Persisted to localStorage, edited chunks only.
 const Edits = {
   chunks: new Map(),   // "cx,cy,cz" -> Int8Array(EDIT_CHUNK^3), z-major
+  pos: new Map(),      // the same keys, parsed to [cx, cy, cz] once
   bounds: null,        // world AABB over all chunks + trilinear margin
   gpuDirty: false,     // resident set needs re-packing and upload
   needSave: false,
   saveTimer: 0,
+  saveFailed: false,   // storage is full; say so once, not every four seconds
 
   // persistent pack targets so per-dig uploads do not allocate
   head: null, data: null,
+  // Which chunk sits in each GPU slot, and which chunks were dug since the
+  // last pack. Between them these say which of the 32 bricks actually need
+  // re-uploading - a dig used to push the whole megabyte, seven times a
+  // second, to change a few hundred bytes of it.
+  slotKeys: [],
+  dug: new Set(),
 
   key(cx, cy, cz) { return cx + ',' + cy + ',' + cz; },
 
@@ -1094,7 +1308,23 @@ const Edits = {
     const n = CAVES.EDIT_CHUNK;
     this.head = new Float32Array(CFG.EDIT_MAX * 4);
     this.data = new Int8Array(CFG.EDIT_MAX * n * n * n);
+    this.slotKeys = new Array(CFG.EDIT_MAX).fill(null);
     this.load();
+  },
+
+  // the one place a chunk comes into existence, so the key, the parsed
+  // coordinates and the bounds can never disagree about it
+  chunkAt(cx, cy, cz) {
+    const k = this.key(cx, cy, cz);
+    let ch = this.chunks.get(k);
+    if (!ch) {
+      ch = new Int8Array(CAVES.EDIT_CHUNK ** 3);
+      this.chunks.set(k, ch);
+      this.pos.set(k, [cx, cy, cz]);
+      this.growBounds(cx, cy, cz);
+    }
+    this.dug.add(k);
+    return ch;
   },
 
   growBounds(cx, cy, cz) {
@@ -1159,13 +1389,7 @@ const Edits = {
           const add = Math.round(amount * fall);
           if (add === 0) continue;
           const cx = Math.floor(ix / n), cy = Math.floor(iy / n), cz = Math.floor(iz / n);
-          const k = this.key(cx, cy, cz);
-          let ch = this.chunks.get(k);
-          if (!ch) {
-            ch = new Int8Array(n * n * n);
-            this.chunks.set(k, ch);
-            this.growBounds(cx, cy, cz);
-          }
+          const ch = this.chunkAt(cx, cy, cz);
           const li = ((iz - cz * n) * n + (iy - cy * n)) * n + (ix - cx * n);
           ch[li] = clamp(ch[li] + add, -127, 127);
         }
@@ -1177,29 +1401,43 @@ const Edits = {
 
   // Pack the EDIT_MAX chunks nearest the player for the GPU. Header slot:
   // (world origin xyz, used flag); data: raw signed bytes, z-major, read as
-  // packed u32 words in the shader. Returns the resident count and AABB.
+  // packed u32 words in the shader. Returns the resident count, the AABB,
+  // and the slots whose brick actually changed - the caller uploads those
+  // and leaves the rest of the buffer alone.
+  //
+  // Distances come off the coordinates parsed when the chunk was made, not
+  // off its key: re-splitting every key string on every dig is work that
+  // grows with how much the player has dug.
   pack(px, py, pz) {
     const n = CAVES.EDIT_CHUNK;
     const w = n * CAVES.EDIT_VOX;
-    const keys = [...this.chunks.keys()];
-    keys.sort((a, b) => {
-      const pa = a.split(',').map(Number), pb = b.split(',').map(Number);
-      const da = (pa[0] * w + w / 2 - px) ** 2 + (pa[1] * w + w / 2 - py) ** 2 +
-                 (pa[2] * w + w / 2 - pz) ** 2;
-      const db = (pb[0] * w + w / 2 - px) ** 2 + (pb[1] * w + w / 2 - py) ** 2 +
-                 (pb[2] * w + w / 2 - pz) ** 2;
-      return da - db;
-    });
-    const count = Math.min(keys.length, CFG.EDIT_MAX);
+    const bytes = n * n * n;
+    const order = [];
+    for (const k of this.chunks.keys()) {
+      const c = this.pos.get(k);
+      order.push({ k, d: (c[0] * w + w / 2 - px) ** 2 +
+                         (c[1] * w + w / 2 - py) ** 2 +
+                         (c[2] * w + w / 2 - pz) ** 2 });
+    }
+    order.sort((a, b) => a.d - b.d);
+    const count = Math.min(order.length, CFG.EDIT_MAX);
     this.head.fill(0);
+    const slots = [];
     let bounds = null;
     for (let i = 0; i < count; i++) {
-      const [cx, cy, cz] = keys[i].split(',').map(Number);
+      const k = order[i].k;
+      const [cx, cy, cz] = this.pos.get(k);
       this.head[i * 4] = cx * w;
       this.head[i * 4 + 1] = cy * w;
       this.head[i * 4 + 2] = cz * w;
       this.head[i * 4 + 3] = 1;
-      this.data.set(this.chunks.get(keys[i]), i * n * n * n);
+      // a slot only needs its brick again if a different chunk moved into
+      // it, or the chunk already there has been dug since the last pack
+      if (this.slotKeys[i] !== k || this.dug.has(k)) {
+        this.data.set(this.chunks.get(k), i * bytes);
+        slots.push(i);
+      }
+      this.slotKeys[i] = k;
       const m = CAVES.EDIT_VOX;
       const lo = [cx * w - m, cy * w - m, cz * w - m];
       const hi = [cx * w + w + m, cy * w + w + m, cz * w + w + m];
@@ -1209,11 +1447,46 @@ const Edits = {
         if (hi[d] > bounds[d + 3]) bounds[d + 3] = hi[d];
       }
     }
-    return { count, bounds };
+    for (let i = count; i < CFG.EDIT_MAX; i++) this.slotKeys[i] = null;
+    this.dug.clear();
+    return { count, bounds, slots };
   },
 
-  // ---- persistence: base64 per chunk, portable (no btoa dependency) ----
+  // ---- persistence: RLE, then base64, portable (no btoa dependency) ----
   B64: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+
+  // A dug chunk is almost all zeros: one scoop touches a few hundred of its
+  // 32768 voxels, and the rest of the brick has never been written. Stored
+  // dense, that is 43.7 KB of base64 characters for every chunk the player
+  // so much as clipped, and localStorage - five megabytes, counted in
+  // characters - filled up after roughly a hundred of them. Run-length
+  // encoding first turns the same chunk into a few hundred bytes.
+  //
+  // Format: triples of (length low byte, length high byte, value). A run is
+  // at most 65535 voxels, so an untouched chunk costs six bytes.
+  rle(ch) {
+    const out = [];
+    let i = 0;
+    while (i < ch.length) {
+      const v = ch[i];
+      let j = i + 1;
+      while (j < ch.length && ch[j] === v && j - i < 65535) j++;
+      const n = j - i;
+      out.push(n & 0xff, (n >> 8) & 0xff, v & 0xff);
+      i = j;
+    }
+    return Uint8Array.from(out);
+  },
+
+  unrle(bytes, out) {
+    let o = 0;
+    for (let i = 0; i + 2 < bytes.length; i += 3) {
+      const n = bytes[i] | (bytes[i + 1] << 8);
+      const v = (bytes[i + 2] << 24) >> 24;    // the stored byte is signed
+      for (let k = 0; k < n && o < out.length; k++) out[o++] = v;
+    }
+    return o;
+  },
 
   enc(bytes) {
     const c = this.B64;
@@ -1242,20 +1515,35 @@ const Edits = {
 
   serialize() {
     const obj = {};
-    for (const [k, ch] of this.chunks) obj[k] = this.enc(new Uint8Array(ch.buffer));
-    return JSON.stringify(obj);
+    for (const [k, ch] of this.chunks) obj[k] = this.enc(this.rle(ch));
+    return JSON.stringify({ v: 2, c: obj });
   },
 
+  // Reads both shapes. A v1 save is a bare object of dense base64 blobs;
+  // v2 wraps them and run-length encodes first. Old saves are read and then
+  // written back out in the new form, so nobody loses a tunnel to the change.
   deserialize(str) {
     const n = CAVES.EDIT_CHUNK;
     this.chunks.clear();
+    this.pos.clear();
+    this.dug.clear();
+    this.slotKeys.fill(null);
     this.bounds = null;
-    const obj = JSON.parse(str);
+    const raw = JSON.parse(str);
+    const v2 = raw && raw.v === 2;
+    const obj = v2 ? raw.c : raw;
     for (const k of Object.keys(obj)) {
       const ch = new Int8Array(n * n * n);
-      this.dec(obj[k], new Uint8Array(ch.buffer));
-      this.chunks.set(k, ch);
+      if (v2) {
+        const packed = new Uint8Array(Math.floor(obj[k].length / 4) * 3);
+        this.dec(obj[k], packed);
+        this.unrle(packed, ch);
+      } else {
+        this.dec(obj[k], new Uint8Array(ch.buffer));
+      }
       const [cx, cy, cz] = k.split(',').map(Number);
+      this.chunks.set(k, ch);
+      this.pos.set(k, [cx, cy, cz]);
       this.growBounds(cx, cy, cz);
     }
     this.gpuDirty = this.chunks.size > 0;
@@ -1263,14 +1551,25 @@ const Edits = {
 
   save() {
     if (typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('ascii-caves-v1', this.serialize()); }
-    catch (e) { console.warn('edit save failed: ' + e.message); }
+    try {
+      localStorage.setItem(saveKey('ascii-caves-v1'), this.serialize());
+      this.saveFailed = false;
+    } catch (e) {
+      // Failing silently here loses the player's digging and never says so,
+      // which is the worst way for a save to break. Once is enough: the
+      // next attempt is four seconds away and would say the same thing.
+      if (!this.saveFailed && typeof Game !== 'undefined') {
+        Game.toast('storage is full - your digging is no longer being saved');
+      }
+      this.saveFailed = true;
+      console.warn('edit save failed: ' + e.message);
+    }
     this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-caves-v1');
+    const s = localStorage.getItem(saveKey('ascii-caves-v1'));
     if (!s) return;
     try { this.deserialize(s); } catch (e) { console.warn('edit load failed'); }
   },
@@ -1289,11 +1588,15 @@ const Edits = {
 // One cell holds one prop, so a single set covers all of them.
 // CPU-authoritative like the dig edits: collision and examine skip cleared
 // cells, and the GPU receives the REMOVED_MAX cells nearest the player so the
-// renderer stops drawing them. Clearing is rare, so persistence is a
-// synchronous write on change, no debounce.
+// renderer stops drawing them. Persistence is debounced the way the dig
+// edits are: felling a tree used to serialise and write the whole set
+// synchronously, which is a stutter that grows with the set.
 const Removed = {
-  set: new Set(),      // "ix,iy"
+  set: new Set(),      // "ix,iy" - the authority
+  cells: null,         // the same cells as [ix, iy] numbers, for packing
   gpuDirty: false,
+  needSave: false,
+  saveTimer: 0,
   data: null,          // packed vec2f cells for the GPU
 
   init() {
@@ -1304,14 +1607,30 @@ const Removed = {
   has(ix, iy) { return this.set.has(ix + ',' + iy); },
 
   add(ix, iy) {
-    this.set.add(ix + ',' + iy);
+    const k = ix + ',' + iy;
+    if (this.set.has(k)) return;
+    this.set.add(k);
+    if (this.cells) this.cells.push([ix, iy]);
     this.gpuDirty = true;
-    this.save();
+    this.needSave = true;
+  },
+
+  // Numeric mirror of the set, so packing does not re-parse every key. The
+  // set stays the authority: anything that reaches into it directly changes
+  // its size, and a size that no longer matches rebuilds this from scratch.
+  syncCells() {
+    if (this.cells && this.cells.length === this.set.size) return;
+    this.cells = [];
+    for (const k of this.set) {
+      const c = k.split(',');
+      this.cells.push([Number(c[0]), Number(c[1])]);
+    }
   },
 
   // pack the REMOVED_MAX cleared cells nearest the player; returns the count
   pack(px, py) {
-    const cells = [...this.set].map(k => k.split(',').map(Number));
+    this.syncCells();
+    const cells = this.cells;
     cells.sort((a, b) =>
       ((a[0] - px) ** 2 + (a[1] - py) ** 2) -
       ((b[0] - px) ** 2 + (b[1] - py) ** 2));
@@ -1325,19 +1644,27 @@ const Removed = {
   },
 
   save() {
-    if (typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('ascii-removed-v1', JSON.stringify([...this.set])); }
+    if (typeof localStorage === 'undefined') { this.needSave = false; return; }
+    try { localStorage.setItem(saveKey('ascii-removed-v1'), JSON.stringify([...this.set])); }
     catch (e) { console.warn('cleared-cell save failed: ' + e.message); }
+    this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-removed-v1');
+    const s = localStorage.getItem(saveKey('ascii-removed-v1'));
     if (!s) return;
     try {
       this.set = new Set(JSON.parse(s));
+      this.cells = null;
       this.gpuDirty = this.set.size > 0;
     } catch (e) { console.warn('cleared-cell load failed'); }
+  },
+
+  tick(dt) {
+    if (!this.needSave) return;
+    this.saveTimer += dt;
+    if (this.saveTimer > 2) { this.saveTimer = 0; this.save(); }
   },
 };
 </script>
@@ -1638,6 +1965,72 @@ const Game = {
       this.cmdHistory.push('day length ' + CFG.DAY_LEN + 's');
       return;
     }
+    // The seed is the world. Handing someone a number hands them the same
+    // hills, the same caves and the same dead civilisation, which is the
+    // whole claim this project makes - so it needs to be sayable at runtime
+    // and not only editable in a source file nobody who plays this has.
+    if (verb === 'seed') {
+      if (arg.length > 1) {
+        const v = Number(arg[1]);
+        if (!Number.isInteger(v) || v < 0 || v >= SEED_MAX) {
+          this.cmdHistory.push('seed must be a whole number below ' + SEED_MAX);
+          this.cmdHistory.push('(above that an f32 uniform stops carrying it)');
+          return;
+        }
+        if (v === CFG.SEED) { this.cmdHistory.push('already standing in ' + v); return; }
+        // Half the modules cache something derived from the seed - the
+        // spawn, the civilisation, the resident dig chunks - so the honest
+        // way into another world is to load it. Flush what is owed first.
+        this.save();
+        if (typeof Edits !== 'undefined') Edits.save();
+        if (typeof Removed !== 'undefined') Removed.save();
+        this.cmdHistory.push('walking to ' + v + '...');
+        if (typeof location !== 'undefined') location.search = '?seed=' + v;
+        return;
+      }
+      this.cmdHistory.push('seed ' + CFG.SEED + '  -  "seed <n>" walks to another world');
+      this.cmdHistory.push('every world keeps its own digs, items and record');
+      return;
+    }
+    if (verb === 'quality') {
+      if (typeof Quality === 'undefined') {
+        this.cmdHistory.push('quality control is not loaded');
+        return;
+      }
+      if (arg.length > 1 && !Quality.set(arg[1].toLowerCase())) {
+        this.cmdHistory.push('quality: low, medium, high, or auto');
+        return;
+      }
+      this.cmdHistory.push(Quality.describe());
+      return;
+    }
+    // The screen already IS text. Handing it back as text is the one export
+    // format this renderer can offer that no screenshot improves on.
+    if (verb === 'copy') {
+      if (typeof GPURenderer === 'undefined' || !GPURenderer.ok) {
+        this.cmdHistory.push('nothing to copy - the renderer is not running');
+        return;
+      }
+      // Nobody wants a picture of themselves asking for a picture, so the
+      // console closes first and the grab waits for the HUD to be redrawn
+      // without it. Two frames, because the redraw happens inside the frame
+      // loop and this is not being called from it. The world itself is
+      // unaffected: the overlay is substituted in the glyph pass, not
+      // marched in the raymarch, so nothing has to be re-rendered.
+      this.close();
+      const done = m => this.toast(m);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        GPURenderer.captureText().then(txt => {
+          const rows = txt.split('\n').length;
+          if (typeof navigator !== 'undefined' && navigator.clipboard) {
+            navigator.clipboard.writeText(txt).then(
+              () => done(rows + ' lines copied'),
+              () => { console.log(txt); done('clipboard refused it - see the console'); });
+          } else { console.log(txt); done('no clipboard here - see the console'); }
+        }, e => done('copy failed: ' + e.message));
+      }));
+      return;
+    }
     switch (cmd.toLowerCase()) {
       case 'devmode':
         this.devMode = !this.devMode;
@@ -1651,14 +2044,16 @@ const Game = {
       case 'wipe':
         this.inv.clear(); this.read = []; this.done = false; this.used.clear();
         if (typeof localStorage !== 'undefined') {
-          localStorage.removeItem('ascii-save-v1');
-          localStorage.removeItem('ascii-caves-v1');
-          localStorage.removeItem('ascii-removed-v1');
+          // this world only: another seed's digs are none of its business
+          localStorage.removeItem(saveKey('ascii-save-v1'));
+          localStorage.removeItem(saveKey('ascii-caves-v1'));
+          localStorage.removeItem(saveKey('ascii-removed-v1'));
         }
         this.cmdHistory.push('save wiped - reload to start over');
         break;
       case 'help':
-        this.cmdHistory.push('commands: devmode, time <h>, freeze, daylen <s>,');
+        this.cmdHistory.push('commands: seed <n>, quality <low|medium|high|auto>,');
+        this.cmdHistory.push('copy, time <h>, freeze, daylen <s>, devmode,');
         this.cmdHistory.push('wipe, clear, help');
         break;
       default:
@@ -1723,6 +2118,22 @@ const Game = {
   target: null, actions: [],
   used: new Set(),   // once-per-target actions spent this session
 
+  // The spent set rides along in every save, and a long walk gathers
+  // thousands of loose stones - unbounded, it is the one part of the save
+  // that grows without end. Oldest first out, so a patch the player left
+  // far behind will eventually offer itself again, which is a cheaper
+  // failure than a save that never stops growing. (A Set iterates in
+  // insertion order, so the first value is always the oldest.)
+  USED_MAX: 512,
+
+  spend(key) {
+    this.used.add(key);
+    while (this.used.size > this.USED_MAX) {
+      this.used.delete(this.used.values().next().value);
+    }
+    this.needSave = true;
+  },
+
   examine() {
     const p = Player;
     const cp = Math.cos(p.pitch), sp = Math.sin(p.pitch);
@@ -1744,7 +2155,7 @@ const Game = {
     const acts = [];
     const once = (what, label, fn) => {
       if (this.used.has(this.useKey(t, what))) return;
-      acts.push({ label, fn: () => { this.used.add(this.useKey(t, what)); fn(); } });
+      acts.push({ label, fn: () => { this.spend(this.useKey(t, what)); fn(); } });
     };
     if (t.kind === 'tree') {
       const sp = SPECIES[treeSpecies(t.ix, t.iy)];
@@ -2082,21 +2493,21 @@ const Game = {
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
     this.done = !!s.done;
-    this.used = new Set(s.used || []);
+    this.used = new Set((s.used || []).slice(-this.USED_MAX));
     this.spawnAt = Array.isArray(s.at) ? s.at : null;
     if (typeof s.t === 'number' && typeof Sky !== 'undefined') Sky.t = s.t;
   },
 
   save() {
     if (typeof localStorage === 'undefined') { this.needSave = false; return; }
-    try { localStorage.setItem('ascii-save-v1', JSON.stringify(this.snapshot())); }
+    try { localStorage.setItem(saveKey('ascii-save-v1'), JSON.stringify(this.snapshot())); }
     catch (e) { console.warn('save failed: ' + e.message); }
     this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-save-v1');
+    const s = localStorage.getItem(saveKey('ascii-save-v1'));
     if (!s) return;
     try { this.restore(JSON.parse(s)); }
     catch (e) { console.warn('load failed'); }
@@ -2284,34 +2695,6 @@ const Player = {
 // ink coverage sampled, then the set is sorted by coverage and resampled so
 // the ramp is close to linear in brightness. A hand-ordered ramp is uneven —
 // the gaps show up as banding in smooth gradients.
-// Billboard artwork: text rendered to a stacked atlas, one row per sign, which
-// the compute shader samples when a ray lands on a hoarding panel.
-const SignAtlas = {
-  TEXTS: ['NOODLES', 'OPEN 24H', 'DATA', 'HOTEL',
-          'GARAGE', 'SUSHI', 'TAXI', 'CITY BANK'],
-  W: 256, H: 64,
-
-  build() {
-    const n = this.TEXTS.length;
-    const cv = document.createElement('canvas');
-    cv.width = this.W;
-    cv.height = this.H * n;
-    const ctx = cv.getContext('2d');
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, cv.width, cv.height);
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    for (let i = 0; i < n; i++) {
-      const t = this.TEXTS[i];
-      // shrink to fit the panel rather than overflow it
-      const size = Math.min(this.H * 0.6, (this.W * 1.55) / t.length);
-      ctx.font = `bold ${size | 0}px "Consolas", "Courier New", monospace`;
-      ctx.fillText(t, this.W / 2, this.H * i + this.H / 2);
-    }
-    return { canvas: cv, count: n };
-  },
-};
 
 // Full printable-ASCII strip (codes 32..126) for the text overlay, rendered
 // at the display cell size like the ramp atlas so texels stay 1:1 with pixels.
@@ -2549,12 +2932,13 @@ fn seedU() -> u32 { return u32(U.seed); }
 
 fn terrainH(p : vec2f) -> f32 {
   let s = seedU();
-  let w = vec2f(vn2(p * 0.013, s ^ 0x77u),
-                vn2(p * 0.013 + vec2f(37.0, 91.0), s ^ 0x77u));
-  let q = p * 0.023 + (w - 0.5) * 1.4;
-  var h = vn2(q, s) * 0.62 + vn2(q * 2.7, s ^ 0x9e37u) * 0.26
-        + vn2(q * 6.1, s ^ 0x51edu) * 0.12;
-  h = pow(h, 1.55);            // deepen valleys, sharpen ridges
+  let w = vec2f(vn2(p * ${TERR.WARP_F}, s ^ 0x77u),
+                vn2(p * ${TERR.WARP_F} + vec2f(${TERR.WARP_OX}, ${TERR.WARP_OY}),
+                    s ^ 0x77u));
+  let q = p * ${TERR.BASE_F} + (w - 0.5) * ${TERR.WARP_A};
+  var h = vn2(q, s) * ${TERR.OCT1_W} + vn2(q * ${TERR.OCT2_F}, s ^ 0x9e37u) * ${TERR.OCT2_W}
+        + vn2(q * ${TERR.OCT3_F}, s ^ 0x51edu) * ${TERR.OCT3_W};
+  h = pow(h, ${TERR.RIDGE});   // deepen valleys, sharpen ridges
   return h * U.maxHeight;
 }
 
@@ -2942,14 +3326,15 @@ fn treeAt(ix : i32, iy : i32) -> Tree {
   var tr : Tree;
   tr.present = false;
   let s = seedU();
-  let forest = vn2(vec2f(f32(ix), f32(iy)) * 0.021, s ^ 0xF0F0u);
-  let density = smoothstep(0.45, 0.72, forest) * 0.16 + 0.004;
+  let forest = vn2(vec2f(f32(ix), f32(iy)) * ${TREE.FOREST_F}, s ^ 0xF0F0u);
+  let density = smoothstep(${TREE.DENS_LO}, ${TREE.DENS_HI}, forest)
+              * ${TREE.DENS_A} + ${TREE.DENS_MIN};
   if (hash01(ix, iy, s ^ 0x7EE7u) >= density) { return tr; }
   let h2 = hash2i(ix, iy, s ^ 0xA11Cu);
-  tr.cx = f32(ix) + 0.3 + h2.x * 0.4;
-  tr.cy = f32(iy) + 0.3 + h2.y * 0.4;
-  tr.r = 1.0 + h2.x * 0.5;
-  tr.trunkH = 2.6 + h2.y * 1.2;
+  tr.cx = f32(ix) + ${TREE.OFF} + h2.x * ${TREE.OFF_VAR};
+  tr.cy = f32(iy) + ${TREE.OFF} + h2.y * ${TREE.OFF_VAR};
+  tr.r = ${TREE.R_MIN} + h2.x * ${TREE.R_VAR};
+  tr.trunkH = ${TREE.TRUNK_H} + h2.y * ${TREE.TRUNK_H_VAR};
   tr.present = true;
   return tr;
 }
@@ -3209,39 +3594,43 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       // advances four cells at a time to amortise the search, and a 3-wide
       // window over a 4-cell stride leaves one cell in four never tested.
       // That is a stone winking in and out as you walk past it.
-      if (!isRemoved(tx, ty)) {
-        // The view cutoffs are set from each prop's biggest possible size,
-        // at the range where it stops covering even one character cell. Cut
-        // any nearer and the prop pops out of existence while it is still
-        // drawable, which is its own kind of flicker.
-        if (dHere < ${PROPS.ROCK_VIEW}) {
-          let rk = rockAt(tx, ty);
-          if (rk.present) {
-            let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
-            let hf = hitFaceted(ro, rd, c, rk.r, tx, ty);
-            if (hf.x > 0.0 && hf.x < best) {
-              best = hf.x;
-              o.t = hf.x;
-              o.n = hf.yzw;
-              o.albedo = vec3f(0.46, 0.44, 0.41);
-              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-            }
+      // The view cutoffs are set from each prop's biggest possible size,
+      // at the range where it stops covering even one character cell. Cut
+      // any nearer and the prop pops out of existence while it is still
+      // drawable, which is its own kind of flicker.
+      //
+      // isRemoved is a LINEAR SCAN of the cleared-cell set, so it is asked
+      // last, once a prop is known to stand here at all - a boulder holds
+      // about one cell in ninety. Ahead of the presence hash it would spend
+      // the whole scan on every cell of the window on every step of the
+      // walk, and the game would slow down the more the player cleared.
+      if (dHere < ${PROPS.ROCK_VIEW}) {
+        let rk = rockAt(tx, ty);
+        if (rk.present && !isRemoved(tx, ty)) {
+          let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
+          let hf = hitFaceted(ro, rd, c, rk.r, tx, ty);
+          if (hf.x > 0.0 && hf.x < best) {
+            best = hf.x;
+            o.t = hf.x;
+            o.n = hf.yzw;
+            o.albedo = vec3f(0.46, 0.44, 0.41);
+            o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
           }
         }
-        if (dHere < ${PROPS.STONE_VIEW}) {
-          let st = stoneAt(tx, ty);
-          if (st.present) {
-            let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
-            // offset the cell key so a stone and a boulder in the same cell
-            // do not end up cut to the same shape
-            let hf = hitFaceted(ro, rd, c, st.r, tx + 4096, ty - 4096);
-            if (hf.x > 0.0 && hf.x < best) {
-              best = hf.x;
-              o.t = hf.x;
-              o.n = hf.yzw;
-              o.albedo = vec3f(0.50, 0.48, 0.45);
-              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-            }
+      }
+      if (dHere < ${PROPS.STONE_VIEW}) {
+        let st = stoneAt(tx, ty);
+        if (st.present && !isRemoved(tx, ty)) {
+          let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
+          // offset the cell key so a stone and a boulder in the same cell
+          // do not end up cut to the same shape
+          let hf = hitFaceted(ro, rd, c, st.r, tx + 4096, ty - 4096);
+          if (hf.x > 0.0 && hf.x < best) {
+            best = hf.x;
+            o.t = hf.x;
+            o.n = hf.yzw;
+            o.albedo = vec3f(0.50, 0.48, 0.45);
+            o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
           }
         }
       }
@@ -3251,8 +3640,8 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       if (isRemoved(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
       let g = terrainH(cen);
-      let canZ = g + tr.trunkH + tr.r * 0.55;
-      let trunkR = 0.085 + tr.r * 0.055;
+      let canZ = g + tr.trunkH + tr.r * ${TREE.CAN_Z};
+      let trunkR = ${TREE.TRUNK_R} + tr.r * ${TREE.TRUNK_R_K};
 
       let tTrunk = hitCylinder(ro, rd, cen, trunkR, g, g + tr.trunkH);
       if (tTrunk > 0.001 && tTrunk < best) {
@@ -3269,10 +3658,12 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
         let tEnter = max(sph.x, 0.001);
         if (tEnter < best) {
           let hp = ro + rd * tEnter;
-          let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
+          let dens = vnoise(hp * ${TREE.DENS_F1}) * ${TREE.DENS_W1}
+                   + vnoise(hp * ${TREE.DENS_F2}) * ${TREE.DENS_W2};
           let chord = max(sph.y - tEnter, 0.0);
-          let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
-          if (a > 0.03) {
+          let a = 1.0 - exp(-chord * ${TREE.EXT}
+                            * (${TREE.EXT_MIN} + ${TREE.EXT_K} * dens));
+          if (a > ${TREE.ALPHA_MIN}) {
             best = tEnter;
             o.t = tEnter;
             o.tExit = sph.y;
@@ -3387,9 +3778,12 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         // eight neighbours are not worth their hashes here. The bounding
         // sphere is used rather than the cut shape - a facet's worth of
         // difference is not visible in a shadow, and this is the hot loop.
-        if (ox == 0 && oy == 0 && !isRemoved(tx, ty)) {
+        if (ox == 0 && oy == 0) {
           let rk = rockAt(tx, ty);
-          if (rk.present) {
+          // presence hash first, cleared-cell scan second: this loop runs
+          // once per occlusion ray, and there are SUN_SAMPLES + AO_SAMPLES
+          // of those per shaded cell
+          if (rk.present && !isRemoved(tx, ty)) {
             let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
             let hs = hitSphere(ro, rd, c, rk.r);
             // hs.x ahead of the origin, not merely hs.y: boulders are bedded
@@ -3407,9 +3801,10 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (isRemoved(tx, ty)) { continue; }
 
         let g = terrainH(vec2f(tr.cx, tr.cy));
-        let canZ = g + tr.trunkH + tr.r * 0.55;
+        let canZ = g + tr.trunkH + tr.r * ${TREE.CAN_Z};
         let tTrunk = hitCylinder(ro, rd, vec2f(tr.cx, tr.cy),
-                                 0.085 + tr.r * 0.055, g, g + tr.trunkH);
+                                 ${TREE.TRUNK_R} + tr.r * ${TREE.TRUNK_R_K},
+                                 g, g + tr.trunkH);
         if (tTrunk > 0.001 && tTrunk * hlen < maxD) { return 0.0; }
         let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
         if (sph.y > 0.001 && sph.x * hlen < maxD) {
@@ -3417,10 +3812,12 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
           // line up with the gaps the eye actually sees in the canopy
           let tEnter = max(sph.x, 0.001);
           let mid = ro + rd * max((tEnter + sph.y) * 0.5, 0.0);
-          let dens = vnoise(mid * 2.6) * 0.75 + vnoise(mid * 6.5) * 0.25;
+          let dens = vnoise(mid * ${TREE.DENS_F1}) * ${TREE.DENS_W1}
+                   + vnoise(mid * ${TREE.DENS_F2}) * ${TREE.DENS_W2};
           let chord = max(sph.y - tEnter, 0.0);
-          let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
-          if (a > 0.03) { return 0.0; }
+          let a = 1.0 - exp(-chord * ${TREE.EXT}
+                            * (${TREE.EXT_MIN} + ${TREE.EXT_K} * dens));
+          if (a > ${TREE.ALPHA_MIN}) { return 0.0; }
         }
       }
       }
@@ -3604,10 +4001,10 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       }
       // glow lichen: sparse emissive patches, enough to navigate by and a
       // reason to look at cave walls
-      let gl = vnoise(p * 1.9);
-      if (gl > 0.8 && m != MAT_GEM) {
+      let gl = vnoise(p * ${MATS.LICHEN_F});
+      if (gl > ${MATS.LICHEN_T} && m != MAT_GEM) {
         hit.albedo = vec3f(0.55, 0.75, 0.70);
-        hit.emissive = (gl - 0.8) * 9.0;
+        hit.emissive = (gl - ${MATS.LICHEN_T}) * ${MATS.LICHEN_GAIN};
       }
       hit.cave = true;
     } else {
@@ -3931,7 +4328,8 @@ const GPURenderer = {
       d.id = 'fail';
       d.innerHTML = '<h1>GPU device lost</h1><p>' + (info.message || '') +
         '</p><p>The render exceeded the driver watchdog (or the GPU reset). ' +
-        'Reload to restart; if it recurs, lower SUN_SAMPLES / AO_SAMPLES in js/config.js.</p>';
+        'Reload to restart; if it recurs, open the console with Enter and run ' +
+        '<b>quality low</b> - there is no js/config.js to edit in this build.</p>';
       document.body.appendChild(d);
     });
 
@@ -4090,7 +4488,9 @@ const GPURenderer = {
     // written by the compute pass, read by the glyph pass
     this.starBuf = this.device.createBuffer({
       size: this.cols * this.rows * 4,
-      usage: GPUBufferUsage.STORAGE,
+      // COPY_SRC so captureText can read back which cells the compute pass
+      // named as stars; they are the one glyph luminance does not choose
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     Overlay.resize(this.cols, this.rows);
     this.lowTex = this.device.createTexture({
@@ -4159,7 +4559,15 @@ const GPURenderer = {
     if (Edits.gpuDirty) {
       const res = Edits.pack(Player.x, Player.y, Player.z);
       dev.queue.writeBuffer(this.editHeadBuf, 0, Edits.head);
-      dev.queue.writeBuffer(this.editDataBuf, 0, Edits.data);
+      // The headers are half a kilobyte and always go. The bricks are 32 KB
+      // each, and only the ones whose contents actually changed go with
+      // them: digging held the mouse down at seven scoops a second, and
+      // each one used to re-send the whole megabyte to alter a few hundred
+      // bytes of it.
+      const brick = CAVES.EDIT_CHUNK ** 3;
+      for (const i of res.slots) {
+        dev.queue.writeBuffer(this.editDataBuf, i * brick, Edits.data, i * brick, brick);
+      }
       this.editCount = res.count;
       this.editBounds = res.bounds;
       Edits.gpuDirty = false;
@@ -4262,6 +4670,64 @@ const GPURenderer = {
     }
   },
 
+  // 4x4 ordered dither, mirroring bayer4 in the fragment shader.
+  BAYER: [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5],
+
+  // The frame already IS a grid of characters, so this hands it back as
+  // text. Everything the glyph pass does to choose a character happens
+  // again here on the CPU - the same tone curve, the same ordered dither,
+  // the same measured ramp, the same star and overlay substitutions, in the
+  // same order - so what lands on the clipboard is the screen, not an
+  // impression of it. KEEP IN SYNC with the fragment shader's fs().
+  async captureText() {
+    if (!this.ok) throw new Error('the renderer is not running');
+    const cols = this.cols, rows = this.rows;
+    const bpr = Math.ceil(cols * 4 / 256) * 256;
+    const lumBuf = this.device.createBuffer({
+      size: bpr * rows,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const starBuf = this.device.createBuffer({
+      size: cols * rows * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: this.lowTex },
+      { buffer: lumBuf, bytesPerRow: bpr }, [cols, rows]);
+    enc.copyBufferToBuffer(this.starBuf, 0, starBuf, 0, cols * rows * 4);
+    this.device.queue.submit([enc.finish()]);
+    await lumBuf.mapAsync(GPUMapMode.READ);
+    await starBuf.mapAsync(GPUMapMode.READ);
+    const lum = new Uint8Array(lumBuf.getMappedRange());
+    const star = new Uint32Array(starBuf.getMappedRange());
+    const ramp = this.rampChars, levels = this.levels;
+    const ui = Overlay.data;
+    const span = Math.max(CFG.TONE_WHITE - CFG.TONE_BLACK, 1e-3);
+    let out = '';
+    for (let y = 0; y < rows; y++) {
+      let line = '';
+      for (let x = 0; x < cols; x++) {
+        const i = y * cols + x;
+        // the overlay wins over a star, and a star over the ramp - the same
+        // precedence the fragment shader applies to the coverage sample
+        const code = ui ? ui[i] : 0;
+        if (code === CFG.UI_BLANK) { line += ' '; continue; }
+        if (code > 32 && code < 127) { line += String.fromCharCode(code); continue; }
+        const st = star[i];
+        if (st > 32 && st < 127) { line += String.fromCharCode(st); continue; }
+        const v = lum[y * bpr + x * 4 + 3] / 255;
+        const tone = Math.pow(clamp((v - CFG.TONE_BLACK) / span, 0, 1), CFG.TONE_GAMMA);
+        const dith = (this.BAYER[(y & 3) * 4 + (x & 3)] / 16 - 0.5) / levels;
+        const gi = Math.floor(clamp(tone + dith, 0, 0.9999) * levels);
+        line += ramp[Math.min(gi, ramp.length - 1)];
+      }
+      // the darkest step of the ramp is a space, so a trailing run of them
+      // carries nothing; trimming keeps the text paste-clean
+      out += line.replace(/[ ]+$/, '') + '\n';
+    }
+    lumBuf.unmap(); lumBuf.destroy();
+    starBuf.unmap(); starBuf.destroy();
+    return out;
+  },
+
   // Dumps the compute output so a black screen can be attributed to either
   // the raymarch (all zeros) or the glyph upscale (non-zero here).
   async debugReadback() {
@@ -4299,6 +4765,7 @@ const GPURenderer = {
   const breathe = () => new Promise(r => setTimeout(r, 0));
 
   Entities.init();
+  Quality.init();     // ray budgets, before anything reads them
   Edits.init();       // load persisted digs before the first frame
   Removed.init();     // load persisted cleared cells
   Game.init();        // load persisted inventory
@@ -4336,6 +4803,7 @@ const GPURenderer = {
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();
+    if (Removed.needSave) Removed.save();
     if (Game.needSave) Game.save();
   });
 
@@ -4349,7 +4817,11 @@ const GPURenderer = {
     Entities.update(dt, now / 1000);
     Sky.update(dt);
     Edits.tick(dt);
+    Removed.tick(dt);
     Game.tick(dt);
+    // watches the frame time and gives up rays when it has to; a no-op
+    // unless the player asked for automatic quality (it is the default)
+    Quality.tick(dt);
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {

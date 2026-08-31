@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "ascii-city",
+      "name": "ascii-world",
       "runtimeExecutable": "npx",
       "runtimeArgs": ["-y", "http-server", "-p", "8123", "-c-1", "."],
       "port": 8123

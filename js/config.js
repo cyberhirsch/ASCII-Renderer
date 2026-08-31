@@ -11,12 +11,6 @@ const CFG = {
   CELL_W: 12,         // CSS px per cell, horizontal
   CELL_H: 22,         // CSS px per cell, vertical
   MONO: false,        // uniform grayscale; devmode + M toggles
-  SUN_COL: [1.00, 0.86, 0.46],
-  SUN_I: 1.55,
-  AMB_COL: [0.20, 0.31, 0.55],
-  AMB_I: 0.55,
-  SKY_HORIZON: [0.34, 0.46, 0.66],
-  SKY_ZENITH: [0.04, 0.10, 0.32],
   GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
   // Tone curve applied before glyph selection. White sits at the luminance
   // sunlit surfaces actually reach; above that the brightest glyphs go
@@ -26,7 +20,6 @@ const CFG = {
   TONE_GAMMA: 0.9,
   RAW: false,         // debug: show the shaded image without glyph mapping (X)
   SUN_AZ: 0.9,        // sun azimuth at t=0 (rad); the cycle sweeps from here
-  SUN_EL: 0.7,        // legacy static elevation; Sky drives elevation now
   DAY_LEN: 3000,      // seconds for a full day/night cycle (50 min)
   // Twilight reach, as sin(sun elevation) either side of the horizon. Low
   // sun means a long path through air, so the light warms well before it
@@ -92,3 +85,28 @@ const CFG = {
   // props may visually reappear until this rises in a later phase
   REMOVED_MAX: 64,
 };
+
+// The seed is the whole world, so it is worth being able to hand someone
+// else. ?seed=<n> picks one at load; the console's "seed" command sets that
+// query and reloads, because every module caches something derived from it.
+// Out-of-range values are ignored rather than silently wrapped: a seed at or
+// above 2^24 does not survive the f32 uniform, and CPU and GPU would then
+// disagree about where the world is.
+const SEED_MAX = 1 << 24;
+CFG.SEED_DEFAULT = CFG.SEED;
+(function () {
+  if (typeof location === 'undefined' || !location.search) return;
+  const m = /[?&]seed=([^&]*)/.exec(location.search);
+  if (!m) return;
+  const v = Number(decodeURIComponent(m[1]));
+  if (Number.isInteger(v) && v >= 0 && v < SEED_MAX) CFG.SEED = v;
+  else console.warn('[ASCII World] ignoring seed ' + m[1] +
+    ' - must be a whole number in 0..' + (SEED_MAX - 1));
+})();
+
+// Saves are per world: two seeds are two different places, and their digs,
+// inventories and records have nothing to say to each other. The default
+// seed keeps the original unsuffixed keys so an existing save survives.
+function saveKey(base) {
+  return CFG.SEED === CFG.SEED_DEFAULT ? base : base + ':' + CFG.SEED;
+}

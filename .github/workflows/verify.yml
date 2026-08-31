@@ -1,0 +1,38 @@
+# The dev environment for this project has no GPU, so the shader ships blind
+# and everything that CAN be checked without one is checked here, on every
+# push. The last step is the one that is easy to forget by hand: dist/
+# index.html is the file people actually open, and it is committed, so a
+# source change that never made it through build.js is a change nobody sees.
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: static harness (WGSL balance, layout, binding and const parity)
+        run: node scripts/verify.js
+      - name: terrain
+        run: node scripts/test-terrain.js
+      - name: caves
+        run: node scripts/test-caves.js
+      - name: digging
+        run: node scripts/test-edits.js
+      - name: gameplay
+        run: node scripts/test-game.js
+
+      - name: dist/index.html is in step with the sources
+        run: |
+          node build.js
+          git diff --exit-code -- dist/index.html || {
+            echo "::error::dist/index.html is stale - run 'node build.js' and commit the result"
+            exit 1
+          }

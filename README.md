@@ -12,9 +12,24 @@ as rays cross it. Ships as a single HTML file.
 Open `dist/index.html` in a browser with WebGPU (current Chrome/Edge, recent
 Firefox/Safari), or serve the repo root and open `index.html`.
 
-**Console:** Enter opens a command line — `time <hour>` jumps the clock,
-`freeze` stops it, `daylen <seconds>` sets the cycle length, and `devmode`
-unlocks the M/X debug views. Escape or an empty Enter closes it.
+**Worlds:** everything you can walk to is a function of one number. Add
+`?seed=1234` to the URL, or run `seed 1234` in the console, and you are
+somewhere else entirely — different hills, different caves, a different dead
+civilisation with a different name and a different way of ending. Anyone who
+loads that seed stands in exactly the same place. Each world keeps its own
+digs, inventory and record; the seed has to stay below 2²⁴ (see below).
+
+**If it runs badly**, or the GPU driver kills the tab: open the console and
+run `quality low`. It leaves the world alone and buys frame time back from
+the shadow and ambient-occlusion ray budgets, which are what a frame mostly
+spends. `quality auto` — the default — does this on its own when frames get
+slow, and gives the rays back after a sustained good patch.
+
+**Console:** Enter opens a command line. `seed <n>` walks to another world,
+`quality <low|medium|high|auto>` sets the ray budget, `copy` puts the screen
+on the clipboard as plain text, `time <hour>` jumps the clock, `freeze` stops
+it, `daylen <seconds>` sets the cycle length, and `devmode` unlocks the M/X
+debug views. Escape or an empty Enter closes it.
 
 **Controls:** WASD move · Shift run · click for mouse-look · **LMB** dig ·
 **RMB** fill · **Tab** inventory · **C** craft · **E** examine what you're
@@ -85,8 +100,10 @@ moire. The HUD is composited into the same glyph grid, not DOM.
   hall floors, pillars) win over every carve.
 - `editDelta` — the only stored data: sparse 32³ chunks of signed byte
   deltas (0.5-unit voxels) where the player has dug or filled, sampled
-  trilinearly, persisted to localStorage, streamed to the GPU as the chunks
-  nearest the player.
+  trilinearly, streamed to the GPU as the chunks nearest the player — and
+  only the bricks that actually changed are re-sent. A chunk is almost all
+  zeros, so it is run-length encoded before it reaches localStorage: a dug
+  one costs tens of characters where the dense form cost forty thousand.
 
 Open terrain keeps a fast heightfield march; rays entering carved or dug
 space switch to a fixed-step density march and can hand back on resurfacing,
@@ -117,15 +134,27 @@ static verification plus node tests against the CPU mirrors:
 
 ```bash
 node scripts/verify.js        # WGSL balance, precedence, struct layout vs
-                              # buffer sizes, binding parity, const parity
+                              # buffer sizes, binding parity, const parity,
+                              # no retyped constants in mirrored functions
 node scripts/test-terrain.js  # heightfield stats, smoothness, determinism
 node scripts/test-caves.js    # floor slope bound, percolation flood-fill,
                               # headroom, BFS walk-bot down an entrance
-node scripts/test-edits.js    # dig/fill round-trips, packing, persistence
+node scripts/test-edits.js    # dig/fill round-trips, packing, slot diffing,
+                              # run-length encoding, v1 save migration
+node scripts/test-game.js     # inventory, panels, examine, the record,
+                              # the quality ladder, per-world save keys
 ```
 
-Shared constants are interpolated into the WGSL template from `CFG`/`CAVES`
-(`verify.js` rejects literals), so the shader and the mirrors cannot drift.
+All five run in CI on every push, together with a rebuild of
+`dist/index.html` that fails if the committed bundle is not what `build.js`
+produces — that file is the one people actually open.
+
+Shared constants are interpolated into the WGSL template from `CFG`/`CAVES`/
+`TERR`/`TREE`/`MATS`/`PROPS` (`verify.js` rejects literals), so the shader
+and the mirrors cannot drift. `terrainH` and `treeAt` are held to a stricter
+rule still: no bare float literal at all beyond the structural ones, because
+a single retyped digit in either moves the ground out from under collision
+without making one pixel look wrong.
 
 ## Project docs
 

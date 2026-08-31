@@ -186,7 +186,7 @@ cmp('render', rendDecl, rendEnt);
 {
   const utilSrc = fs.readFileSync(path.join(root, 'js/util.js'), 'utf8');
   let bad = 0, interps = 0, decls = 0;
-  for (const m of shadersSrc.matchAll(/\$\{(CFG|CAVES|MATS)\.(\w+)[^}]*\}/g)) {
+  for (const m of shadersSrc.matchAll(/\$\{(CFG|CAVES|MATS|TERR|TREE|PROPS)\.(\w+)[^}]*\}/g)) {
     interps++;
     const home = m[1] === 'CFG' ? configSrc : utilSrc;
     if (!new RegExp('\\b' + m[2] + '\\s*:').test(home)) {
@@ -204,11 +204,48 @@ cmp('render', rendDecl, rendEnt);
   if (!bad) ok(`shared consts: ${decls} CAVE_/EDIT_/MAT_ consts, ${interps} interpolations resolve`);
 }
 
+// ---- 4c. no magic numbers in the functions the CPU also implements ----
+// The const rule above only reaches declared WGSL consts, and the worst
+// divergence this project can have is not in a named constant at all: it is
+// a retyped float inside terrainH or treeAt. Those two decide where the
+// ground is and where the trees stand, on both sides, and a slip in either
+// moves the world out from under collision without changing a pixel that
+// looks wrong. So they may hold no bare float literal beyond the handful
+// that are structure rather than tuning — 0.5 to centre a value-noise
+// sample, 1.0 and 2.0 in the arithmetic itself.
+{
+  const NEUTRAL = new Set(['0.0', '0.5', '1.0', '2.0', '3.0']);
+  const src = wgsl.WGSL_COMPUTE;
+  let bad = 0, checked = 0;
+  for (const fn of ['terrainH', 'treeAt']) {
+    const m = src.match(new RegExp('\\nfn ' + fn + '\\s*\\([^)]*\\)[^{]*\\{'));
+    if (!m) { fail(`4c: fn ${fn} not found in WGSL_COMPUTE`); bad++; continue; }
+    let i = m.index + m[0].length, depth = 1;
+    while (depth > 0 && i < src.length) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') depth--;
+      i++;
+    }
+    // strip comments and interpolations; whatever floats are left are raw
+    const body = src.slice(m.index + m[0].length, i)
+      .replace(/\/\/[^\n]*/g, ' ')
+      .replace(/\$\{[^}]*\}/g, ' ');
+    const lits = (body.match(/\d+\.\d+/g) || []).filter(v => !NEUTRAL.has(v));
+    checked++;
+    if (lits.length) {
+      fail(`${fn}: bare literal(s) ${[...new Set(lits)].join(', ')} — ` +
+           'hoist into TERR/TREE in js/util.js and interpolate');
+      bad++;
+    }
+  }
+  if (!bad) ok(`mirrored fns: ${checked} carry no retyped constants`);
+}
+
 // ---- 5. all modules parse ----
 const vm = require('vm');
-const modules = ['config', 'util', 'world', 'sky', 'overlay', 'entities',
-  'edits', 'removed', 'lore', 'items', 'game', 'player', 'webgpu/atlas',
-  'webgpu/shaders', 'webgpu/gpu-renderer', 'main'];
+const modules = ['config', 'quality', 'util', 'world', 'sky', 'overlay',
+  'entities', 'edits', 'removed', 'lore', 'items', 'game', 'player',
+  'webgpu/atlas', 'webgpu/shaders', 'webgpu/gpu-renderer', 'main'];
 for (const f of modules) {
   const p = path.join(root, 'js', f + '.js');
   if (!fs.existsSync(p)) { fail(`module missing: js/${f}.js`); continue; }

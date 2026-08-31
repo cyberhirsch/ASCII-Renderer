@@ -3,7 +3,7 @@
 **Status:** playable vertical slice, not released.
 **Version:** 0.2 — absorbs the "Deepdelve" concept (history-as-resource, simulated
 history, serverless P2P). See §12 for what was adopted and what was not.
-**Last revised:** 2026-08-18 · 78 commits · 5,900 lines · ships as a 165 KB HTML file.
+**Last revised:** 2026-08-18 · 78 commits · 6,700 lines · ships as a 190 KB HTML file.
 
 ---
 
@@ -43,8 +43,10 @@ everything reduces to (glyph, colour, brightness) in a character grid.
 Most procedural worlds are *generated* — computed once, stored, streamed. This
 one is *evaluated*, continuously, at the moment of looking. That difference is
 the whole pitch, and it produces properties a stored world cannot have: no
-loading, no seams, no world edge, a 165 KB download, and a world byte-identical
-for every player on every visit.
+loading, no seams, no world edge, a small download, and a world byte-identical
+for every player on every visit. The seed is settable at runtime (`?seed=n`,
+or the console), so that last property is something a visitor can check rather
+than something the README asserts.
 
 On top of that sits the second idea, and the one this revision commits to:
 
@@ -102,13 +104,13 @@ Discovery is the verb. Not clearing a dungeon: reading one.
 | **Access** | Helical stair wells (~16° grade) surface→band and band→band, always daylighting into a passage. Spawn at an entrance rim. A node walk-bot proves a legal walking path from spawn to the band floor. |
 | **Halls** | Hash-placed rooms with dead-flat floors and pillar lattices; passages puncture the walls as doorways. Protected solids survive overlapping caverns, leaving freestanding pillars. |
 | **Materials** | Soil depth falls off with slope (bare rock on hillsides); stone below. Ore veins are the intersection curves of two noise fields — branching tubes, 0.25% of rock — copper shallow, iron deep, gems in deep vein cores at 0.008%. |
-| **Digging** | Sparse 32³ signed-byte chunks at 0.5 u, allocated only where dug, sampled trilinearly, streamed to the GPU as the 32 nearest the player. Persisted. |
+| **Digging** | Sparse 32³ signed-byte chunks at 0.5 u, allocated only where dug, sampled trilinearly, streamed to the GPU as the 32 nearest the player — re-uploading only the bricks that changed. Run-length encoded into localStorage, which is what keeps a long dig inside the quota. |
 | **Lighting** | Soft shadows (16 rays), traced AO (32 rays), both as transmittance. Full budgets within 40 m then a hard cut. Underground: light shafts, AO-driven depth darkness, glow lichen, emissive gems, headlamp. |
 | **Day/night** | Fifty-minute cycle; 2.5-hour golden hour on a separate curve from the sky's red band; yellow crescent moon that occludes stars; star field on a celestial sphere turning about a tilted pole, so stars rise, set, and go circumpolar near the axis. |
 | **Gameplay** | Inventory, 5 recipes, tool-gated digging (shovel/pickaxe), examine with context actions, three tree species, felling, loose stones, boulders. |
 | **The record** | A seeded civilisation — name, people, founder, what they dug up, how it ended — with inscriptions generated from those facts and laid out by depth. Reading all three depths completes it. Journal panel. |
-| **Shell** | Boot screen, title screen, in-grid HUD and panels, command console. Save carries inventory, position, facing, time, record, digs, cleared cells. |
-| **Verification** | Static harness (WGSL balance, operator precedence, struct layout vs buffer sizes, binding parity, shared-constant parity) plus ~150 assertions across four node suites. |
+| **Shell** | Boot screen, title screen, in-grid HUD and panels, command console (`seed`, `quality`, `copy`, `time`, `freeze`, `daylen`, `devmode`). Save carries inventory, position, facing, time, record, digs, cleared cells, and is namespaced per seed. `copy` hands the frame back as plain text, which is the one export format an ASCII renderer can offer that a screenshot does not improve on. |
+| **Verification** | Static harness (WGSL balance, operator precedence, struct layout vs buffer sizes, binding parity, shared-constant parity, and no retyped float in `terrainH`/`treeAt`) plus ~180 assertions across four node suites. All of it runs in CI on every push, along with a rebuild that fails when the committed `dist/index.html` is not what `build.js` produces. |
 
 ## 7. The history engine (adopted — the main change in 0.2)
 
@@ -187,6 +189,9 @@ findable from where the pointer was found), and no orphan sites.
   it competes with the boot screen, not with the frame budget. Target < 400 ms.
 - **Driver watchdog is the real hardware risk.** A frame that runs too long
   kills the device; the device-lost panel exists because this has happened.
+  The ray budgets are per-frame uniforms, so `quality low` is a lever that
+  works inside the shipped single file, and `quality auto` pulls it before
+  the watchdog does.
 
 ## 10. Roadmap
 
@@ -302,5 +307,5 @@ file is the distribution model and half the appeal.
 | History generates text nobody reads | Med | Pillar 6 is the mitigation: an inscription must *do* something. Enforced by the reachability test, not by good intentions. |
 | WebGPU gate excludes much of itch's traffic | Med | Accepted. Framing for a technical audience is the mitigation, not a fallback renderer. |
 | Shader ships blind | Med | The harness has already caught the class of bug it was built for, twice. Residual risk is real and permanent. |
-| Perf on weak GPUs unmeasured | Med | No fps numbers from real hardware yet. All knobs scale cost roughly linearly. |
+| Perf on weak GPUs unmeasured | Med | No fps numbers from real hardware yet. All knobs scale cost roughly linearly, and the automatic quality ladder now backs off on sustained slow frames rather than requiring a source edit nobody playing the shipped file can make. |
 | Scope drift toward Deepdelve | High | §12 exists to make the fork explicit. The test for any new feature is pillar 1: does it require storing the world? |

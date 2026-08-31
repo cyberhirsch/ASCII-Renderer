@@ -6,13 +6,21 @@
 // Persisted to localStorage, edited chunks only.
 const Edits = {
   chunks: new Map(),   // "cx,cy,cz" -> Int8Array(EDIT_CHUNK^3), z-major
+  pos: new Map(),      // the same keys, parsed to [cx, cy, cz] once
   bounds: null,        // world AABB over all chunks + trilinear margin
   gpuDirty: false,     // resident set needs re-packing and upload
   needSave: false,
   saveTimer: 0,
+  saveFailed: false,   // storage is full; say so once, not every four seconds
 
   // persistent pack targets so per-dig uploads do not allocate
   head: null, data: null,
+  // Which chunk sits in each GPU slot, and which chunks were dug since the
+  // last pack. Between them these say which of the 32 bricks actually need
+  // re-uploading - a dig used to push the whole megabyte, seven times a
+  // second, to change a few hundred bytes of it.
+  slotKeys: [],
+  dug: new Set(),
 
   key(cx, cy, cz) { return cx + ',' + cy + ',' + cz; },
 
@@ -20,7 +28,23 @@ const Edits = {
     const n = CAVES.EDIT_CHUNK;
     this.head = new Float32Array(CFG.EDIT_MAX * 4);
     this.data = new Int8Array(CFG.EDIT_MAX * n * n * n);
+    this.slotKeys = new Array(CFG.EDIT_MAX).fill(null);
     this.load();
+  },
+
+  // the one place a chunk comes into existence, so the key, the parsed
+  // coordinates and the bounds can never disagree about it
+  chunkAt(cx, cy, cz) {
+    const k = this.key(cx, cy, cz);
+    let ch = this.chunks.get(k);
+    if (!ch) {
+      ch = new Int8Array(CAVES.EDIT_CHUNK ** 3);
+      this.chunks.set(k, ch);
+      this.pos.set(k, [cx, cy, cz]);
+      this.growBounds(cx, cy, cz);
+    }
+    this.dug.add(k);
+    return ch;
   },
 
   growBounds(cx, cy, cz) {
@@ -85,13 +109,7 @@ const Edits = {
           const add = Math.round(amount * fall);
           if (add === 0) continue;
           const cx = Math.floor(ix / n), cy = Math.floor(iy / n), cz = Math.floor(iz / n);
-          const k = this.key(cx, cy, cz);
-          let ch = this.chunks.get(k);
-          if (!ch) {
-            ch = new Int8Array(n * n * n);
-            this.chunks.set(k, ch);
-            this.growBounds(cx, cy, cz);
-          }
+          const ch = this.chunkAt(cx, cy, cz);
           const li = ((iz - cz * n) * n + (iy - cy * n)) * n + (ix - cx * n);
           ch[li] = clamp(ch[li] + add, -127, 127);
         }
@@ -103,29 +121,43 @@ const Edits = {
 
   // Pack the EDIT_MAX chunks nearest the player for the GPU. Header slot:
   // (world origin xyz, used flag); data: raw signed bytes, z-major, read as
-  // packed u32 words in the shader. Returns the resident count and AABB.
+  // packed u32 words in the shader. Returns the resident count, the AABB,
+  // and the slots whose brick actually changed - the caller uploads those
+  // and leaves the rest of the buffer alone.
+  //
+  // Distances come off the coordinates parsed when the chunk was made, not
+  // off its key: re-splitting every key string on every dig is work that
+  // grows with how much the player has dug.
   pack(px, py, pz) {
     const n = CAVES.EDIT_CHUNK;
     const w = n * CAVES.EDIT_VOX;
-    const keys = [...this.chunks.keys()];
-    keys.sort((a, b) => {
-      const pa = a.split(',').map(Number), pb = b.split(',').map(Number);
-      const da = (pa[0] * w + w / 2 - px) ** 2 + (pa[1] * w + w / 2 - py) ** 2 +
-                 (pa[2] * w + w / 2 - pz) ** 2;
-      const db = (pb[0] * w + w / 2 - px) ** 2 + (pb[1] * w + w / 2 - py) ** 2 +
-                 (pb[2] * w + w / 2 - pz) ** 2;
-      return da - db;
-    });
-    const count = Math.min(keys.length, CFG.EDIT_MAX);
+    const bytes = n * n * n;
+    const order = [];
+    for (const k of this.chunks.keys()) {
+      const c = this.pos.get(k);
+      order.push({ k, d: (c[0] * w + w / 2 - px) ** 2 +
+                         (c[1] * w + w / 2 - py) ** 2 +
+                         (c[2] * w + w / 2 - pz) ** 2 });
+    }
+    order.sort((a, b) => a.d - b.d);
+    const count = Math.min(order.length, CFG.EDIT_MAX);
     this.head.fill(0);
+    const slots = [];
     let bounds = null;
     for (let i = 0; i < count; i++) {
-      const [cx, cy, cz] = keys[i].split(',').map(Number);
+      const k = order[i].k;
+      const [cx, cy, cz] = this.pos.get(k);
       this.head[i * 4] = cx * w;
       this.head[i * 4 + 1] = cy * w;
       this.head[i * 4 + 2] = cz * w;
       this.head[i * 4 + 3] = 1;
-      this.data.set(this.chunks.get(keys[i]), i * n * n * n);
+      // a slot only needs its brick again if a different chunk moved into
+      // it, or the chunk already there has been dug since the last pack
+      if (this.slotKeys[i] !== k || this.dug.has(k)) {
+        this.data.set(this.chunks.get(k), i * bytes);
+        slots.push(i);
+      }
+      this.slotKeys[i] = k;
       const m = CAVES.EDIT_VOX;
       const lo = [cx * w - m, cy * w - m, cz * w - m];
       const hi = [cx * w + w + m, cy * w + w + m, cz * w + w + m];
@@ -135,11 +167,46 @@ const Edits = {
         if (hi[d] > bounds[d + 3]) bounds[d + 3] = hi[d];
       }
     }
-    return { count, bounds };
+    for (let i = count; i < CFG.EDIT_MAX; i++) this.slotKeys[i] = null;
+    this.dug.clear();
+    return { count, bounds, slots };
   },
 
-  // ---- persistence: base64 per chunk, portable (no btoa dependency) ----
+  // ---- persistence: RLE, then base64, portable (no btoa dependency) ----
   B64: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+
+  // A dug chunk is almost all zeros: one scoop touches a few hundred of its
+  // 32768 voxels, and the rest of the brick has never been written. Stored
+  // dense, that is 43.7 KB of base64 characters for every chunk the player
+  // so much as clipped, and localStorage - five megabytes, counted in
+  // characters - filled up after roughly a hundred of them. Run-length
+  // encoding first turns the same chunk into a few hundred bytes.
+  //
+  // Format: triples of (length low byte, length high byte, value). A run is
+  // at most 65535 voxels, so an untouched chunk costs six bytes.
+  rle(ch) {
+    const out = [];
+    let i = 0;
+    while (i < ch.length) {
+      const v = ch[i];
+      let j = i + 1;
+      while (j < ch.length && ch[j] === v && j - i < 65535) j++;
+      const n = j - i;
+      out.push(n & 0xff, (n >> 8) & 0xff, v & 0xff);
+      i = j;
+    }
+    return Uint8Array.from(out);
+  },
+
+  unrle(bytes, out) {
+    let o = 0;
+    for (let i = 0; i + 2 < bytes.length; i += 3) {
+      const n = bytes[i] | (bytes[i + 1] << 8);
+      const v = (bytes[i + 2] << 24) >> 24;    // the stored byte is signed
+      for (let k = 0; k < n && o < out.length; k++) out[o++] = v;
+    }
+    return o;
+  },
 
   enc(bytes) {
     const c = this.B64;
@@ -168,20 +235,35 @@ const Edits = {
 
   serialize() {
     const obj = {};
-    for (const [k, ch] of this.chunks) obj[k] = this.enc(new Uint8Array(ch.buffer));
-    return JSON.stringify(obj);
+    for (const [k, ch] of this.chunks) obj[k] = this.enc(this.rle(ch));
+    return JSON.stringify({ v: 2, c: obj });
   },
 
+  // Reads both shapes. A v1 save is a bare object of dense base64 blobs;
+  // v2 wraps them and run-length encodes first. Old saves are read and then
+  // written back out in the new form, so nobody loses a tunnel to the change.
   deserialize(str) {
     const n = CAVES.EDIT_CHUNK;
     this.chunks.clear();
+    this.pos.clear();
+    this.dug.clear();
+    this.slotKeys.fill(null);
     this.bounds = null;
-    const obj = JSON.parse(str);
+    const raw = JSON.parse(str);
+    const v2 = raw && raw.v === 2;
+    const obj = v2 ? raw.c : raw;
     for (const k of Object.keys(obj)) {
       const ch = new Int8Array(n * n * n);
-      this.dec(obj[k], new Uint8Array(ch.buffer));
-      this.chunks.set(k, ch);
+      if (v2) {
+        const packed = new Uint8Array(Math.floor(obj[k].length / 4) * 3);
+        this.dec(obj[k], packed);
+        this.unrle(packed, ch);
+      } else {
+        this.dec(obj[k], new Uint8Array(ch.buffer));
+      }
       const [cx, cy, cz] = k.split(',').map(Number);
+      this.chunks.set(k, ch);
+      this.pos.set(k, [cx, cy, cz]);
       this.growBounds(cx, cy, cz);
     }
     this.gpuDirty = this.chunks.size > 0;
@@ -189,14 +271,25 @@ const Edits = {
 
   save() {
     if (typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('ascii-caves-v1', this.serialize()); }
-    catch (e) { console.warn('edit save failed: ' + e.message); }
+    try {
+      localStorage.setItem(saveKey('ascii-caves-v1'), this.serialize());
+      this.saveFailed = false;
+    } catch (e) {
+      // Failing silently here loses the player's digging and never says so,
+      // which is the worst way for a save to break. Once is enough: the
+      // next attempt is four seconds away and would say the same thing.
+      if (!this.saveFailed && typeof Game !== 'undefined') {
+        Game.toast('storage is full - your digging is no longer being saved');
+      }
+      this.saveFailed = true;
+      console.warn('edit save failed: ' + e.message);
+    }
     this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-caves-v1');
+    const s = localStorage.getItem(saveKey('ascii-caves-v1'));
     if (!s) return;
     try { this.deserialize(s); } catch (e) { console.warn('edit load failed'); }
   },

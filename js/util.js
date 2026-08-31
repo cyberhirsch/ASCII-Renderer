@@ -37,16 +37,36 @@ function vn2(px, py, s) {
 }
 
 // -------- terrain height — mirror of WGSL terrainH --------
+// Shape constants live here and are interpolated into the WGSL, never
+// retyped there. Two hand-kept copies of terrainH is the divergence that
+// would move the ground out from under collision without changing a single
+// pixel of the sky, so scripts/verify.js rejects a bare float literal in
+// either mirrored function.
+const TERR = {
+  WARP_F: 0.013,     // frequency of the field that warps the domain
+  WARP_OX: 37.0,     // and the offsets that decorrelate its two channels
+  WARP_OY: 91.0,
+  WARP_A: 1.4,       // warp amplitude, in base-frequency units
+  BASE_F: 0.023,     // base frequency of the heightfield
+  OCT1_W: 0.62,      // octave weights, summing to 1
+  OCT2_W: 0.26,
+  OCT3_W: 0.12,
+  OCT2_F: 2.7,       // and their frequency ratios
+  OCT3_F: 6.1,
+  RIDGE: 1.55,       // exponent: deepens valleys, sharpens ridges
+};
+
 function terrainH(px, py) {
   const s = CFG.SEED >>> 0;
-  const wx = vn2(px * 0.013, py * 0.013, (s ^ 0x77) >>> 0);
-  const wy = vn2(px * 0.013 + 37.0, py * 0.013 + 91.0, (s ^ 0x77) >>> 0);
-  const qx = px * 0.023 + (wx - 0.5) * 1.4;
-  const qy = py * 0.023 + (wy - 0.5) * 1.4;
-  let h = vn2(qx, qy, s) * 0.62 +
-          vn2(qx * 2.7, qy * 2.7, (s ^ 0x9e37) >>> 0) * 0.26 +
-          vn2(qx * 6.1, qy * 6.1, (s ^ 0x51ed) >>> 0) * 0.12;
-  h = Math.pow(h, 1.55);
+  const wx = vn2(px * TERR.WARP_F, py * TERR.WARP_F, (s ^ 0x77) >>> 0);
+  const wy = vn2(px * TERR.WARP_F + TERR.WARP_OX,
+                 py * TERR.WARP_F + TERR.WARP_OY, (s ^ 0x77) >>> 0);
+  const qx = px * TERR.BASE_F + (wx - 0.5) * TERR.WARP_A;
+  const qy = py * TERR.BASE_F + (wy - 0.5) * TERR.WARP_A;
+  let h = vn2(qx, qy, s) * TERR.OCT1_W +
+          vn2(qx * TERR.OCT2_F, qy * TERR.OCT2_F, (s ^ 0x9e37) >>> 0) * TERR.OCT2_W +
+          vn2(qx * TERR.OCT3_F, qy * TERR.OCT3_F, (s ^ 0x51ed) >>> 0) * TERR.OCT3_W;
+  h = Math.pow(h, TERR.RIDGE);
   return h * CFG.TERRAIN_MAX;
 }
 
@@ -362,6 +382,12 @@ const MATS = {
   GEM_CORE: 0.22,   // fraction of the vein width that is gem, not ore
   GEM_Z: -6.0,      // gems only form below this depth
   IRON_Z: -14.0,    // ore below this is iron, above it copper
+  // Glow lichen on cave rock. Mirrored: the shader decides where it grows
+  // and World.classifySolid decides where you may pick it, so a divergence
+  // here offers a harvest off a bare wall.
+  LICHEN_F: 1.9,    // frequency of the patch noise
+  LICHEN_T: 0.8,    // noise above this is a patch
+  LICHEN_GAIN: 9.0, // how fast a patch brightens past the threshold
 };
 
 // Soil depth below the surface at (x, y): deep on flats, zero on steep
@@ -468,19 +494,48 @@ function rockAt(ix, iy) {
 }
 
 // -------- tree placement — mirror of WGSL treeAt --------
-// returns null or { cx, cy, r, trunkH, trunkR }
+// Shared with the shader the same way the terrain constants are: the
+// canopy's shape and its erosion noise are written down once. The erosion
+// numbers matter twice over, because the primary ray and the shadow ray
+// each carve the canopy's holes independently - if those two drifted, a
+// tree would shadow gaps the eye can see straight through.
+const TREE = {
+  FOREST_F: 0.021,   // frequency of the forest-region field
+  DENS_LO: 0.45,     // region gate: below LO is open ground
+  DENS_HI: 0.72,
+  DENS_A: 0.16,      // per-cell tree chance deep inside a forest
+  DENS_MIN: 0.004,   // and out on the open ground, the occasional lone tree
+  OFF: 0.3,          // anchor jitter within the cell
+  OFF_VAR: 0.4,
+  R_MIN: 1.0,        // canopy radius
+  R_VAR: 0.5,
+  TRUNK_H: 2.6,      // trunk height
+  TRUNK_H_VAR: 1.2,
+  TRUNK_R: 0.085,    // trunk radius: a constant plus a share of the canopy
+  TRUNK_R_K: 0.055,
+  CAN_Z: 0.55,       // canopy centre above the trunk top, in canopy radii
+  // canopy erosion: two octaves of 3D noise thin the sphere into foliage
+  DENS_F1: 2.6, DENS_W1: 0.75,
+  DENS_F2: 6.5, DENS_W2: 0.25,
+  EXT: 1.35,         // extinction along the chord through the canopy
+  EXT_MIN: 0.35,     // floor and gain applied to the density before it
+  EXT_K: 1.3,
+  ALPHA_MIN: 0.03,   // below this the canopy is a hole, not foliage
+};
+
 function treeAt(ix, iy) {
   const s = CFG.SEED >>> 0;
-  const forest = vn2(ix * 0.021, iy * 0.021, (s ^ 0xF0F0) >>> 0);
-  const density = smoothstep(0.45, 0.72, forest) * 0.16 + 0.004;
+  const forest = vn2(ix * TREE.FOREST_F, iy * TREE.FOREST_F, (s ^ 0xF0F0) >>> 0);
+  const density = smoothstep(TREE.DENS_LO, TREE.DENS_HI, forest) * TREE.DENS_A +
+                  TREE.DENS_MIN;
   if (hash01(ix, iy, (s ^ 0x7EE7) >>> 0) >= density) return null;
   const h2 = hash2i(ix, iy, (s ^ 0xA11C) >>> 0);
-  const r = 1.0 + h2[0] * 0.5;
+  const r = TREE.R_MIN + h2[0] * TREE.R_VAR;
   return {
-    cx: ix + 0.3 + h2[0] * 0.4,
-    cy: iy + 0.3 + h2[1] * 0.4,
+    cx: ix + TREE.OFF + h2[0] * TREE.OFF_VAR,
+    cy: iy + TREE.OFF + h2[1] * TREE.OFF_VAR,
     r,
-    trunkH: 2.6 + h2[1] * 1.2,
-    trunkR: 0.085 + r * 0.055,
+    trunkH: TREE.TRUNK_H + h2[1] * TREE.TRUNK_H_VAR,
+    trunkR: TREE.TRUNK_R + r * TREE.TRUNK_R_K,
   };
 }

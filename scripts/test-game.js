@@ -10,13 +10,14 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
-const src = ['config', 'util', 'world', 'sky', 'overlay', 'edits', 'removed',
-             'lore', 'items', 'game']
+const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
+             'removed', 'lore', 'items', 'game']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
-   'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt']
+   'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
+   'Quality', 'saveKey']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -956,6 +957,105 @@ if (c.Lore) {
   (G.spawnAt === null && G.read.length === 0 && G.done === false)
     ? ok('an empty save starts a new world cleanly')
     : fail('empty save did not reset');
+}
+
+// ---- 15. render quality: a ladder that walks down and does not bounce ----
+if (c.Quality) {
+  const Q = c.Quality;
+  Q.auto = true; Q.capped = null; Q.easy = 0; Q.hold = 0;
+  Q.name = 'high'; Q.apply();
+  (c.CFG.SUN_SAMPLES === 16 && c.CFG.AO_SAMPLES === 32)
+    ? ok('quality high is the shipped ray budget')
+    : fail(`high applied wrong: ${c.CFG.SUN_SAMPLES}/${c.CFG.AO_SAMPLES}`);
+
+  (!Q.set('ludicrous')) ? ok('an unknown quality name is refused')
+                        : fail('accepted a nonsense quality name');
+  Q.set('low');
+  (!Q.auto && c.CFG.SUN_SAMPLES === 4 && c.CFG.SHADE_FAR > c.CFG.SHADE_NEAR)
+    ? ok('quality low fixes the budget and keeps the shading cut hard')
+    : fail(`low applied wrong: ${c.CFG.SUN_SAMPLES}, ${c.CFG.SHADE_NEAR}/${c.CFG.SHADE_FAR}`);
+
+  // 50 ms frames, held: the ladder walks all the way down and stops there
+  Q.set('auto'); Q.name = 'high'; Q.apply(); Q.hold = 0; Q.easy = 0;
+  for (let i = 0; i < 400; i++) Q.tick(0.05);
+  (Q.name === 'low') ? ok('sustained slow frames walk the budget down to low')
+                     : fail(`auto stalled at ${Q.name}`);
+
+  // 5 ms frames, briefly: it must NOT bounce straight back into the level
+  // that just failed, or the session is spent climbing the same rung
+  for (let i = 0; i < 400; i++) Q.tick(0.005);
+  (Q.name === 'low')
+    ? ok('a short good patch does not undo the step down')
+    : fail(`auto bounced back to ${Q.name} immediately`);
+
+  // but a long one does: the forest ends, and the plain deserves its rays
+  for (let i = 0; i < 20000; i++) Q.tick(0.005);
+  (Q.name === 'high')
+    ? ok('a sustained good patch earns the rays back')
+    : fail(`auto never recovered past ${Q.name}`);
+  Q.set('auto'); Q.name = 'high'; Q.apply();
+}
+
+// ---- 16. the spent-actions set is bounded ----
+{
+  const G = c.Game;
+  G.used.clear();
+  for (let i = 0; i < G.USED_MAX + 200; i++) G.spend('gather:' + i + ',0,0');
+  (G.used.size === G.USED_MAX)
+    ? ok(`spent actions cap at ${G.USED_MAX} instead of growing forever`)
+    : fail(`spent set grew to ${G.used.size}`);
+  (!G.used.has('gather:0,0,0') &&
+   G.used.has('gather:' + (G.USED_MAX + 199) + ',0,0'))
+    ? ok('the oldest spent action is the one that falls off')
+    : fail('the cap evicted the wrong end');
+  G.restore({ used: Array.from({ length: G.USED_MAX + 50 }, (_, i) => 'k' + i) });
+  (G.used.size === G.USED_MAX)
+    ? ok('an oversized save is trimmed on the way back in')
+    : fail(`restore left ${G.used.size} spent actions`);
+  G.used.clear();
+}
+
+// ---- 17. cleared cells: debounced, and the pack cache tracks the set ----
+if (c.Removed) {
+  const R = c.Removed;
+  R.set.clear(); R.cells = null; R.needSave = false; R.saveTimer = 0;
+  R.add(5, 5);
+  R.tick(0.5);
+  (R.needSave === true)
+    ? ok('a cleared cell is not written on the very next frame')
+    : fail('cleared cells still write synchronously');
+  R.tick(2.0);
+  (R.needSave === false) ? ok('and is written once the debounce expires')
+                         : fail('the cleared-cell debounce never fired');
+
+  // the numeric cache is a mirror, not a second authority: the tests and
+  // the console both reach into `set` directly, and pack has to notice
+  R.add(9, 9);
+  R.pack(0, 0);
+  R.set.clear();
+  R.add(3, 4);
+  const n = R.pack(0, 0);
+  (n === 1 && R.data[0] === 3 && R.data[1] === 4)
+    ? ok('the pack cache rebuilds when the set changes underneath it')
+    : fail(`stale pack cache: n=${n} first=${R.data[0]},${R.data[1]}`);
+  R.add(3, 4);
+  (R.pack(0, 0) === 1) ? ok('clearing the same cell twice still counts once')
+                       : fail('a duplicate cleared cell was counted');
+  R.set.clear(); R.cells = null;
+}
+
+// ---- 18. every world saves under its own key ----
+if (c.saveKey) {
+  const base = 'ascii-save-v1';
+  (c.saveKey(base) === base)
+    ? ok('the default seed keeps the original, unsuffixed save key')
+    : fail('the default seed renamed its own save: ' + c.saveKey(base));
+  const was = c.CFG.SEED;
+  c.CFG.SEED = was + 1;
+  (c.saveKey(base) === base + ':' + (was + 1))
+    ? ok('another seed keeps its digs and its record apart')
+    : fail('seed namespacing broken: ' + c.saveKey(base));
+  c.CFG.SEED = was;
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

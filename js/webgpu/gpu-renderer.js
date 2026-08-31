@@ -28,7 +28,8 @@ const GPURenderer = {
       d.id = 'fail';
       d.innerHTML = '<h1>GPU device lost</h1><p>' + (info.message || '') +
         '</p><p>The render exceeded the driver watchdog (or the GPU reset). ' +
-        'Reload to restart; if it recurs, lower SUN_SAMPLES / AO_SAMPLES in js/config.js.</p>';
+        'Reload to restart; if it recurs, open the console with Enter and run ' +
+        '<b>quality low</b> - there is no js/config.js to edit in this build.</p>';
       document.body.appendChild(d);
     });
 
@@ -187,7 +188,9 @@ const GPURenderer = {
     // written by the compute pass, read by the glyph pass
     this.starBuf = this.device.createBuffer({
       size: this.cols * this.rows * 4,
-      usage: GPUBufferUsage.STORAGE,
+      // COPY_SRC so captureText can read back which cells the compute pass
+      // named as stars; they are the one glyph luminance does not choose
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     Overlay.resize(this.cols, this.rows);
     this.lowTex = this.device.createTexture({
@@ -256,7 +259,15 @@ const GPURenderer = {
     if (Edits.gpuDirty) {
       const res = Edits.pack(Player.x, Player.y, Player.z);
       dev.queue.writeBuffer(this.editHeadBuf, 0, Edits.head);
-      dev.queue.writeBuffer(this.editDataBuf, 0, Edits.data);
+      // The headers are half a kilobyte and always go. The bricks are 32 KB
+      // each, and only the ones whose contents actually changed go with
+      // them: digging held the mouse down at seven scoops a second, and
+      // each one used to re-send the whole megabyte to alter a few hundred
+      // bytes of it.
+      const brick = CAVES.EDIT_CHUNK ** 3;
+      for (const i of res.slots) {
+        dev.queue.writeBuffer(this.editDataBuf, i * brick, Edits.data, i * brick, brick);
+      }
       this.editCount = res.count;
       this.editBounds = res.bounds;
       Edits.gpuDirty = false;
@@ -357,6 +368,64 @@ const GPURenderer = {
         if (err) console.error('[WebGPU] frame error: ' + err.message);
       });
     }
+  },
+
+  // 4x4 ordered dither, mirroring bayer4 in the fragment shader.
+  BAYER: [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5],
+
+  // The frame already IS a grid of characters, so this hands it back as
+  // text. Everything the glyph pass does to choose a character happens
+  // again here on the CPU - the same tone curve, the same ordered dither,
+  // the same measured ramp, the same star and overlay substitutions, in the
+  // same order - so what lands on the clipboard is the screen, not an
+  // impression of it. KEEP IN SYNC with the fragment shader's fs().
+  async captureText() {
+    if (!this.ok) throw new Error('the renderer is not running');
+    const cols = this.cols, rows = this.rows;
+    const bpr = Math.ceil(cols * 4 / 256) * 256;
+    const lumBuf = this.device.createBuffer({
+      size: bpr * rows,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const starBuf = this.device.createBuffer({
+      size: cols * rows * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: this.lowTex },
+      { buffer: lumBuf, bytesPerRow: bpr }, [cols, rows]);
+    enc.copyBufferToBuffer(this.starBuf, 0, starBuf, 0, cols * rows * 4);
+    this.device.queue.submit([enc.finish()]);
+    await lumBuf.mapAsync(GPUMapMode.READ);
+    await starBuf.mapAsync(GPUMapMode.READ);
+    const lum = new Uint8Array(lumBuf.getMappedRange());
+    const star = new Uint32Array(starBuf.getMappedRange());
+    const ramp = this.rampChars, levels = this.levels;
+    const ui = Overlay.data;
+    const span = Math.max(CFG.TONE_WHITE - CFG.TONE_BLACK, 1e-3);
+    let out = '';
+    for (let y = 0; y < rows; y++) {
+      let line = '';
+      for (let x = 0; x < cols; x++) {
+        const i = y * cols + x;
+        // the overlay wins over a star, and a star over the ramp - the same
+        // precedence the fragment shader applies to the coverage sample
+        const code = ui ? ui[i] : 0;
+        if (code === CFG.UI_BLANK) { line += ' '; continue; }
+        if (code > 32 && code < 127) { line += String.fromCharCode(code); continue; }
+        const st = star[i];
+        if (st > 32 && st < 127) { line += String.fromCharCode(st); continue; }
+        const v = lum[y * bpr + x * 4 + 3] / 255;
+        const tone = Math.pow(clamp((v - CFG.TONE_BLACK) / span, 0, 1), CFG.TONE_GAMMA);
+        const dith = (this.BAYER[(y & 3) * 4 + (x & 3)] / 16 - 0.5) / levels;
+        const gi = Math.floor(clamp(tone + dith, 0, 0.9999) * levels);
+        line += ramp[Math.min(gi, ramp.length - 1)];
+      }
+      // the darkest step of the ramp is a space, so a trailing run of them
+      // carries nothing; trimming keeps the text paste-clean
+      out += line.replace(/[ ]+$/, '') + '\n';
+    }
+    lumBuf.unmap(); lumBuf.destroy();
+    starBuf.unmap(); starBuf.destroy();
+    return out;
   },
 
   // Dumps the compute output so a black screen can be attributed to either

@@ -113,12 +113,13 @@ fn seedU() -> u32 { return u32(U.seed); }
 
 fn terrainH(p : vec2f) -> f32 {
   let s = seedU();
-  let w = vec2f(vn2(p * 0.013, s ^ 0x77u),
-                vn2(p * 0.013 + vec2f(37.0, 91.0), s ^ 0x77u));
-  let q = p * 0.023 + (w - 0.5) * 1.4;
-  var h = vn2(q, s) * 0.62 + vn2(q * 2.7, s ^ 0x9e37u) * 0.26
-        + vn2(q * 6.1, s ^ 0x51edu) * 0.12;
-  h = pow(h, 1.55);            // deepen valleys, sharpen ridges
+  let w = vec2f(vn2(p * ${TERR.WARP_F}, s ^ 0x77u),
+                vn2(p * ${TERR.WARP_F} + vec2f(${TERR.WARP_OX}, ${TERR.WARP_OY}),
+                    s ^ 0x77u));
+  let q = p * ${TERR.BASE_F} + (w - 0.5) * ${TERR.WARP_A};
+  var h = vn2(q, s) * ${TERR.OCT1_W} + vn2(q * ${TERR.OCT2_F}, s ^ 0x9e37u) * ${TERR.OCT2_W}
+        + vn2(q * ${TERR.OCT3_F}, s ^ 0x51edu) * ${TERR.OCT3_W};
+  h = pow(h, ${TERR.RIDGE});   // deepen valleys, sharpen ridges
   return h * U.maxHeight;
 }
 
@@ -506,14 +507,15 @@ fn treeAt(ix : i32, iy : i32) -> Tree {
   var tr : Tree;
   tr.present = false;
   let s = seedU();
-  let forest = vn2(vec2f(f32(ix), f32(iy)) * 0.021, s ^ 0xF0F0u);
-  let density = smoothstep(0.45, 0.72, forest) * 0.16 + 0.004;
+  let forest = vn2(vec2f(f32(ix), f32(iy)) * ${TREE.FOREST_F}, s ^ 0xF0F0u);
+  let density = smoothstep(${TREE.DENS_LO}, ${TREE.DENS_HI}, forest)
+              * ${TREE.DENS_A} + ${TREE.DENS_MIN};
   if (hash01(ix, iy, s ^ 0x7EE7u) >= density) { return tr; }
   let h2 = hash2i(ix, iy, s ^ 0xA11Cu);
-  tr.cx = f32(ix) + 0.3 + h2.x * 0.4;
-  tr.cy = f32(iy) + 0.3 + h2.y * 0.4;
-  tr.r = 1.0 + h2.x * 0.5;
-  tr.trunkH = 2.6 + h2.y * 1.2;
+  tr.cx = f32(ix) + ${TREE.OFF} + h2.x * ${TREE.OFF_VAR};
+  tr.cy = f32(iy) + ${TREE.OFF} + h2.y * ${TREE.OFF_VAR};
+  tr.r = ${TREE.R_MIN} + h2.x * ${TREE.R_VAR};
+  tr.trunkH = ${TREE.TRUNK_H} + h2.y * ${TREE.TRUNK_H_VAR};
   tr.present = true;
   return tr;
 }
@@ -773,39 +775,43 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       // advances four cells at a time to amortise the search, and a 3-wide
       // window over a 4-cell stride leaves one cell in four never tested.
       // That is a stone winking in and out as you walk past it.
-      if (!isRemoved(tx, ty)) {
-        // The view cutoffs are set from each prop's biggest possible size,
-        // at the range where it stops covering even one character cell. Cut
-        // any nearer and the prop pops out of existence while it is still
-        // drawable, which is its own kind of flicker.
-        if (dHere < ${PROPS.ROCK_VIEW}) {
-          let rk = rockAt(tx, ty);
-          if (rk.present) {
-            let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
-            let hf = hitFaceted(ro, rd, c, rk.r, tx, ty);
-            if (hf.x > 0.0 && hf.x < best) {
-              best = hf.x;
-              o.t = hf.x;
-              o.n = hf.yzw;
-              o.albedo = vec3f(0.46, 0.44, 0.41);
-              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-            }
+      // The view cutoffs are set from each prop's biggest possible size,
+      // at the range where it stops covering even one character cell. Cut
+      // any nearer and the prop pops out of existence while it is still
+      // drawable, which is its own kind of flicker.
+      //
+      // isRemoved is a LINEAR SCAN of the cleared-cell set, so it is asked
+      // last, once a prop is known to stand here at all - a boulder holds
+      // about one cell in ninety. Ahead of the presence hash it would spend
+      // the whole scan on every cell of the window on every step of the
+      // walk, and the game would slow down the more the player cleared.
+      if (dHere < ${PROPS.ROCK_VIEW}) {
+        let rk = rockAt(tx, ty);
+        if (rk.present && !isRemoved(tx, ty)) {
+          let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
+          let hf = hitFaceted(ro, rd, c, rk.r, tx, ty);
+          if (hf.x > 0.0 && hf.x < best) {
+            best = hf.x;
+            o.t = hf.x;
+            o.n = hf.yzw;
+            o.albedo = vec3f(0.46, 0.44, 0.41);
+            o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
           }
         }
-        if (dHere < ${PROPS.STONE_VIEW}) {
-          let st = stoneAt(tx, ty);
-          if (st.present) {
-            let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
-            // offset the cell key so a stone and a boulder in the same cell
-            // do not end up cut to the same shape
-            let hf = hitFaceted(ro, rd, c, st.r, tx + 4096, ty - 4096);
-            if (hf.x > 0.0 && hf.x < best) {
-              best = hf.x;
-              o.t = hf.x;
-              o.n = hf.yzw;
-              o.albedo = vec3f(0.50, 0.48, 0.45);
-              o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
-            }
+      }
+      if (dHere < ${PROPS.STONE_VIEW}) {
+        let st = stoneAt(tx, ty);
+        if (st.present && !isRemoved(tx, ty)) {
+          let c = vec3f(st.cx, st.cy, terrainH(vec2f(st.cx, st.cy)) + st.r * 0.55);
+          // offset the cell key so a stone and a boulder in the same cell
+          // do not end up cut to the same shape
+          let hf = hitFaceted(ro, rd, c, st.r, tx + 4096, ty - 4096);
+          if (hf.x > 0.0 && hf.x < best) {
+            best = hf.x;
+            o.t = hf.x;
+            o.n = hf.yzw;
+            o.albedo = vec3f(0.50, 0.48, 0.45);
+            o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.ok = true;
           }
         }
       }
@@ -815,8 +821,8 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       if (isRemoved(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
       let g = terrainH(cen);
-      let canZ = g + tr.trunkH + tr.r * 0.55;
-      let trunkR = 0.085 + tr.r * 0.055;
+      let canZ = g + tr.trunkH + tr.r * ${TREE.CAN_Z};
+      let trunkR = ${TREE.TRUNK_R} + tr.r * ${TREE.TRUNK_R_K};
 
       let tTrunk = hitCylinder(ro, rd, cen, trunkR, g, g + tr.trunkH);
       if (tTrunk > 0.001 && tTrunk < best) {
@@ -833,10 +839,12 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
         let tEnter = max(sph.x, 0.001);
         if (tEnter < best) {
           let hp = ro + rd * tEnter;
-          let dens = vnoise(hp * 2.6) * 0.75 + vnoise(hp * 6.5) * 0.25;
+          let dens = vnoise(hp * ${TREE.DENS_F1}) * ${TREE.DENS_W1}
+                   + vnoise(hp * ${TREE.DENS_F2}) * ${TREE.DENS_W2};
           let chord = max(sph.y - tEnter, 0.0);
-          let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
-          if (a > 0.03) {
+          let a = 1.0 - exp(-chord * ${TREE.EXT}
+                            * (${TREE.EXT_MIN} + ${TREE.EXT_K} * dens));
+          if (a > ${TREE.ALPHA_MIN}) {
             best = tEnter;
             o.t = tEnter;
             o.tExit = sph.y;
@@ -951,9 +959,12 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         // eight neighbours are not worth their hashes here. The bounding
         // sphere is used rather than the cut shape - a facet's worth of
         // difference is not visible in a shadow, and this is the hot loop.
-        if (ox == 0 && oy == 0 && !isRemoved(tx, ty)) {
+        if (ox == 0 && oy == 0) {
           let rk = rockAt(tx, ty);
-          if (rk.present) {
+          // presence hash first, cleared-cell scan second: this loop runs
+          // once per occlusion ray, and there are SUN_SAMPLES + AO_SAMPLES
+          // of those per shaded cell
+          if (rk.present && !isRemoved(tx, ty)) {
             let c = vec3f(rk.cx, rk.cy, terrainH(vec2f(rk.cx, rk.cy)) + rk.z);
             let hs = hitSphere(ro, rd, c, rk.r);
             // hs.x ahead of the origin, not merely hs.y: boulders are bedded
@@ -971,9 +982,10 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         if (isRemoved(tx, ty)) { continue; }
 
         let g = terrainH(vec2f(tr.cx, tr.cy));
-        let canZ = g + tr.trunkH + tr.r * 0.55;
+        let canZ = g + tr.trunkH + tr.r * ${TREE.CAN_Z};
         let tTrunk = hitCylinder(ro, rd, vec2f(tr.cx, tr.cy),
-                                 0.085 + tr.r * 0.055, g, g + tr.trunkH);
+                                 ${TREE.TRUNK_R} + tr.r * ${TREE.TRUNK_R_K},
+                                 g, g + tr.trunkH);
         if (tTrunk > 0.001 && tTrunk * hlen < maxD) { return 0.0; }
         let sph = hitSphere(ro, rd, vec3f(tr.cx, tr.cy, canZ), tr.r);
         if (sph.y > 0.001 && sph.x * hlen < maxD) {
@@ -981,10 +993,12 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
           // line up with the gaps the eye actually sees in the canopy
           let tEnter = max(sph.x, 0.001);
           let mid = ro + rd * max((tEnter + sph.y) * 0.5, 0.0);
-          let dens = vnoise(mid * 2.6) * 0.75 + vnoise(mid * 6.5) * 0.25;
+          let dens = vnoise(mid * ${TREE.DENS_F1}) * ${TREE.DENS_W1}
+                   + vnoise(mid * ${TREE.DENS_F2}) * ${TREE.DENS_W2};
           let chord = max(sph.y - tEnter, 0.0);
-          let a = 1.0 - exp(-chord * 1.35 * (0.35 + 1.3 * dens));
-          if (a > 0.03) { return 0.0; }
+          let a = 1.0 - exp(-chord * ${TREE.EXT}
+                            * (${TREE.EXT_MIN} + ${TREE.EXT_K} * dens));
+          if (a > ${TREE.ALPHA_MIN}) { return 0.0; }
         }
       }
       }
@@ -1168,10 +1182,10 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       }
       // glow lichen: sparse emissive patches, enough to navigate by and a
       // reason to look at cave walls
-      let gl = vnoise(p * 1.9);
-      if (gl > 0.8 && m != MAT_GEM) {
+      let gl = vnoise(p * ${MATS.LICHEN_F});
+      if (gl > ${MATS.LICHEN_T} && m != MAT_GEM) {
         hit.albedo = vec3f(0.55, 0.75, 0.70);
-        hit.emissive = (gl - 0.8) * 9.0;
+        hit.emissive = (gl - ${MATS.LICHEN_T}) * ${MATS.LICHEN_GAIN};
       }
       hit.cave = true;
     } else {

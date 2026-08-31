@@ -124,6 +124,72 @@ const Game = {
       this.cmdHistory.push('day length ' + CFG.DAY_LEN + 's');
       return;
     }
+    // The seed is the world. Handing someone a number hands them the same
+    // hills, the same caves and the same dead civilisation, which is the
+    // whole claim this project makes - so it needs to be sayable at runtime
+    // and not only editable in a source file nobody who plays this has.
+    if (verb === 'seed') {
+      if (arg.length > 1) {
+        const v = Number(arg[1]);
+        if (!Number.isInteger(v) || v < 0 || v >= SEED_MAX) {
+          this.cmdHistory.push('seed must be a whole number below ' + SEED_MAX);
+          this.cmdHistory.push('(above that an f32 uniform stops carrying it)');
+          return;
+        }
+        if (v === CFG.SEED) { this.cmdHistory.push('already standing in ' + v); return; }
+        // Half the modules cache something derived from the seed - the
+        // spawn, the civilisation, the resident dig chunks - so the honest
+        // way into another world is to load it. Flush what is owed first.
+        this.save();
+        if (typeof Edits !== 'undefined') Edits.save();
+        if (typeof Removed !== 'undefined') Removed.save();
+        this.cmdHistory.push('walking to ' + v + '...');
+        if (typeof location !== 'undefined') location.search = '?seed=' + v;
+        return;
+      }
+      this.cmdHistory.push('seed ' + CFG.SEED + '  -  "seed <n>" walks to another world');
+      this.cmdHistory.push('every world keeps its own digs, items and record');
+      return;
+    }
+    if (verb === 'quality') {
+      if (typeof Quality === 'undefined') {
+        this.cmdHistory.push('quality control is not loaded');
+        return;
+      }
+      if (arg.length > 1 && !Quality.set(arg[1].toLowerCase())) {
+        this.cmdHistory.push('quality: low, medium, high, or auto');
+        return;
+      }
+      this.cmdHistory.push(Quality.describe());
+      return;
+    }
+    // The screen already IS text. Handing it back as text is the one export
+    // format this renderer can offer that no screenshot improves on.
+    if (verb === 'copy') {
+      if (typeof GPURenderer === 'undefined' || !GPURenderer.ok) {
+        this.cmdHistory.push('nothing to copy - the renderer is not running');
+        return;
+      }
+      // Nobody wants a picture of themselves asking for a picture, so the
+      // console closes first and the grab waits for the HUD to be redrawn
+      // without it. Two frames, because the redraw happens inside the frame
+      // loop and this is not being called from it. The world itself is
+      // unaffected: the overlay is substituted in the glyph pass, not
+      // marched in the raymarch, so nothing has to be re-rendered.
+      this.close();
+      const done = m => this.toast(m);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        GPURenderer.captureText().then(txt => {
+          const rows = txt.split('\n').length;
+          if (typeof navigator !== 'undefined' && navigator.clipboard) {
+            navigator.clipboard.writeText(txt).then(
+              () => done(rows + ' lines copied'),
+              () => { console.log(txt); done('clipboard refused it - see the console'); });
+          } else { console.log(txt); done('no clipboard here - see the console'); }
+        }, e => done('copy failed: ' + e.message));
+      }));
+      return;
+    }
     switch (cmd.toLowerCase()) {
       case 'devmode':
         this.devMode = !this.devMode;
@@ -137,14 +203,16 @@ const Game = {
       case 'wipe':
         this.inv.clear(); this.read = []; this.done = false; this.used.clear();
         if (typeof localStorage !== 'undefined') {
-          localStorage.removeItem('ascii-save-v1');
-          localStorage.removeItem('ascii-caves-v1');
-          localStorage.removeItem('ascii-removed-v1');
+          // this world only: another seed's digs are none of its business
+          localStorage.removeItem(saveKey('ascii-save-v1'));
+          localStorage.removeItem(saveKey('ascii-caves-v1'));
+          localStorage.removeItem(saveKey('ascii-removed-v1'));
         }
         this.cmdHistory.push('save wiped - reload to start over');
         break;
       case 'help':
-        this.cmdHistory.push('commands: devmode, time <h>, freeze, daylen <s>,');
+        this.cmdHistory.push('commands: seed <n>, quality <low|medium|high|auto>,');
+        this.cmdHistory.push('copy, time <h>, freeze, daylen <s>, devmode,');
         this.cmdHistory.push('wipe, clear, help');
         break;
       default:
@@ -209,6 +277,22 @@ const Game = {
   target: null, actions: [],
   used: new Set(),   // once-per-target actions spent this session
 
+  // The spent set rides along in every save, and a long walk gathers
+  // thousands of loose stones - unbounded, it is the one part of the save
+  // that grows without end. Oldest first out, so a patch the player left
+  // far behind will eventually offer itself again, which is a cheaper
+  // failure than a save that never stops growing. (A Set iterates in
+  // insertion order, so the first value is always the oldest.)
+  USED_MAX: 512,
+
+  spend(key) {
+    this.used.add(key);
+    while (this.used.size > this.USED_MAX) {
+      this.used.delete(this.used.values().next().value);
+    }
+    this.needSave = true;
+  },
+
   examine() {
     const p = Player;
     const cp = Math.cos(p.pitch), sp = Math.sin(p.pitch);
@@ -230,7 +314,7 @@ const Game = {
     const acts = [];
     const once = (what, label, fn) => {
       if (this.used.has(this.useKey(t, what))) return;
-      acts.push({ label, fn: () => { this.used.add(this.useKey(t, what)); fn(); } });
+      acts.push({ label, fn: () => { this.spend(this.useKey(t, what)); fn(); } });
     };
     if (t.kind === 'tree') {
       const sp = SPECIES[treeSpecies(t.ix, t.iy)];
@@ -568,21 +652,21 @@ const Game = {
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
     this.done = !!s.done;
-    this.used = new Set(s.used || []);
+    this.used = new Set((s.used || []).slice(-this.USED_MAX));
     this.spawnAt = Array.isArray(s.at) ? s.at : null;
     if (typeof s.t === 'number' && typeof Sky !== 'undefined') Sky.t = s.t;
   },
 
   save() {
     if (typeof localStorage === 'undefined') { this.needSave = false; return; }
-    try { localStorage.setItem('ascii-save-v1', JSON.stringify(this.snapshot())); }
+    try { localStorage.setItem(saveKey('ascii-save-v1'), JSON.stringify(this.snapshot())); }
     catch (e) { console.warn('save failed: ' + e.message); }
     this.needSave = false;
   },
 
   load() {
     if (typeof localStorage === 'undefined') return;
-    const s = localStorage.getItem('ascii-save-v1');
+    const s = localStorage.getItem(saveKey('ascii-save-v1'));
     if (!s) return;
     try { this.restore(JSON.parse(s)); }
     catch (e) { console.warn('load failed'); }

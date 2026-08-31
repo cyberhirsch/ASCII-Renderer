@@ -5,6 +5,7 @@
   const breathe = () => new Promise(r => setTimeout(r, 0));
 
   Entities.init();
+  Quality.init();     // ray budgets, before anything reads them
   Edits.init();       // load persisted digs before the first frame
   Removed.init();     // load persisted cleared cells
   Game.init();        // load persisted inventory
@@ -42,6 +43,7 @@
 
   addEventListener('beforeunload', () => {
     if (Edits.needSave) Edits.save();
+    if (Removed.needSave) Removed.save();
     if (Game.needSave) Game.save();
   });
 
@@ -55,7 +57,11 @@
     Entities.update(dt, now / 1000);
     Sky.update(dt);
     Edits.tick(dt);
+    Removed.tick(dt);
     Game.tick(dt);
+    // watches the frame time and gives up rays when it has to; a no-op
+    // unless the player asked for automatic quality (it is the default)
+    Quality.tick(dt);
 
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) {

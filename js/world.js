@@ -156,7 +156,10 @@ const World = {
       // ore and gems outrank the lichen growing over them
       if (mat === MATS.GEM) return { kind: 'gem', point: p, mat };
       if (mat === MATS.ORE) return { kind: 'ore', point: p, mat };
-      if (vnoise(px * 1.9, py * 1.9, pz * 1.9) > 0.8) {
+      // the same patch field the shader grows lichen from, so a harvest is
+      // only ever offered off a wall that visibly has some
+      const lf = MATS.LICHEN_F;
+      if (vnoise(px * lf, py * lf, pz * lf) > MATS.LICHEN_T) {
         return { kind: 'lichen', point: p, mat };
       }
       return { kind: 'cavewall', point: p, mat };

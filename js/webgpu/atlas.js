@@ -4,34 +4,6 @@
 // ink coverage sampled, then the set is sorted by coverage and resampled so
 // the ramp is close to linear in brightness. A hand-ordered ramp is uneven —
 // the gaps show up as banding in smooth gradients.
-// Billboard artwork: text rendered to a stacked atlas, one row per sign, which
-// the compute shader samples when a ray lands on a hoarding panel.
-const SignAtlas = {
-  TEXTS: ['NOODLES', 'OPEN 24H', 'DATA', 'HOTEL',
-          'GARAGE', 'SUSHI', 'TAXI', 'CITY BANK'],
-  W: 256, H: 64,
-
-  build() {
-    const n = this.TEXTS.length;
-    const cv = document.createElement('canvas');
-    cv.width = this.W;
-    cv.height = this.H * n;
-    const ctx = cv.getContext('2d');
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, cv.width, cv.height);
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    for (let i = 0; i < n; i++) {
-      const t = this.TEXTS[i];
-      // shrink to fit the panel rather than overflow it
-      const size = Math.min(this.H * 0.6, (this.W * 1.55) / t.length);
-      ctx.font = `bold ${size | 0}px "Consolas", "Courier New", monospace`;
-      ctx.fillText(t, this.W / 2, this.H * i + this.H / 2);
-    }
-    return { canvas: cv, count: n };
-  },
-};
 
 // Full printable-ASCII strip (codes 32..126) for the text overlay, rendered
 // at the display cell size like the ramp atlas so texels stay 1:1 with pixels.
