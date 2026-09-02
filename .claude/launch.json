@@ -6,6 +6,12 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["-y", "http-server", "-p", "8123", "-c-1", "."],
       "port": 8123
+    },
+    {
+      "name": "chronicle-map",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8124"],
+      "port": 8124
     }
   ]
 }
