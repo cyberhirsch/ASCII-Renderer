@@ -59,6 +59,8 @@ struct Uniforms {
   night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
   keyDir    : vec3f, // what is actually lighting the scene: sun, then moon
   steadCount: f32,   // resident buildings; 0 when nothing is standing near
+  steadAll  : vec4f, // one sphere over the whole resident set: away from a
+                     // village this is all an occlusion ray ever pays
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -1162,6 +1164,57 @@ fn traceSteads(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
   return o;
 }
 
+// Does anything built stand between here and there? Occlusion wants only a
+// yes, never the nearest hit, so this returns on the first thing it meets.
+//
+// Two shortcuts, both of which the renderer already takes elsewhere. Stones
+// and spheres block as their bounding sphere - a facet's worth of difference
+// is not visible in a shadow, and the eleven cutting planes are far too dear
+// for a loop that runs once per occlusion ray, which is what the boulders
+// decided already. And every hit must be an ENTRY ahead of the origin: a
+// shading point sits a hair off its own surface and inside its own bounding
+// sphere, so a test that accepted an exit would report every building as
+// shadowing itself, everywhere, at once.
+fn steadBlocks(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
+  let nb = i32(U.steadCount);
+  if (nb == 0) { return false; }
+  let all = hitSphere(ro, rd, U.steadAll.xyz, U.steadAll.w);
+  if (all.y <= 0.001 || all.x > maxT) { return false; }
+  for (var b = 0; b < nb; b = b + 1) {
+    let hd = steadHead[b * 2];
+    let bs = hitSphere(ro, rd, hd.xyz, hd.w);
+    if (bs.y <= 0.001 || bs.x > maxT) { continue; }
+    let rg = steadHead[b * 2 + 1];
+    let first = i32(rg.x);
+    let cnt = i32(rg.y);
+    for (var i = 0; i < cnt; i = i + 1) {
+      let base = (first + i) * 5;
+      let v0 = steadPrim[base];
+      let v1 = steadPrim[base + 1];
+      let m0 = steadPrim[base + 2];
+      let m1 = steadPrim[base + 3];
+      let m2 = steadPrim[base + 4];
+      let kind = i32(v0.w);
+      if (kind == 2 || kind == 4) {
+        let hs = hitSphere(ro, rd, v0.xyz, v1.x);
+        if (hs.x > 0.05 && hs.x < maxT) { return true; }
+        continue;
+      }
+      var ph : PHit;
+      ph.ok = false;
+      if (kind == 0) {
+        ph = pBox(ro, rd, v0.xyz, v1.xyz, m0.xyz, m1.xyz, m2.xyz);
+      } else if (kind == 1) {
+        ph = pCyl(ro, rd, v0.xyz, v1.x, v1.y, m0.xyz, m1.xyz, m2.xyz);
+      } else {
+        ph = pCone(ro, rd, v0.xyz, v1.x, v1.y, v1.z, m0.xyz, m1.xyz, m2.xyz);
+      }
+      if (ph.ok && ph.t > 0.05 && ph.t < maxT) { return true; }
+    }
+  }
+  return false;
+}
+
 // -------- occlusion for shadows and AO --------
 // Occlusion rays return TRANSMITTANCE: 1 = fully lit, 0 = fully blocked.
 // Canopies are opaque now, same as trunks, so a hit just returns 0 - the
@@ -1206,6 +1259,11 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
+
+  // Anything built blocks light as readily as a tree does. Without this a
+  // hall is lit but casts nothing, which reads as a painted flat rather
+  // than a building standing on ground.
+  if (steadBlocks(ro, rd, maxT)) { return 0.0; }
 
   // Trees: exact DDA over the cells the ray crosses, testing a 3x3
   // neighbourhood at each step - canopies overhang their anchor cell, and a

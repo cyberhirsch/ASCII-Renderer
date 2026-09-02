@@ -180,6 +180,9 @@ const Steading = {
     const near = S.sites.slice().sort((a, b) =>
       ((a.x - px) ** 2 + (a.y - py) ** 2) - ((b.x - px) ** 2 + (b.y - py) ** 2));
     let nh = 0, np = 0;
+    // one sphere around everything resident, so an occlusion ray far from
+    // any village pays a single test rather than one per building
+    const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
     for (const s of near) {
       if (nh >= maxHead || np >= maxPrim) break;
       if ((s.x - px) ** 2 + (s.y - py) ** 2 > this.VIEW * this.VIEW) break;
@@ -190,17 +193,33 @@ const Steading = {
                                mat: b.mat, metal: b.metal });
         let parts = transformParts(sinkParts(fn(ctx), b.decay),
                                    { pos: b.pos, yaw: b.yaw });
-        if (nh >= maxHead || np + parts.length > maxPrim) return { heads: nh, prims: np };
+        if (nh >= maxHead || np + parts.length > maxPrim) {
+          return { heads: nh, prims: np, all: this.overall(lo, hi) };
+        }
         const B = partsBounds(parts);
         const h = nh * this.HEAD_F;
         head[h] = B.c[0]; head[h + 1] = B.c[1]; head[h + 2] = B.c[2];
         head[h + 3] = B.r;
         head[h + 4] = np; head[h + 5] = parts.length; head[h + 6] = s.id; head[h + 7] = 0;
+        for (let d = 0; d < 3; d++) {
+          if (B.c[d] - B.r < lo[d]) lo[d] = B.c[d] - B.r;
+          if (B.c[d] + B.r > hi[d]) hi[d] = B.c[d] + B.r;
+        }
         nh++;
         for (const q of parts) np = this.writePrim(prim, np, q, b);
       }
     }
-    return { heads: nh, prims: np };
+    return { heads: nh, prims: np, all: this.overall(lo, hi) };
+  },
+
+  // the sphere that holds everything resident, or null when nothing is
+  overall(lo, hi) {
+    if (lo[0] > hi[0]) return null;
+    const c = [0, 0, 0];
+    let r = 0;
+    for (let d = 0; d < 3; d++) c[d] = (lo[d] + hi[d]) / 2;
+    for (let d = 0; d < 3; d++) r += (hi[d] - lo[d]) ** 2;
+    return [c[0], c[1], c[2], Math.sqrt(r) / 2 + 0.01];
   },
 
   VIEW: 260,   // world units: past this a village is under a character cell

@@ -162,5 +162,43 @@ const S = runs[8151623];
               : fail(`the village sits ${near.toFixed(0)} units from its own site`);
 }
 
+// ---- 8. the sphere the occlusion path leans on ----
+// Every shadow and ambient ray tests one sphere before it tests anything
+// else, and skips the whole village if it misses. If that sphere does not
+// truly contain every building, light passes straight through walls - and
+// it fails silently, because the only symptom is a shadow that is not there.
+{
+  const MH = 256, MP = 8192;
+  const head = new Float32Array(MH * 8), prim = new Float32Array(MP * 20);
+  let checked = 0, outside = 0, seeds = 0;
+  for (const sd of SEEDS) {
+    CFG.SEED = sd;
+    const R = runs[sd];
+    for (const s of R.sites.slice(0, 12)) {
+      const r = Steading.pack(R, s.x, s.y, R.now, head, prim, MH, MP);
+      if (!r.heads) continue;
+      seeds++;
+      if (!r.all) { outside++; continue; }
+      for (let i = 0; i < r.heads; i++) {
+        const h = i * 8;
+        const d = Math.hypot(head[h] - r.all[0], head[h + 1] - r.all[1],
+                             head[h + 2] - r.all[2]);
+        checked++;
+        if (d + head[h + 3] > r.all[3] + 1e-3) outside++;
+      }
+    }
+  }
+  CFG.SEED = 8151623;
+  (seeds > 0 && outside === 0)
+    ? ok(`the occlusion sphere holds every building it claims (${checked} checked)`)
+    : fail(`${outside} buildings stick out of the sphere that culls them`);
+
+  // and an empty pack says so rather than handing back a sphere at the origin
+  const far = Steading.pack(S, 1e6, 1e6, S.now, head, prim, MH, MP);
+  (far.heads === 0 && far.all === null)
+    ? ok('nothing resident means no sphere, not a sphere around nothing')
+    : fail(`empty pack returned ${JSON.stringify(far.all)}`);
+}
+
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\nsteading tests passed');

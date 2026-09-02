@@ -5842,6 +5842,9 @@ const Steading = {
     const near = S.sites.slice().sort((a, b) =>
       ((a.x - px) ** 2 + (a.y - py) ** 2) - ((b.x - px) ** 2 + (b.y - py) ** 2));
     let nh = 0, np = 0;
+    // one sphere around everything resident, so an occlusion ray far from
+    // any village pays a single test rather than one per building
+    const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
     for (const s of near) {
       if (nh >= maxHead || np >= maxPrim) break;
       if ((s.x - px) ** 2 + (s.y - py) ** 2 > this.VIEW * this.VIEW) break;
@@ -5852,17 +5855,33 @@ const Steading = {
                                mat: b.mat, metal: b.metal });
         let parts = transformParts(sinkParts(fn(ctx), b.decay),
                                    { pos: b.pos, yaw: b.yaw });
-        if (nh >= maxHead || np + parts.length > maxPrim) return { heads: nh, prims: np };
+        if (nh >= maxHead || np + parts.length > maxPrim) {
+          return { heads: nh, prims: np, all: this.overall(lo, hi) };
+        }
         const B = partsBounds(parts);
         const h = nh * this.HEAD_F;
         head[h] = B.c[0]; head[h + 1] = B.c[1]; head[h + 2] = B.c[2];
         head[h + 3] = B.r;
         head[h + 4] = np; head[h + 5] = parts.length; head[h + 6] = s.id; head[h + 7] = 0;
+        for (let d = 0; d < 3; d++) {
+          if (B.c[d] - B.r < lo[d]) lo[d] = B.c[d] - B.r;
+          if (B.c[d] + B.r > hi[d]) hi[d] = B.c[d] + B.r;
+        }
         nh++;
         for (const q of parts) np = this.writePrim(prim, np, q, b);
       }
     }
-    return { heads: nh, prims: np };
+    return { heads: nh, prims: np, all: this.overall(lo, hi) };
+  },
+
+  // the sphere that holds everything resident, or null when nothing is
+  overall(lo, hi) {
+    if (lo[0] > hi[0]) return null;
+    const c = [0, 0, 0];
+    let r = 0;
+    for (let d = 0; d < 3; d++) c[d] = (lo[d] + hi[d]) / 2;
+    for (let d = 0; d < 3; d++) r += (hi[d] - lo[d]) ** 2;
+    return [c[0], c[1], c[2], Math.sqrt(r) / 2 + 0.01];
   },
 
   VIEW: 260,   // world units: past this a village is under a character cell
@@ -7466,6 +7485,8 @@ struct Uniforms {
   night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
   keyDir    : vec3f, // what is actually lighting the scene: sun, then moon
   steadCount: f32,   // resident buildings; 0 when nothing is standing near
+  steadAll  : vec4f, // one sphere over the whole resident set: away from a
+                     // village this is all an occlusion ray ever pays
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -8569,6 +8590,57 @@ fn traceSteads(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
   return o;
 }
 
+// Does anything built stand between here and there? Occlusion wants only a
+// yes, never the nearest hit, so this returns on the first thing it meets.
+//
+// Two shortcuts, both of which the renderer already takes elsewhere. Stones
+// and spheres block as their bounding sphere - a facet's worth of difference
+// is not visible in a shadow, and the eleven cutting planes are far too dear
+// for a loop that runs once per occlusion ray, which is what the boulders
+// decided already. And every hit must be an ENTRY ahead of the origin: a
+// shading point sits a hair off its own surface and inside its own bounding
+// sphere, so a test that accepted an exit would report every building as
+// shadowing itself, everywhere, at once.
+fn steadBlocks(ro : vec3f, rd : vec3f, maxT : f32) -> bool {
+  let nb = i32(U.steadCount);
+  if (nb == 0) { return false; }
+  let all = hitSphere(ro, rd, U.steadAll.xyz, U.steadAll.w);
+  if (all.y <= 0.001 || all.x > maxT) { return false; }
+  for (var b = 0; b < nb; b = b + 1) {
+    let hd = steadHead[b * 2];
+    let bs = hitSphere(ro, rd, hd.xyz, hd.w);
+    if (bs.y <= 0.001 || bs.x > maxT) { continue; }
+    let rg = steadHead[b * 2 + 1];
+    let first = i32(rg.x);
+    let cnt = i32(rg.y);
+    for (var i = 0; i < cnt; i = i + 1) {
+      let base = (first + i) * 5;
+      let v0 = steadPrim[base];
+      let v1 = steadPrim[base + 1];
+      let m0 = steadPrim[base + 2];
+      let m1 = steadPrim[base + 3];
+      let m2 = steadPrim[base + 4];
+      let kind = i32(v0.w);
+      if (kind == 2 || kind == 4) {
+        let hs = hitSphere(ro, rd, v0.xyz, v1.x);
+        if (hs.x > 0.05 && hs.x < maxT) { return true; }
+        continue;
+      }
+      var ph : PHit;
+      ph.ok = false;
+      if (kind == 0) {
+        ph = pBox(ro, rd, v0.xyz, v1.xyz, m0.xyz, m1.xyz, m2.xyz);
+      } else if (kind == 1) {
+        ph = pCyl(ro, rd, v0.xyz, v1.x, v1.y, m0.xyz, m1.xyz, m2.xyz);
+      } else {
+        ph = pCone(ro, rd, v0.xyz, v1.x, v1.y, v1.z, m0.xyz, m1.xyz, m2.xyz);
+      }
+      if (ph.ok && ph.t > 0.05 && ph.t < maxT) { return true; }
+    }
+  }
+  return false;
+}
+
 // -------- occlusion for shadows and AO --------
 // Occlusion rays return TRANSMITTANCE: 1 = fully lit, 0 = fully blocked.
 // Canopies are opaque now, same as trunks, so a hit just returns 0 - the
@@ -8613,6 +8685,11 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
       t = t + clamp(d * 0.7, 0.45, 2.6);
     }
   }
+
+  // Anything built blocks light as readily as a tree does. Without this a
+  // hall is lit but casts nothing, which reads as a painted flat rather
+  // than a building standing on ground.
+  if (steadBlocks(ro, rd, maxT)) { return 0.0; }
 
   // Trees: exact DDA over the cells the ray crosses, testing a 3x3
   // neighbourhood at each step - canopies overhang their anchor cell, and a
@@ -9274,7 +9351,7 @@ const GPURenderer = {
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.uniBuf = device.createBuffer({
-      size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 288, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rparBuf = device.createBuffer({
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -9492,6 +9569,7 @@ const GPURenderer = {
                                 this.steadHead, this.steadPrim,
                                 CFG.STEAD_HEAD, CFG.STEAD_PRIM);
         this.steadCount = r.heads;
+        this.steadAll = r.all;
         this.steadAt = [Player.x, Player.y];
         if (r.heads > 0) {
           dev.queue.writeBuffer(this.steadHeadBuf, 0, this.steadHead, 0, r.heads * 8);
@@ -9506,7 +9584,7 @@ const GPURenderer = {
       Removed.gpuDirty = false;
     }
 
-    const u = new Float32Array(68);
+    const u = new Float32Array(72);
     u[0] = Player.x;  u[1] = Player.y;
     u[2] = this.cols; u[3] = this.rows;
     // eye rides on the terrain; Player.z is kept current by Player.update
@@ -9544,6 +9622,10 @@ const GPURenderer = {
     u[63] = sky.night;
     u.set(sky.keyDir, 64);
     u[67] = this.steadCount;
+    if (this.steadCount > 0 && this.steadAll) {
+      u[68] = this.steadAll[0]; u[69] = this.steadAll[1];
+      u[70] = this.steadAll[2]; u[71] = this.steadAll[3];
+    }
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,
