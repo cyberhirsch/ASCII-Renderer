@@ -81,6 +81,12 @@ const CFG = {
   EDIT_MAX: 32,
   DIG_REACH: 3.5,
   DIG_R: 1.1,
+  // Buildings resident on the GPU. A village is some hundreds of primitives
+  // and only what is near the camera is sent, so these are a view budget
+  // rather than a world limit.
+  STEAD_HEAD: 256,    // buildings
+  STEAD_PRIM: 8192,   // primitives across all of them
+  STEAD_STEP: 40,     // world units the player moves before a repack
   // cleared cells visible to the GPU (nearest the player); farther cleared
   // props may visually reappear until this rises in a later phase
   REMOVED_MAX: 64,

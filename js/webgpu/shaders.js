@@ -58,7 +58,7 @@ struct Uniforms {
   moonDir   : vec3f, // the moon runs opposite the sun
   night     : f32,   // 0 by day, 1 in full night; gates moon and lamp
   keyDir    : vec3f, // what is actually lighting the scene: sun, then moon
-  pad7      : f32,
+  steadCount: f32,   // resident buildings; 0 when nothing is standing near
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -75,6 +75,12 @@ struct Uniforms {
 // to be specific characters, and the glyph is otherwise chosen by luminance
 // in the render pass - so the compute pass names the character here.
 @group(0) @binding(6) var<storage, read_write> stars : array<u32>;
+// What people built. Two levels: one vec4 pair per BUILDING carrying a
+// bounding sphere and a range, and five vec4 per primitive. A village is
+// some hundreds of primitives and a ray must not pay for all of them, so it
+// tests a handful of spheres and opens only what it actually strikes.
+@group(0) @binding(7) var<storage, read> steadHead : array<vec4f>;
+@group(0) @binding(8) var<storage, read> steadPrim : array<vec4f>;
 
 // -------- hashing / noise (mirrored in js/util.js) --------
 
@@ -674,9 +680,233 @@ fn rockMat(p : vec3f) -> i32 {
   return MAT_ORE;
 }
 
+// Tin country: the province that decides whether shallow ore is tin or
+// copper. Mirror of tinCountry in js/util.js. KEEP IN SYNC.
+fn tinCountry(q : vec2f) -> bool {
+  return vn2(q * ${MATS.TIN_F}, seedU() ^ 0x7104u) > ${MATS.TIN_GATE};
+}
+
 fn matAt(p : vec3f, gz : f32) -> i32 {
   if (p.z > gz - soilDepth(p.xy)) { return MAT_DIRT; }
   return rockMat(p);
+}
+
+// -------- what people built --------
+// Ported from the tracer in js/assetview.js, which is the reference the
+// asset sheet is reviewed against. These must agree with it shape for shape
+// or a building looks different in the game from the catalogue it was
+// approved in. KEEP IN SYNC with AssetView.hit*.
+
+const AMAT_N : i32 = ${Object.keys(AMAT).length};
+fn amatColour(i : i32) -> vec3f {
+  var t = array<vec3f, ${Object.keys(AMAT).length}>(
+${Object.keys(AMAT).map(k => '    vec3f(' + AMAT[k].c.map(v => v.toFixed(3)).join(', ') + ')').join(',\n')});
+  return t[clamp(i, 0, AMAT_N - 1)];
+}
+fn amatEmit(i : i32) -> f32 {
+  var e = array<f32, ${Object.keys(AMAT).length}>(
+${Object.keys(AMAT).map(k => '    ' + (AMAT[k].emit || 0).toFixed(2)).join(',\n')});
+  return e[clamp(i, 0, AMAT_N - 1)];
+}
+
+// world = R * local, with R held as its three rows
+fn toLocal(r0 : vec3f, r1 : vec3f, r2 : vec3f, v : vec3f) -> vec3f {
+  return r0 * v.x + r1 * v.y + r2 * v.z;    // transpose
+}
+fn toWorld(r0 : vec3f, r1 : vec3f, r2 : vec3f, v : vec3f) -> vec3f {
+  return vec3f(dot(r0, v), dot(r1, v), dot(r2, v));
+}
+
+// arnd(), once its string key has been folded into a u32 on the CPU
+fn arnd(seed : u32, i : i32) -> f32 {
+  return f32(uhash(seed, u32(i) * 2654435761u)) * (1.0 / 4294967296.0);
+}
+
+struct PHit { t : f32, n : vec3f, ok : bool };
+
+fn pBox(ro : vec3f, rd : vec3f, c : vec3f, he : vec3f,
+        r0 : vec3f, r1 : vec3f, r2 : vec3f) -> PHit {
+  var h : PHit;
+  h.ok = false;
+  let lo = toLocal(r0, r1, r2, ro - c);
+  let ld = toLocal(r0, r1, r2, rd);
+  var tn = -1.0e9;
+  var tf = 1.0e9;
+  var axis = 0;
+  var sgn = 1.0;
+  for (var i = 0; i < 3; i = i + 1) {
+    if (abs(ld[i]) < 1e-9) {
+      if (abs(lo[i]) > he[i]) { return h; }
+      continue;
+    }
+    let inv = 1.0 / ld[i];
+    var t0 = (-he[i] - lo[i]) * inv;
+    var t1 = (he[i] - lo[i]) * inv;
+    var sg = -1.0;
+    if (t0 > t1) { let tmp = t0; t0 = t1; t1 = tmp; sg = 1.0; }
+    if (t0 > tn) { tn = t0; axis = i; sgn = sg; }
+    if (t1 < tf) { tf = t1; }
+    if (tn > tf) { return h; }
+  }
+  let t = select(tf, tn, tn > 1e-4);
+  if (t < 1e-4) { return h; }
+  var nl = vec3f(0.0);
+  nl[axis] = sgn * select(-1.0, 1.0, tn > 1e-4);
+  h.t = t;
+  h.n = toWorld(r0, r1, r2, nl);
+  h.ok = true;
+  return h;
+}
+
+// base at c, axis up local +z, height a.y, radius a.x
+fn pCyl(ro : vec3f, rd : vec3f, c : vec3f, rr : f32, hgt : f32,
+        r0 : vec3f, r1 : vec3f, r2 : vec3f) -> PHit {
+  var h : PHit;
+  h.ok = false;
+  if (hgt <= 0.0) { return h; }
+  let lo = toLocal(r0, r1, r2, ro - c);
+  let ld = toLocal(r0, r1, r2, rd);
+  var best = 1.0e9;
+  var nl = vec3f(0.0);
+  var got = false;
+  let a = ld.x * ld.x + ld.y * ld.y;
+  if (a > 1e-12) {
+    let b = lo.x * ld.x + lo.y * ld.y;
+    let cc = lo.x * lo.x + lo.y * lo.y - rr * rr;
+    let disc = b * b - a * cc;
+    if (disc >= 0.0) {
+      let sq = sqrt(disc);
+      for (var s = 0; s < 2; s = s + 1) {
+        let t = select((-b + sq) / a, (-b - sq) / a, s == 0);
+        if (t < 1e-4 || t >= best) { continue; }
+        let z = lo.z + ld.z * t;
+        if (z < 0.0 || z > hgt) { continue; }
+        best = t;
+        nl = vec3f((lo.x + ld.x * t) / rr, (lo.y + ld.y * t) / rr, 0.0);
+        got = true;
+        break;
+      }
+    }
+  }
+  if (abs(ld.z) > 1e-9) {
+    for (var e = 0; e < 2; e = e + 1) {
+      let zc = select(hgt, 0.0, e == 0);
+      let ns = select(1.0, -1.0, e == 0);
+      let t = (zc - lo.z) / ld.z;
+      if (t < 1e-4 || t >= best) { continue; }
+      let x = lo.x + ld.x * t;
+      let y = lo.y + ld.y * t;
+      if (x * x + y * y > rr * rr) { continue; }
+      best = t;
+      nl = vec3f(0.0, 0.0, ns);
+      got = true;
+    }
+  }
+  if (!got) { return h; }
+  h.t = best;
+  h.n = toWorld(r0, r1, r2, nl);
+  h.ok = true;
+  return h;
+}
+
+fn pCone(ro : vec3f, rd : vec3f, c : vec3f, ra : f32, hgt : f32, rb : f32,
+         r0 : vec3f, r1 : vec3f, r2 : vec3f) -> PHit {
+  var h : PHit;
+  h.ok = false;
+  if (hgt <= 0.0) { return h; }
+  let lo = toLocal(r0, r1, r2, ro - c);
+  let ld = toLocal(r0, r1, r2, rd);
+  let k = (rb - ra) / hgt;
+  let m = ra + k * lo.z;
+  let n = k * ld.z;
+  let A = ld.x * ld.x + ld.y * ld.y - n * n;
+  let B = 2.0 * (lo.x * ld.x + lo.y * ld.y - m * n);
+  let C = lo.x * lo.x + lo.y * lo.y - m * m;
+  var best = 1.0e9;
+  var nl = vec3f(0.0);
+  var got = false;
+  for (var s = 0; s < 2; s = s + 1) {
+    var t = -1.0;
+    if (abs(A) > 1e-10) {
+      let disc = B * B - 4.0 * A * C;
+      if (disc < 0.0) { continue; }
+      let sq = sqrt(disc);
+      t = select((-B + sq) / (2.0 * A), (-B - sq) / (2.0 * A), s == 0);
+    } else if (s == 0 && abs(B) > 1e-12) {
+      t = -C / B;
+    } else { continue; }
+    if (t < 1e-4 || t >= best) { continue; }
+    let z = lo.z + ld.z * t;
+    if (z < 0.0 || z > hgt) { continue; }
+    let x = lo.x + ld.x * t;
+    let y = lo.y + ld.y * t;
+    let R = ra + k * z;
+    let len = max(length(vec3f(x, y, k * R)), 1e-6);
+    best = t;
+    nl = vec3f(x / len, y / len, -k * R / len);
+    got = true;
+  }
+  if (abs(ld.z) > 1e-9) {
+    for (var e = 0; e < 2; e = e + 1) {
+      let zc = select(hgt, 0.0, e == 0);
+      let rc = select(rb, ra, e == 0);
+      let ns = select(1.0, -1.0, e == 0);
+      if (rc <= 0.0) { continue; }
+      let t = (zc - lo.z) / ld.z;
+      if (t < 1e-4 || t >= best) { continue; }
+      let x = lo.x + ld.x * t;
+      let y = lo.y + ld.y * t;
+      if (x * x + y * y > rc * rc) { continue; }
+      best = t;
+      nl = vec3f(0.0, 0.0, ns);
+      got = true;
+    }
+  }
+  if (!got) { return h; }
+  h.t = best;
+  h.n = toWorld(r0, r1, r2, nl);
+  h.ok = true;
+  return h;
+}
+
+// A stone: a bounding sphere with hashed flat cuts taken out of it. The
+// cuts are in world space and do not turn with the part, which is what the
+// reference tracer does - a hashed shape has no meaningful orientation.
+fn pFacet(ro : vec3f, rd : vec3f, c : vec3f, rr : f32,
+          sa : u32, sb : u32) -> PHit {
+  var h : PHit;
+  h.ok = false;
+  let bs = hitSphere(ro, rd, c, rr);
+  if (bs.y <= 1e-4) { return h; }
+  var tmin = max(bs.x, 1e-4);
+  var tmax = bs.y;
+  var nrm = (ro + rd * tmin - c) / rr;
+  for (var k = 0; k < ${PROPS.FACES}; k = k + 1) {
+    let h1 = arnd(sa, k * 2);
+    let h2 = arnd(sa, k * 2 + 1);
+    let z = h1 * 2.0 - 1.0;
+    let ang = h2 * 6.2831853;
+    let sr = sqrt(max(0.0, 1.0 - z * z));
+    let pn = vec3f(cos(ang) * sr, sin(ang) * sr, z);
+    let cut = rr * (${PROPS.CUT_MIN} + arnd(sb, k) * ${PROPS.CUT_MAX - PROPS.CUT_MIN});
+    let dn = dot(pn, rd);
+    let po = dot(pn, ro - c) - cut;
+    if (abs(dn) < 1e-9) {
+      if (po > 0.0) { return h; }
+      continue;
+    }
+    let t = -po / dn;
+    if (dn < 0.0) {
+      if (t > tmin) { tmin = t; nrm = pn; }
+    } else {
+      tmax = min(tmax, t);
+    }
+    if (tmin > tmax) { return h; }
+  }
+  h.t = tmin;
+  h.n = nrm;
+  h.ok = true;
+  return h;
 }
 
 // -------- primitives --------
@@ -872,6 +1102,62 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       else { side.y = side.y + dD.y; mapY = mapY + sgn.y; }
     }
     if (ended) { break; }
+  }
+  return o;
+}
+
+// Everything standing near the camera. One sphere test throws away a whole
+// building; only the ones a ray actually strikes are opened up.
+fn traceSteads(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
+  var o : Obj;
+  o.ok = false; o.canopy = false; o.alpha = 1.0; o.emissive = 0.0; o.tExit = 0.0;
+  var best = tMax;
+  let nb = i32(U.steadCount);
+  for (var b = 0; b < nb; b = b + 1) {
+    let hd = steadHead[b * 2];
+    let rg = steadHead[b * 2 + 1];
+    let bs = hitSphere(ro, rd, hd.xyz, hd.w);
+    if (bs.y <= 0.001 || bs.x > best) { continue; }
+    let first = i32(rg.x);
+    let cnt = i32(rg.y);
+    for (var i = 0; i < cnt; i = i + 1) {
+      let base = (first + i) * 5;
+      let v0 = steadPrim[base];
+      let v1 = steadPrim[base + 1];
+      let m0 = steadPrim[base + 2];
+      let m1 = steadPrim[base + 3];
+      let m2 = steadPrim[base + 4];
+      let kind = i32(v0.w);
+      var ph : PHit;
+      ph.ok = false;
+      if (kind == 0) {
+        ph = pBox(ro, rd, v0.xyz, v1.xyz, m0.xyz, m1.xyz, m2.xyz);
+      } else if (kind == 1) {
+        ph = pCyl(ro, rd, v0.xyz, v1.x, v1.y, m0.xyz, m1.xyz, m2.xyz);
+      } else if (kind == 2) {
+        let hs = hitSphere(ro, rd, v0.xyz, v1.x);
+        var t = hs.x;
+        if (t < 1e-4) { t = hs.y; }
+        if (t > 1e-4) {
+          ph.t = t;
+          ph.n = (ro + rd * t - v0.xyz) / v1.x;
+          ph.ok = true;
+        }
+      } else if (kind == 3) {
+        ph = pCone(ro, rd, v0.xyz, v1.x, v1.y, v1.z, m0.xyz, m1.xyz, m2.xyz);
+      } else {
+        ph = pFacet(ro, rd, v0.xyz, v1.x, bitcast<u32>(m0.w), bitcast<u32>(m1.w));
+      }
+      if (ph.ok && ph.t < best) {
+        best = ph.t;
+        let mi = i32(v1.w);
+        o.t = ph.t;
+        o.n = normalize(ph.n);
+        o.albedo = amatColour(mi);
+        o.emissive = amatEmit(mi);
+        o.canopy = false; o.alpha = 1.0; o.ok = true;
+      }
+    }
   }
   return o;
 }
@@ -1170,9 +1456,17 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
         hit.emissive = 0.55;
         hit.spec = 0.8;
       } else if (m == MAT_ORE) {
-        // warm copper up top, cold iron deeper down
-        hit.albedo = select(vec3f(0.52, 0.55, 0.60), vec3f(0.62, 0.42, 0.30),
-                            p.z > ${MATS.IRON_Z});
+        // cold iron deep, and above it whichever metal this country holds:
+        // warm copper as before, or the pale grey of tin where the ground
+        // carries it. Seeing which one you are standing over is the whole
+        // point - it is what tells a traveller they have arrived.
+        if (p.z < ${MATS.IRON_Z}) {
+          hit.albedo = vec3f(0.52, 0.55, 0.60);
+        } else if (tinCountry(p.xy)) {
+          hit.albedo = vec3f(0.74, 0.76, 0.72);
+        } else {
+          hit.albedo = vec3f(0.62, 0.42, 0.30);
+        }
         hit.emissive = 0.05;
         hit.spec = 0.35;
       } else if (m == MAT_DIRT) {
@@ -1238,6 +1532,16 @@ fn trace(ro : vec3f, rd : vec3f) -> Hit {
       hit.spec = 0.0;
       hit.cave = false;
       hit.ok = true;
+    }
+
+    // what people built, on the same footing as a tree
+    let sb = traceSteads(ro, rd, hit.t);
+    if (sb.ok && sb.t < hit.t) {
+      hit.t = sb.t;
+      hit.n = sb.n;
+      hit.albedo = sb.albedo;
+      hit.canopy = false; hit.alpha = 1.0; hit.emissive = sb.emissive;
+      hit.spec = 0.0; hit.cave = false; hit.ok = true;
     }
 
     // entities: articulated creatures (none live yet; machinery kept)

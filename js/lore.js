@@ -1,124 +1,180 @@
-// The people who cut the halls.
+// The record, read off the chronicle instead of written.
 //
-// Nothing here is authored: a seed gives a civilisation its name, its
-// founder, the thing it dug up, and the way it ended, and the inscriptions
-// are generated from those facts. Two runs of the same seed tell exactly the
-// same story, and a different seed tells a different one.
+// A hall belongs to whichever people had a settlement nearest to it, and
+// what is cut into its pillars is drawn from that people's own event log:
+// real names, real years, real causes, and nothing that did not happen.
+// Two runs of a seed cut the same words, and none of it is stored.
 //
-// The record is laid out by DEPTH. Band -1 carries the founding, -2 the
-// digging, -3 the end - so reading the story in order means going down,
-// which is the whole reason the caves are there.
-// 1st, 2nd, 3rd, 4th - and 11th through 13th, which break the pattern
-function ord(n) {
-  const t = n % 100;
-  if (t >= 11 && t <= 13) return n + 'th';
-  return n + (['th', 'st', 'nd', 'rd'][n % 10] || 'th');
-}
-
+// Depth still lays a life out in order - within the people a hall belongs
+// to, band -1 carries their beginning, -2 the middle of their time, -3 the
+// end of it - so going down still reads a story front to back. But WHOSE
+// story depends on where you went down. Two entrances a few hundred units
+// apart can belong to two peoples and two thousand years, which is the
+// whole reason to try another one.
 const Lore = {
-  HEAD: ['kar', 'dun', 'mor', 'thal', 'ves', 'gor', 'bal', 'rin', 'oth',
-         'urd', 'kel', 'zar', 'mun', 'fel', 'has', 'tor', 'bre', 'skal'],
-  TAIL: ['az', 'ok', 'ur', 'eth', 'im', 'ash', 'orn', 'ul', 'ek', 'ir',
-         'and', 'uz', 'in', 'ad', 'oth', 'esk'],
+  S: null,
+  WIDTH: 46,     // the widest a cut line may be, panel included
+  REACH: 1400,   // world units from a hall to the nearest settlement before
+                 // nobody's record covers it and the pillars are blank
 
-  cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); },
-
-  // pick from a table by hash, so every name is a function of the seed
-  pick(tbl, a, b) {
-    return tbl[jsUhash((a ^ (CFG.SEED >>> 0)) >>> 0, b >>> 0) % tbl.length];
+  init() {
+    if (!this.S) this.S = Chronicle.run();
+    return this.S;
   },
 
-  name(a, b) { return this.cap(this.pick(this.HEAD, a, b) + this.pick(this.TAIL, a, b + 1)); },
-  longName(a, b) {
-    return this.cap(this.pick(this.HEAD, a, b) + this.pick(this.HEAD, a, b + 7) +
-                    this.pick(this.TAIL, a, b + 3));
+  // ---- which people cut this hall ----
+
+  // Nearest settlement to a point, over the whole span - a place that stood
+  // for four centuries and fell is as much a claim on the ground as one
+  // still standing.
+  nearestSite(x, y) {
+    const S = this.init();
+    let best = null, bd = Infinity;
+    for (const s of S.sites) {
+      const d = (s.x - x) ** 2 + (s.y - y) ** 2;
+      if (d < bd) { bd = d; best = s; }
+    }
+    return (best && bd <= this.REACH * this.REACH) ? best : null;
   },
 
-  // The one civilisation this world remembers. Everything the inscriptions
-  // say is drawn from here, so they agree with each other.
-  civ() {
-    if (this._civ) return this._civ;
-    const h = (n) => jsUhash((CFG.SEED >>> 0), n >>> 0);
-    const FOUND = ['a vein of copper', 'a spring that ran warm',
-                   'stone that split clean', 'a cave already cut'];
-    const DEEP = ['the Hollow', 'the Pale Seam', 'the Quiet', 'the Blue Fire',
-                  'the Door', 'the Long Vein'];
-    const END = ['the water came', 'the lamps went out and stayed out',
-                 'the deep gallery answered', 'the stone began to move',
-                 'nothing came up the stair again'];
-    this._civ = {
-      name: this.longName(1, 2),
-      people: this.name(3, 4) + 'ai',
-      founder: this.name(5, 6),
-      last: this.name(7, 8),
-      delve: this.name(9, 10),
-      found: FOUND[h(11) % FOUND.length],
-      deep: DEEP[h(12) % DEEP.length],
-      end: END[h(13) % END.length],
-      years: 120 + (h(14) % 400),
-      depth: 3 + (h(15) % 6),
-    };
-    return this._civ;
+  // The hall's owners: the site nearest its anchor, the people who held it,
+  // and the slice of their life this depth belongs to. Null where the
+  // chronicle simply does not reach - the region is finite and the world
+  // is not, so far enough out the halls are nobody's.
+  hall(cx, cy, k) {
+    const a = hallAt(cx, cy, k);
+    if (!a) return null;
+    const site = this.nearestSite(a.ax, a.ay);
+    if (!site) return null;
+    const S = this.S;
+    const p = S.peoples[site.people];
+    const from = p.rise;
+    const to = p.fell >= 0 ? p.fell : S.now;
+    // band -1 shallowest is the beginning, -3 deepest is the end
+    const i = Math.max(0, Math.min(2, -k - 1));
+    const span = Math.max(1, (to - from) / 3);
+    return { site, people: p, from: from + i * span, to: from + (i + 1) * span };
   },
 
-  // Beats of the story, by depth band. Each hall gets one, chosen by its
-  // own cell, so a band's halls between them tell that chapter.
-  BEATS: {
-    '-1': [
-      c => [`${c.name} began here.`,
-            `${c.founder} found ${c.found} and called it enough.`,
-            `We were ${c.people}. We cut downward because we could.`],
-      c => [`In the ${ord(c.years)} year the upper halls were finished.`,
-            `Every lamp was lit. ${c.founder} walked them all in a day`,
-            `and said the walls would outlast the walkers.`],
-      c => [`We traded metal upward and took grain down.`,
-            `The sky-folk had no name for us that we liked,`,
-            `so we kept our own: ${c.people}.`],
-      c => [`Here the first stair was cut, by hand, in the dark.`,
-            `${c.founder} cut the first step and the last of that flight.`],
-    ],
-    '-2': [
-      c => [`${c.delve} took the lower cut.`,
-            `The stone rings hollow below this floor.`,
-            `We are told this is only water. It is not water.`],
-      c => [`We reached ${c.deep} in the ${ord(c.years + 40)} year.`,
-            `${c.founder}'s law said seal it and set a watch.`,
-            `We did not seal it.`],
-      c => [`The lamps burn blue in the deep gallery.`,
-            `No one will say why. ${c.delve} has stopped going down.`],
-      c => [`Count the galleries. There should be ${c.depth}.`,
-            `There are more than ${c.depth}.`,
-            `We did not cut the others.`],
-    ],
-    '-3': [
-      c => [`${c.last} held the gate here.`,
-            `Long enough for the upper halls to empty. Not longer.`],
-      c => [`It came up through the floor we cut.`,
-            `We made the road for it. That is the whole of it.`],
-      c => [`If you are reading this, ${c.end}.`,
-            `Do not go below the ${ord(c.depth)} gallery.`,
-            `We did. There is no one left to say what we found.`],
-      c => [`${c.name} ended in the ${ord(c.years + 90)} year.`,
-            `${c.last} wrote this and put down the chisel.`,
-            `We were ${c.people}. We were here.`],
-    ],
+  // ---- turning what happened into what is cut ----
+
+  // The sim's causes are labels; a wall wants them said. Anything not
+  // listed already reads as English and is used as it stands.
+  CAUSE: {
+    left: 'everybody had gone',
+    sacked: 'it was sacked',
+    flood: 'the water came',
+    plague: 'plague',
+    famine: 'famine',
+    'the deep': 'the deep',
   },
 
-  // the inscription cut into the pillars of one hall
+
+  name(S, id) { return id === null || id === undefined ? null : S.figures[id].name; },
+
+  // One event, as a line on a wall. The chronicle's deed events already
+  // carry their own prose ('made the grey gold brooch of Vesesk'), so those
+  // only need whoever did it put in front; the structural ones are given a
+  // voice here.
+  line(S, e, p) {
+    const who = this.name(S, e.who);
+    const site = e.place !== null && S.sites[e.place] ? S.sites[e.place].name : null;
+    const other = (e.target !== null && S.peoples[e.target]) ? S.peoples[e.target].name : null;
+    switch (e.action) {
+      case 'founded':   return 'We set the first stone of ' + site + '.';
+      case 'settled':   return 'We put people into ' + site + '.';
+      case 'settled far out at':
+        return 'We sent settlers a long way, to ' + site + '.';
+      case 'roaded':    return 'We cut the road to ' + site + '.';
+      case 'bridged':   return 'We threw a bridge for the road to ' + site + '.';
+      case 'fortified': return 'We walled ' + site + ' against them.';
+      case 'declared war on': return 'We took up arms against ' + other +
+        (e.cause ? ', over ' + e.cause + '.' : '.');
+      case 'made peace with': return 'We put down our arms.';
+      case 'lost the war to': return other + ' broke us in the field.';
+      case 'won a battle at': return who ? who + ' won the day for us.'
+                                         : 'The day went to us.';
+      case 'fell at':   return who + ' did not come off the field.';
+      case 'was buried': return who + ' was laid in the ground' +
+        (e.cause && e.cause !== 'age' ? ', taken by ' + e.cause + '.' : '.');
+      case 'never came back': return who + ' walked out and did not return.';
+      case 'opened a grave of': return 'We opened what an older people buried.';
+      case 'made':      return null;   // the deed line says it better
+      case 'ended':
+        // A site's ending is logged against whoever ENDED it, not whoever
+        // held it - so on our own wall the same event is either our loss
+        // or our doing, and it has to be read the right way round.
+        if (e.place !== null && site) {
+          return S.sites[e.place].people === p.id
+            ? site + ' was lost: ' + (this.CAUSE[e.cause] || e.cause) + '.'
+            : 'We broke ' + site + ' and took the ground.';
+        }
+        return null;
+      default:
+        // a deed: prose already, and it wants a name in front of it
+        return who ? who + ' ' + e.action + '.' : null;
+    }
+  },
+
+  // What a hall's pillars say. Deterministic in the hall's own cell, so the
+  // same wall always carries the same words.
   inscription(cx, cy, k) {
-    const band = String(Math.max(-3, Math.min(-1, k)));
-    const beats = this.BEATS[band] || this.BEATS['-1'];
-    const i = jsUhash(((cx * 31) ^ (cy * 17)) >>> 0,
-                      ((8 + k) ^ (CFG.SEED >>> 0)) >>> 0) % beats.length;
-    const c = this.civ();
-    return { band: k, key: cx + ',' + cy + ',' + k, lines: beats[i](c) };
+    const h = this.hall(cx, cy, k);
+    const key = cx + ',' + cy + ',' + k;
+    if (!h) return null;
+    const S = this.S;
+    const p = h.people;
+    // Compose first, then measure. The year rides in front of every line,
+    // so a cap on the text alone lets the finished line overrun the panel.
+    const pool = [];
+    for (const e of S.events) {
+      if (e.actor !== p.id || e.t < h.from || e.t > h.to) continue;
+      const l = this.line(S, e, p);
+      if (!l) continue;
+      const cut = String(e.t).padStart(4) + '  ' + l;
+      if (cut.length <= this.WIDTH) pool.push(cut);
+    }
+    const head = [p.name + ', ' + p.kind + '.', ''];
+    if (!pool.length) {
+      return { band: k, key, people: p.id,
+               lines: head.concat(['Nothing of these years was cut here.']) };
+    }
+    // a window into the pool, placed by the hall's own cell
+    const want = Math.min(4, pool.length);
+    const start = jsUhash(((cx * 31) ^ (cy * 17)) >>> 0,
+                          ((8 + k) ^ (CFG.SEED >>> 0)) >>> 0) % pool.length;
+    const lines = head.slice();
+    for (let i = 0; i < want; i++) lines.push(pool[(start + i) % pool.length]);
+    // and how it ended for them, at the deepest band
+    if (k <= -3) {
+      lines.push('');
+      lines.push(p.fell >= 0
+        ? 'Ended in the ' + this.ord(p.fell) + ' year, by ' + (p.cause || 'decline') + '.'
+        : 'They are up there still.');
+    }
+    return { band: k, key, people: p.id, lines };
   },
 
-  // what a hall calls itself
+  // 1st, 2nd, 3rd, 4th - and 11th through 13th, which break the pattern
+  ord(n) {
+    const t = n % 100;
+    if (t >= 11 && t <= 13) return n + 'th';
+    return n + (['th', 'st', 'nd', 'rd'][n % 10] || 'th');
+  },
+
+  // what a hall calls itself: the settlement it answers to, and its shape
+  KIND: ['Hall', 'Gallery', 'Delve', 'Vault', 'Stair-house', 'Cut'],
   hallName(cx, cy, k) {
-    const c = this.civ();
-    const KIND = ['Hall', 'Gallery', 'Delve', 'Vault', 'Stair-house', 'Cut'];
-    const kind = KIND[jsUhash((cx ^ 0x9e37) >>> 0, (cy ^ (8 + k)) >>> 0) % KIND.length];
-    return `the ${kind} of ${this.name(cx + 40, cy + 90 + k)}`;
+    const h = this.hall(cx, cy, k);
+    const kind = this.KIND[jsUhash((cx ^ 0x9e37) >>> 0, (cy ^ (8 + k)) >>> 0) %
+                           this.KIND.length];
+    return h ? 'the ' + kind + ' of ' + h.site.name : 'an unnamed ' + kind.toLowerCase();
+  },
+
+  // Who the world remembers, for the journal. Not one civilisation any
+  // more - whichever peoples the player has actually read.
+  peopleName(id) {
+    const S = this.init();
+    return S.peoples[id] ? S.peoples[id].name : 'someone';
   },
 };

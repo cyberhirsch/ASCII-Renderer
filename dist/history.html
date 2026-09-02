@@ -1,0 +1,3107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Chronicle</title>
+<style>
+  /* One committed world, not two themes: the game this belongs to is a black
+     terminal, and a light-mode chronicle would be a different instrument. */
+  :root {
+    --bg:#08090b; --plate:#000; --ink:#c8d2dc; --dim:#566070; --line:#1b1f26;
+    --edge:#2a3039; --loss:#d4674a; --water:#0d1a26;
+    /* the six peoples, running bone -> copper -> bronze -> iron */
+    --p0:#b08968; --p1:#c97b4a; --p2:#c9a94b;
+    --p3:#6fae8f; --p4:#5f96c4; --p5:#8f7fc0;
+    /* The game's own stack, taken from js/webgpu/atlas.js, which rasterizes
+       the glyph sheet with `bold Npx "Consolas", "Courier New", monospace`.
+       The record used to be set in a serif to separate it from the
+       instrument; that distinction is carried by weight and colour now,
+       because matching the game matters more than my nicety. */
+    --mono:"Consolas","Courier New",monospace;
+    --serif:"Consolas","Courier New",monospace;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; }
+  body {
+    background:var(--bg); color:var(--ink);
+    font:400 12px/1.6 var(--mono);
+    display:flex; gap:26px; padding:22px; align-items:flex-start;
+  }
+  #left { flex:0 0 auto; display:flex; flex-direction:column; gap:12px; }
+  #right { flex:1 1 auto; min-width:0; align-self:stretch;
+           display:flex; flex-direction:column; gap:10px; }
+
+  .eyebrow { font-size:10px; font-weight:600; letter-spacing:.2em;
+             text-transform:uppercase; color:var(--dim); margin:0; }
+  h1 { font:500 15px/1.3 var(--mono); letter-spacing:.02em; margin:2px 0 0; }
+
+  /* the map sits like a mounted survey plate */
+  .plate { position:relative; align-self:flex-start;
+           border:1px solid var(--edge); outline:1px solid var(--line);
+           outline-offset:3px; background:var(--plate); }
+  canvas { display:block; }
+
+  /* the three lifespans double as the timeline: same playhead, same gesture */
+  #peoples { display:flex; flex-direction:column; gap:9px; margin-top:4px; }
+  .lane { display:flex; gap:8px; align-items:baseline; font-size:11px; }
+  .lane b { font-weight:500; }
+  .sw { width:8px; height:8px; flex:0 0 auto; border-radius:1px; align-self:center; }
+  .era { position:relative; height:6px; background:#0f1216;
+         border:1px solid var(--line); margin:3px 0 2px; }
+  .era i { position:absolute; top:0; bottom:0; display:block; opacity:.8; }
+  .era b { position:absolute; top:-3px; bottom:-3px; width:1px;
+           background:var(--ink); opacity:.9; }
+  .yr { font-size:11px; }
+
+  .bar { display:flex; align-items:center; gap:9px; }
+  input[type=range] { flex:1; accent-color:var(--p1); height:2px; }
+  input[type=number] { background:#0f1216; color:var(--ink);
+    border:1px solid var(--line); padding:4px 7px; width:10ch; font:inherit; }
+  button { background:#0f1216; color:var(--dim); border:1px solid var(--line);
+    padding:4px 12px; font:500 11px/1 var(--mono); letter-spacing:.06em;
+    text-transform:uppercase; cursor:pointer; transition:border-color .12s, color .12s; }
+  button:hover { border-color:var(--edge); color:var(--ink); }
+  .sp { padding:4px 10px; }
+  .sp.on { border-color:var(--p1); color:var(--ink); }
+  label { display:flex; align-items:center; gap:5px; cursor:pointer; font-size:11px; }
+  :focus-visible { outline:1px solid var(--p1); outline-offset:2px; }
+
+  #year, #alive, #stat { font-variant-numeric:tabular-nums; }
+  #year { min-width:10ch; }
+
+  /* the record speaks in serif; the instrument speaks in mono */
+  .panel { border:1px solid var(--line); padding:11px 13px; overflow:auto; }
+  #pick { flex:0 0 auto; max-height:230px; font:400 13px/1.6 var(--serif); }
+  #heroes { flex:0 0 auto; max-height:170px; }
+  #legends { flex:0 0 auto; max-height:200px; font:400 13px/1.55 var(--serif); }
+  .thing { margin-bottom:7px; }
+  .thing i { font-style:italic; color:var(--ink); opacity:.85; }
+  #pick .lane { font:inherit; }
+  #log { flex:1 1 auto; min-height:200px; font:400 13px/1.65 var(--serif); }
+  .dim { color:var(--dim); }
+  .ev { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:1px 0; }
+  .t { color:var(--dim); display:inline-block; width:5ch; text-align:right;
+       margin-right:10px; font:400 11px/1 var(--mono);
+       font-variant-numeric:tabular-nums; }
+  /* The game's own screen: 1920x1080 over 12x22 cells is 160x49 characters,
+     and a cell is 0.545 as wide as it is tall. A monospace advance is 0.6em,
+     so line-height 1.1em reproduces that cell aspect exactly. */
+  #ascii { display:none; margin:0; white-space:pre; color:var(--ink);
+    font:bold 14px/1.1 var(--mono); letter-spacing:0; }
+  body.ascii #left, body.ascii #right { display:none; }
+  body.ascii #ascii { display:block; }
+  body.ascii { display:block; }
+  .hint { position:fixed; right:14px; bottom:10px; color:var(--dim); font-size:11px; }
+  @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+<pre id="ascii"></pre>
+<div class="hint">x — the game's own screen</div>
+<div id="left">
+  <div>
+    <p class="eyebrow">Ascii World</p>
+    <h1>The Chronicle</h1>
+  </div>
+  <div class="plate"><canvas id="map" width="704" height="704"></canvas></div>
+  <div id="peoples"></div>
+  <div class="bar">
+    <button id="play">play</button>
+    <input type="range" id="scrub" min="0" max="2000" value="2000" step="5" aria-label="year">
+    <span id="year">year 2000</span>
+  </div>
+  <div class="bar">
+    <span class="dim">speed</span>
+    <button class="sp" data-sp="1">slow</button>
+    <button class="sp on" data-sp="4">even</button>
+    <button class="sp" data-sp="14">fast</button>
+    <label class="dim"><input type="checkbox" id="loop" checked>loop</label>
+    <label class="dim"><input type="checkbox" id="finds">finds</label>
+    <label class="dim"><input type="checkbox" id="seen">seen</label>
+    <span class="dim" id="alive"></span>
+  </div>
+  <div class="bar">
+    <span class="dim">seed</span>
+    <input type="number" id="seed" min="0" max="16777215" aria-label="world seed">
+    <button id="go">run</button>
+    <span id="stat" class="dim"></span>
+  </div>
+</div>
+<div id="right">
+  <p class="eyebrow">What stands there</p>
+  <div class="panel" id="pick"></div>
+  <p class="eyebrow">Who is remembered</p>
+  <div class="panel" id="heroes"></div>
+  <p class="eyebrow">What is remembered</p>
+  <div class="panel" id="legends"></div>
+  <p class="eyebrow">What happened</p>
+  <div class="panel" id="log"></div>
+</div>
+
+<script>
+// ---- js/config.js ----
+// Global configuration. Plain script, shared global scope (inlined at build time).
+const CFG = {
+  PLANE_LEN: 0.85,    // tan(horizontal half-FOV)
+  MAX_DIST: 140,      // ray cutoff (world units); beyond fades to haze
+  EYE: 1.55,          // camera height above ground
+  SEED: 8151623,      // world seed; MUST stay below 2^24 so the f32 uniform
+                      // carries it exactly and CPU and GPU agree on the world
+  // rendering. Character cells are sized like a terminal's: monospace glyphs
+  // are roughly 0.55x as wide as tall, so cells are taller than wide - and
+  // bigger overall, which is both the look and far fewer rays.
+  CELL_W: 12,         // CSS px per cell, horizontal
+  CELL_H: 22,         // CSS px per cell, vertical
+  MONO: false,        // uniform grayscale; devmode + M toggles
+  GLYPH_SET: 'ascii', // ascii | symbols  (C cycles)
+  // Tone curve applied before glyph selection. White sits at the luminance
+  // sunlit surfaces actually reach; above that the brightest glyphs go
+  // unused, below it they clip and the highlights flatten.
+  TONE_BLACK: 0.0,
+  TONE_WHITE: 0.90,
+  TONE_GAMMA: 0.9,
+  RAW: false,         // debug: show the shaded image without glyph mapping (X)
+  SUN_AZ: 0.9,        // sun azimuth at t=0 (rad); the cycle sweeps from here
+  DAY_LEN: 3000,      // seconds for a full day/night cycle (50 min)
+  // Twilight reach, as sin(sun elevation) either side of the horizon. Low
+  // sun means a long path through air, so the light warms well before it
+  // touches down - the golden hour is long on the way in, and the afterglow
+  // that follows it is shorter.
+  WARM_UP: 0.70,      // ~44 deg up: the light starts to turn warm
+  WARM_DOWN: 0.26,    // ~15 deg down: the last of the warmth is gone
+  DUSK_UP: 0.30,      // the red band in the sky, before the sun is down
+  DUSK_DOWN: 0.26,    // and lingering after it
+  // night sky: the moon's angular radius and how thick its crescent is
+  MOON_R: 0.085,
+  MOON_CRESC: 0.42,   // offset of the shadow disc, in moon radii
+  MOON_GLOW: 0.10,    // halo strength around the disc
+  MOON_GLOW_P: 400,   // halo tightness; higher is a smaller halo
+  MOON_DARK: 0.04,    // earthshine lift on the unlit limb
+  STAR_GRID: 90,      // celestial grid fineness; higher = smaller stars
+  STAR_RARE: 0.976,   // hash above this is a star, at full dark
+  // Stars do not arrive at sunset. The first show once the sun is a little
+  // way under, and the field fills in as it sinks further - these are the
+  // two depths, measured as sin(elevation) below the horizon.
+  STAR_DUSK: 0.06,    // ~3.5 deg down: the brightest few
+  STAR_DARK: 0.30,    // ~17 deg down: the whole field
+  // The celestial pole the sky turns about. Tilted well off vertical, so
+  // stars rise and set instead of just wheeling around the zenith.
+  STAR_POLE_AZ: 2.2,
+  STAR_POLE_EL: 0.85,
+  SHADOW: 0.04,       // sun contribution inside full shadow (sky light only)
+  // wide sun disc: broad, soft penumbrae that grow with distance from the
+  // occluder (0.05 rad is the "soft shadows" look; the real sun is 0.0047)
+  SUN_ANGLE: 0.05,
+  SUN_SAMPLES: 16,    // shadow rays per pixel
+  AO_SAMPLES: 32,     // hemisphere rays per pixel
+  AO_RADIUS: 9,       // AO ray length, world units
+  TREE_REACH: 2,      // cells a canopy may overhang; sets the search radius
+  // lighting LOD: full shadow/AO ray budgets inside SHADE_NEAR, then a hard
+  // cut - beyond it no shadow or AO rays are traced at all, no taper
+  SHADE_NEAR: 40,
+  SHADE_FAR: 40.001,
+  // terrain: a continuous, infinite heightfield evaluated in the shader and
+  // mirrored in js/util.js. No stored grid, no world bounds.
+  TERRAIN_MAX: 16,    // amplitude: highest possible ground, world units
+  // caves: view distance underground; rays in cave air stop here and fade out
+  CAVE_VIEW: 60,
+  // headlamp: camera-attached light so unlit caves are explorable; falls off
+  // with distance, only applied to underground hits
+  LAMP: 0.6,
+  // Overlay cell value meaning "render nothing here". 0 is transparent (the
+  // scene's own glyph) and 32 is a space (also the scene's glyph), so clear
+  // air around UI text needs a code of its own.
+  UI_BLANK: 31,
+  // underground ray caps: sun is mostly absent down there, so penumbra
+  // fidelity is worth less than frame time
+  CAVE_SUN: 8,
+  CAVE_AO: 16,
+  SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
+  // entities (future creatures); buffer capacity fixed, live count per frame
+  MAX_ENTS: 64,
+  // digging: resident edit-chunk capacity on the GPU, reach and scoop size
+  EDIT_MAX: 32,
+  DIG_REACH: 3.5,
+  DIG_R: 1.1,
+  // Buildings resident on the GPU. A village is some hundreds of primitives
+  // and only what is near the camera is sent, so these are a view budget
+  // rather than a world limit.
+  STEAD_HEAD: 256,    // buildings
+  STEAD_PRIM: 8192,   // primitives across all of them
+  STEAD_STEP: 40,     // world units the player moves before a repack
+  // cleared cells visible to the GPU (nearest the player); farther cleared
+  // props may visually reappear until this rises in a later phase
+  REMOVED_MAX: 64,
+};
+
+// The seed is the whole world, so it is worth being able to hand someone
+// else. ?seed=<n> picks one at load; the console's "seed" command sets that
+// query and reloads, because every module caches something derived from it.
+// Out-of-range values are ignored rather than silently wrapped: a seed at or
+// above 2^24 does not survive the f32 uniform, and CPU and GPU would then
+// disagree about where the world is.
+const SEED_MAX = 1 << 24;
+CFG.SEED_DEFAULT = CFG.SEED;
+(function () {
+  if (typeof location === 'undefined' || !location.search) return;
+  const m = /[?&]seed=([^&]*)/.exec(location.search);
+  if (!m) return;
+  const v = Number(decodeURIComponent(m[1]));
+  if (Number.isInteger(v) && v >= 0 && v < SEED_MAX) CFG.SEED = v;
+  else console.warn('[ASCII World] ignoring seed ' + m[1] +
+    ' - must be a whole number in 0..' + (SEED_MAX - 1));
+})();
+
+// Saves are per world: two seeds are two different places, and their digs,
+// inventories and records have nothing to say to each other. The default
+// seed keeps the original unsuffixed keys so an existing save survives.
+function saveKey(base) {
+  return CFG.SEED === CFG.SEED_DEFAULT ? base : base + ':' + CFG.SEED;
+}
+</script>
+<script>
+// ---- js/util.js ----
+// Hashing / noise / terrain — bit-compatible mirrors of the WGSL functions in
+// js/webgpu/shaders.js. The GPU draws the world from these functions and the
+// CPU collides against them, so any change MUST be made in both places.
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function smoothstep(a, b, x) {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+// u32 hash, identical to WGSL uhash (Math.imul == u32 multiply wrap)
+function jsUhash(a, b) {
+  let n = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663)) >>> 0;
+  n = (n ^ (n >>> 13)) >>> 0;
+  n = Math.imul(n, 1274126177) >>> 0;
+  return (n ^ (n >>> 16)) >>> 0;
+}
+
+function hash01(x, y, s) {
+  return jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, s >>> 0) / 4294967296;
+}
+
+function hash2i(x, y, s) {
+  const h = jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, s >>> 0);
+  return [(h & 0xffff) / 65536, ((h >>> 16) & 0xffff) / 65536];
+}
+
+// 2D value noise, smoothstep-interpolated — mirror of WGSL vn2
+function vn2(px, py, s) {
+  const ix = Math.floor(px), iy = Math.floor(py);
+  const fx = px - ix, fy = py - iy;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = hash01(ix, iy, s), b = hash01(ix + 1, iy, s);
+  const c = hash01(ix, iy + 1, s), d = hash01(ix + 1, iy + 1, s);
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+
+// -------- terrain height — mirror of WGSL terrainH --------
+// Shape constants live here and are interpolated into the WGSL, never
+// retyped there. Two hand-kept copies of terrainH is the divergence that
+// would move the ground out from under collision without changing a single
+// pixel of the sky, so scripts/verify.js rejects a bare float literal in
+// either mirrored function.
+const TERR = {
+  WARP_F: 0.013,     // frequency of the field that warps the domain
+  WARP_OX: 37.0,     // and the offsets that decorrelate its two channels
+  WARP_OY: 91.0,
+  WARP_A: 1.4,       // warp amplitude, in base-frequency units
+  BASE_F: 0.023,     // base frequency of the heightfield
+  OCT1_W: 0.62,      // octave weights, summing to 1
+  OCT2_W: 0.26,
+  OCT3_W: 0.12,
+  OCT2_F: 2.7,       // and their frequency ratios
+  OCT3_F: 6.1,
+  RIDGE: 1.55,       // exponent: deepens valleys, sharpens ridges
+};
+
+function terrainH(px, py) {
+  const s = CFG.SEED >>> 0;
+  const wx = vn2(px * TERR.WARP_F, py * TERR.WARP_F, (s ^ 0x77) >>> 0);
+  const wy = vn2(px * TERR.WARP_F + TERR.WARP_OX,
+                 py * TERR.WARP_F + TERR.WARP_OY, (s ^ 0x77) >>> 0);
+  const qx = px * TERR.BASE_F + (wx - 0.5) * TERR.WARP_A;
+  const qy = py * TERR.BASE_F + (wy - 0.5) * TERR.WARP_A;
+  let h = vn2(qx, qy, s) * TERR.OCT1_W +
+          vn2(qx * TERR.OCT2_F, qy * TERR.OCT2_F, (s ^ 0x9e37) >>> 0) * TERR.OCT2_W +
+          vn2(qx * TERR.OCT3_F, qy * TERR.OCT3_F, (s ^ 0x51ed) >>> 0) * TERR.OCT3_W;
+  h = Math.pow(h, TERR.RIDGE);
+  return h * CFG.TERRAIN_MAX;
+}
+
+// -------- caves: shared constants + density mirror --------
+// These values are interpolated into the WGSL template in
+// js/webgpu/shaders.js, so shader and mirror cannot disagree
+// (scripts/verify.js enforces the convention: no literal CAVE_/EDIT_
+// constants in the shader source).
+const CAVES = {
+  STEP: 0.3,     // primary-ray march step through cave air, world units
+  STEPS: 200,    // primary-ray march budget (STEP * STEPS = CAVE_VIEW)
+  TSTEP: 0.55,   // occlusion-ray march step through cave air
+  TSTEPS: 14,    // occlusion-ray march budget
+  BAND: 12,      // depth-band height; band k spans [k*BAND, k*BAND+BAND)
+  TOP: -1,       // no natural void above this z (highest ceiling is -1.4)
+  BOT: -36,      // deepest band floor for the slice; extensible downward
+  MASK_F: 0.006, // cave-region mask frequency (regions ~150 u across)
+  MASK_LO: 0.62, // mask gate: smoothstep(LO, HI, noise)
+  MASK_HI: 0.70,
+  FLOOR_F: 0.05, // floor ramp frequency; FLOOR_A * FLOOR_F * 1.5 bounds the
+  FLOOR_A: 3.0,  // slope (~0.23 = 13 deg) - walkability is by construction
+  PASS_F: 0.045, // passage isoline frequency (winding at ~20 u scale)
+  PASS_F2: 0.062,// second isoline family; crossings knit the network together
+  CHAM_F: 0.02,  // chamber noise frequency
+  PASS_W: 0.06,  // passage half-width in isoline value units
+  CHAM_W: 0.15,  // extra half-width inside chambers
+  PASS_SCALE: 15,// value units -> approx world units (1 / (1.5 * PASS_F))
+  // shafts: helical stair wells, one candidate per SHAFT_E cell per band
+  // pair. Compact by design so the field only ever checks its own cell.
+  SHAFT_E: 48,     // placement cell size; anchor jitter keeps R inside it
+  SHAFT_R: 3.0,    // outer radius of the stair well
+  SHAFT_RIN: 0.75, // central column radius (keeps the stair "supported")
+  SHAFT_PITCH: 3.4,// vertical drop per full turn; grade ~16 deg mid-stair
+  SHAFT_OPEN: 0.7, // open fraction of each turn (headroom 2.4, slab 1.0)
+  // carved halls: one candidate per HALL_E cell per band; flat-floored
+  // rotated rooms with a pillar lattice, entered wherever the natural
+  // passage network punctures their walls
+  HALL_E: 96,      // placement cell size
+  PIL_S: 3.5,      // pillar lattice spacing inside halls
+  PIL_R: 0.45,     // pillar half-width (square pillars, Chebyshev metric)
+  // edits: sparse voxel-delta overlay (digging); see js/edits.js
+  EDIT_CHUNK: 32,      // voxels per chunk edge
+  EDIT_VOX: 0.5,       // voxel size, world units
+  EDIT_SCALE: 0.03125, // stored i8 -> density units (1/32; range ~±4)
+  EDIT_WORDS: 8192,    // u32 words per chunk (32^3 / 4)
+};
+
+// Band floor: a low-frequency ramp whose slope is bounded by construction.
+// Mirror of WGSL caveFloor. KEEP IN SYNC.
+function caveFloor(k, x, y) {
+  const s = CFG.SEED >>> 0;
+  const bs = (s ^ ((8 + k) * 0x9E37)) >>> 0;
+  return k * CAVES.BAND + 1.6 +
+         vn2(x * CAVES.FLOOR_F, y * CAVES.FLOOR_F, (bs ^ 0x0F1D) >>> 0) *
+         CAVES.FLOOR_A;
+}
+
+// Natural banded void: positive inside carved space (roughly world-unit
+// magnitude), very negative elsewhere. Passages are the near-median isolines
+// of a per-band value noise - the median level set of a random field
+// percolates, so the network is connected across the infinite plane. gz is
+// terrainH(x, y), passed in because every caller already has it.
+// Mirror of WGSL naturalV. KEEP IN SYNC.
+function naturalV(x, y, z, gz) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return -1e9;
+  const s = CFG.SEED >>> 0;
+  const m = vn2(x * CAVES.MASK_F, y * CAVES.MASK_F, (s ^ 0x33AA) >>> 0);
+  const gate = smoothstep(CAVES.MASK_LO, CAVES.MASK_HI, m) *
+               smoothstep(CFG.SEA_LEVEL + 0.5, CFG.SEA_LEVEL + 1.5, gz);
+  if (gate <= 0.001) return -1e9;
+  const k = Math.floor(z / CAVES.BAND);
+  const bs = (s ^ ((8 + k) * 0x9E37)) >>> 0;
+  const fz = caveFloor(k, x, y);
+  // two isoline families: each percolates on its own, and their crossings
+  // knit isolated contour rings into one network with natural junctions
+  const n1 = vn2(x * CAVES.PASS_F, y * CAVES.PASS_F, (bs ^ 0x5EA5) >>> 0);
+  const n2 = vn2(x * CAVES.PASS_F2, y * CAVES.PASS_F2, (bs ^ 0x7A3B) >>> 0);
+  const iso = Math.min(Math.abs(n1 - 0.5), Math.abs(n2 - 0.5));
+  const c = vn2(x * CAVES.CHAM_F, y * CAVES.CHAM_F, (bs ^ 0xC4A6) >>> 0);
+  const wide = smoothstep(0.60, 0.85, c);
+  const w = (CAVES.PASS_W + wide * CAVES.CHAM_W) * gate;
+  const ceilH = 2.6 + wide * 3.4;
+  const h = (w - iso) * CAVES.PASS_SCALE;
+  const vz = Math.min(z - fz, fz + ceilH - z);
+  return Math.min(h, vz);
+}
+
+// Shaft candidate for placement cell (cx, cy) and band pair j (0 = surface
+// into band -1, j >= 1 = band -j into band -(j+1)). Presence requires a
+// passage at the anchor in the destination band (both bands for j >= 1), so
+// a shaft always daylights into the network. When (px, py) is given, the
+// cheap position/distance precheck runs before any expensive validation -
+// the order the WGSL twin relies on. Mirror of WGSL shaftAt. KEEP IN SYNC.
+function shaftAt(cx, cy, j, px, py) {
+  const s = CFG.SEED >>> 0;
+  const sj = (s ^ (0x51F7 + j * 0x9101)) >>> 0;
+  if (hash01(cx, cy, sj) >= (j === 0 ? 0.55 : 0.8)) return null;
+  const h2 = hash2i(cx, cy, (sj ^ 0x2C55) >>> 0);
+  const ax = cx * CAVES.SHAFT_E + 10 + h2[0] * 28;
+  const ay = cy * CAVES.SHAFT_E + 10 + h2[1] * 28;
+  if (px !== undefined) {
+    const dx = px - ax, dy = py - ay;
+    if (dx * dx + dy * dy > (CAVES.SHAFT_R + 2.0) * (CAVES.SHAFT_R + 2.0)) {
+      return null;
+    }
+  }
+  const gz = terrainH(ax, ay);
+  let zTop, zBot;
+  if (j === 0) {
+    if (gz < CFG.SEA_LEVEL + 1.2 || gz > 11.0) return null;
+    zTop = gz;
+    zBot = caveFloor(-1, ax, ay);
+    if (naturalV(ax, ay, zBot + 1.2, gz) < 0.15) return null;
+  } else {
+    zTop = caveFloor(-j, ax, ay) + 0.2;
+    zBot = caveFloor(-j - 1, ax, ay);
+    if (naturalV(ax, ay, zTop + 1.0, gz) < 0.15) return null;
+    if (naturalV(ax, ay, zBot + 1.2, gz) < 0.15) return null;
+  }
+  const phase = hash01(cx, cy, (sj ^ 0x77AD) >>> 0);
+  return { ax, ay, zTop, zBot, phase };
+}
+
+// Helical stair carve for one shaft: an annulus between the central column
+// and the outer wall, with a helicoid floor - SHAFT_OPEN of every turn is
+// air, the rest is the stair slab. Open to the sky just above the mouth;
+// the bottom join is the band's own passage carving through the outer wall.
+// Returns [void, slab]: slab > 0 marks stair steps that must STAY rock even
+// where a tall passage or chamber would carve them away - without it the
+// last turns of the stair dissolve into the band void and leave a drop.
+// Mirror of WGSL helixV. KEEP IN SYNC.
+function helixV(x, y, z, a) {
+  const dx = x - a.ax, dy = y - a.ay;
+  const r = Math.hypot(dx, dy);
+  const radial = Math.min(CAVES.SHAFT_R - r, r - CAVES.SHAFT_RIN);
+  const u = (a.zTop - z) / CAVES.SHAFT_PITCH +
+            Math.atan2(dy, dx) / (2 * Math.PI) + a.phase;
+  const su = u - Math.floor(u);
+  const sv = Math.min(su, CAVES.SHAFT_OPEN - su) * CAVES.SHAFT_PITCH;
+  let v = Math.min(radial, sv);
+  // entry apron: a flat ledge ring around the mouth, stepped into from any
+  // rim angle; the stair top emerges from it and winds down
+  const apron = Math.min(CAVES.SHAFT_R + 1.8 - r,
+                         z - (a.zTop - 0.45));
+  v = Math.max(v, apron);
+  v = Math.min(v, a.zTop + 1.5 - z, z - (a.zBot - 0.2));
+  const slab = Math.min(radial,
+    Math.min(su - CAVES.SHAFT_OPEN, 1 - su) * CAVES.SHAFT_PITCH,
+    Math.min(z - (a.zBot - 0.2), (a.zTop - 0.45) - z));
+  return [v, slab];
+}
+
+// All shafts near (x, y): anchors are jittered to keep the well inside its
+// own placement cell, so only that one cell is ever checked - the cheap
+// presence hash is all the hot march loops pay when no shaft is near.
+// Returns [void, slab] aggregated over the band pairs.
+// Mirror of WGSL shaftV. KEEP IN SYNC.
+function shaftV(x, y, z, gz) {
+  if (z > gz + 1.5) return [-1e9, -1e9];
+  const cx = Math.floor(x / CAVES.SHAFT_E);
+  const cy = Math.floor(y / CAVES.SHAFT_E);
+  let v = -1e9, slab = -1e9;
+  for (let j = 0; j < 3; j++) {
+    const a = shaftAt(cx, cy, j, x, y);
+    if (!a) continue;
+    if (z > a.zTop + 1.5 || z < a.zBot - 0.5) continue;
+    const h = helixV(x, y, z, a);
+    if (h[0] > v) v = h[0];
+    if (h[1] > slab) slab = h[1];
+  }
+  return [v, slab];
+}
+
+// Hall candidate for placement cell (cx, cy) in band k. Presence requires a
+// passage at the anchor, so the network's own tunnels puncture the walls -
+// those punctures are the doorways. The floor is FLAT: it sits at the
+// anchor's band-floor height across the whole room, which against the noisy
+// passages is what reads as "someone carved this".
+// Mirror of WGSL hallAt. KEEP IN SYNC.
+function hallAt(cx, cy, k, px, py) {
+  const s = CFG.SEED >>> 0;
+  const sk = (s ^ (0xB00B + (8 + k) * 0x8121)) >>> 0;
+  if (hash01(cx, cy, sk) >= 0.5) return null;
+  const h2 = hash2i(cx, cy, (sk ^ 0x39D1) >>> 0);
+  const ax = cx * CAVES.HALL_E + 16 + h2[0] * 64;
+  const ay = cy * CAVES.HALL_E + 16 + h2[1] * 64;
+  if (px !== undefined) {
+    const dx = px - ax, dy = py - ay;
+    if (dx * dx + dy * dy > 17 * 17) return null;
+  }
+  const h3 = hash2i(cx, cy, (sk ^ 0x5A5A) >>> 0);
+  const gz = terrainH(ax, ay);
+  const fz0 = caveFloor(k, ax, ay);
+  if (naturalV(ax, ay, fz0 + 1.2, gz) < 0.15) return null;
+  const ang = hash01(cx, cy, (sk ^ 0x11EF) >>> 0) * Math.PI;
+  return {
+    ax, ay,
+    hx: 6 + h3[0] * 5,
+    hy: 5 + h3[1] * 3,
+    hgt: 3.2 + h3[0] * 1.3,
+    fz0,
+    ca: Math.cos(ang), sa: Math.sin(ang),
+  };
+}
+
+// Hall carve near (x, y, z): returns [void, slab]. The room void is a plain
+// rotated box; the flat floor slab and the pillar lattice ride the slab
+// channel, so neither a chamber below nor one overlapping can dissolve them
+// - freestanding pillars in a cavern are exactly the ruin look wanted.
+// Mirror of WGSL hallV. KEEP IN SYNC.
+function hallV(x, y, z, gz) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return [-1e9, -1e9];
+  const k = Math.floor(z / CAVES.BAND);
+  const cx = Math.floor(x / CAVES.HALL_E);
+  const cy = Math.floor(y / CAVES.HALL_E);
+  const a = hallAt(cx, cy, k, x, y);
+  if (!a) return [-1e9, -1e9];
+  const dx = x - a.ax, dy = y - a.ay;
+  const lx = a.ca * dx + a.sa * dy;
+  const ly = -a.sa * dx + a.ca * dy;
+  const inBox = Math.min(a.hx - Math.abs(lx), a.hy - Math.abs(ly));
+  const v = Math.min(inBox, z - a.fz0, a.fz0 + a.hgt - z);
+  // pillar lattice in the local frame (kept clear of the walls)
+  const S = CAVES.PIL_S;
+  const frac = t => t - Math.floor(t);
+  const mx = Math.abs(frac(lx / S + 0.5) - 0.5) * S;
+  const my = Math.abs(frac(ly / S + 0.5) - 0.5) * S;
+  const cheb = Math.max(mx, my);
+  const pillar = Math.min(CAVES.PIL_R - cheb, inBox - 1.2,
+                          z - (a.fz0 - 0.1), a.fz0 + a.hgt - z);
+  const floorSlab = Math.min(inBox, a.fz0 - z, z - (a.fz0 - 0.9));
+  return [v, Math.max(pillar, floorSlab)];
+}
+
+// Which hall stands at this point, or null. CPU only - the shader needs the
+// geometry, but only the gameplay side needs to know whose hall it is.
+function hallIdAt(x, y, z) {
+  if (z >= CAVES.TOP || z < CAVES.BOT) return null;
+  const k = Math.floor(z / CAVES.BAND);
+  const cx = Math.floor(x / CAVES.HALL_E);
+  const cy = Math.floor(y / CAVES.HALL_E);
+  const a = hallAt(cx, cy, k, x, y);
+  return a ? { cx, cy, k, hall: a } : null;
+}
+
+// Cave void field: natural banded passages plus carved shafts and halls,
+// minus the protected solids (stair slabs, hall floors, pillars), which win
+// over every carve. Mirror of WGSL caveV. KEEP IN SYNC.
+function caveV(x, y, z, gz) {
+  const sv = shaftV(x, y, z, gz);
+  const hv = hallV(x, y, z, gz);
+  const v = Math.max(naturalV(x, y, z, gz), sv[0], hv[0]);
+  return Math.min(v, -Math.max(sv[1], hv[1]));
+}
+
+// Layered density, the one authority on what is solid: positive in rock,
+// negative in air. The sparse edit overlay (digging) adds on top - the
+// typeof guard keeps this file loadable before js/edits.js and in node
+// tests that do not exercise edits. Mirror of WGSL solidD. KEEP IN SYNC.
+function solidD(x, y, z) {
+  const gz = terrainH(x, y);
+  let d = Math.min(gz - z, -caveV(x, y, z, gz));
+  if (typeof Edits !== 'undefined' && Edits.bounds) d += Edits.sample(x, y, z);
+  return d;
+}
+
+// -------- 3D value noise — mirror of WGSL vnoise --------
+// Used by the shader for canopy erosion and glow lichen; mirrored here so
+// the examine system can recognise a lichen patch at a hit point.
+function jsUhash3(x, y, z) {
+  return jsUhash(jsUhash(x >>> 0, y >>> 0) >>> 0, z >>> 0) >>> 0;
+}
+
+function vnoise(px, py, pz) {
+  const ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz);
+  const fx = px - ix, fy = py - iy, fz = pz - iz;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const uz = fz * fz * (3 - 2 * fz);
+  const s = 1 / 4294967296;
+  const c000 = jsUhash3(ix, iy, iz) * s;
+  const c100 = jsUhash3(ix + 1, iy, iz) * s;
+  const c010 = jsUhash3(ix, iy + 1, iz) * s;
+  const c110 = jsUhash3(ix + 1, iy + 1, iz) * s;
+  const c001 = jsUhash3(ix, iy, iz + 1) * s;
+  const c101 = jsUhash3(ix + 1, iy, iz + 1) * s;
+  const c011 = jsUhash3(ix, iy + 1, iz + 1) * s;
+  const c111 = jsUhash3(ix + 1, iy + 1, iz + 1) * s;
+  const x00 = c000 + (c100 - c000) * ux;
+  const x10 = c010 + (c110 - c010) * ux;
+  const x01 = c001 + (c101 - c001) * ux;
+  const x11 = c011 + (c111 - c011) * ux;
+  const y0 = x00 + (x10 - x00) * uy;
+  const y1 = x01 + (x11 - x01) * uy;
+  return y0 + (y1 - y0) * uz;
+}
+
+// -------- ground materials: what the world is made of, per point --------
+// Shared constants, interpolated into the WGSL template in
+// js/webgpu/shaders.js so shader and mirror cannot disagree (scripts/
+// verify.js enforces the no-literals convention for MAT_ too).
+const MATS = {
+  DIRT: 0, STONE: 1, ORE: 2, GEM: 3,
+  SOIL_MAX: 2.4,    // soil depth on dead-flat ground, world units
+  SOIL_STEEP: 0.55, // slope where soil runs out entirely (bare rock)
+  SOIL_FLAT: 0.12,  // slope below which soil is at full depth
+  SOIL_F: 0.09,     // soil-depth variation frequency
+  SOIL_VAR: 1.2,    // soil-depth variation amplitude
+  ORE_F: 0.021,     // ore-region frequency: most rock holds nothing
+  ORE_GATE: 0.62,   // region noise above this can carry veins
+  VEIN_F: 0.15,     // vein frequency; two isosurfaces meet in curves
+  VEIN_W: 0.05,     // vein half-width in noise-value units
+  GEM_CORE: 0.22,   // fraction of the vein width that is gem, not ore
+  GEM_Z: -6.0,      // gems only form below this depth
+  IRON_Z: -14.0,    // ore below this is iron; above it, place decides
+  // Tin does not lie with copper. Cassiterite belongs to its own granites,
+  // and that one geological fact is why the bronze age ran on trade rather
+  // than on local smelting - the two halves of the alloy come out of two
+  // different parts of the country. Here it is a province: a coarse 2D
+  // field, so tin is somewhere you GO, not something you happen to hit.
+  TIN_F: 0.004,     // province frequency: a 250 u noise cell, which runs
+                    // out to provinces several hundred units across
+  TIN_GATE: 0.70,   // province noise above this carries tin instead of copper
+  // Glow lichen on cave rock. Mirrored: the shader decides where it grows
+  // and World.classifySolid decides where you may pick it, so a divergence
+  // here offers a harvest off a bare wall.
+  LICHEN_F: 1.9,    // frequency of the patch noise
+  LICHEN_T: 0.8,    // noise above this is a patch
+  LICHEN_GAIN: 9.0, // how fast a patch brightens past the threshold
+};
+
+// Soil depth below the surface at (x, y): deep on flats, zero on steep
+// ground - which is why hillsides read as bare rock. Mirror of WGSL
+// soilDepth. KEEP IN SYNC.
+function soilDepth(x, y) {
+  const e = 0.5;
+  const hx = terrainH(x + e, y) - terrainH(x - e, y);
+  const hy = terrainH(x, y + e) - terrainH(x, y - e);
+  const slope = Math.hypot(hx, hy) / (2 * e);
+  const d = smoothstep(MATS.SOIL_STEEP, MATS.SOIL_FLAT, slope) * MATS.SOIL_MAX +
+    (vn2(x * MATS.SOIL_F, y * MATS.SOIL_F, (CFG.SEED ^ 0xD117) >>> 0) - 0.5) *
+    MATS.SOIL_VAR;
+  return Math.max(d, 0);
+}
+
+// What a point of rock is: plain stone, an ore vein, or a gem pocket. Two
+// value-noise isosurfaces intersect along CURVES, not sheets - that is what
+// makes veins read as branching tubes threading the stone rather than
+// slabs. Gems sit in the very core of a deep vein. Mirror of WGSL rockMat.
+// KEEP IN SYNC.
+function rockMat(x, y, z) {
+  const o = (CFG.SEED & 0xff) * 0.7;
+  const reg = vnoise(x * MATS.ORE_F + 13 + o, y * MATS.ORE_F + 13,
+                     z * MATS.ORE_F + 13);
+  if (reg < MATS.ORE_GATE) return MATS.STONE;
+  const strength = (reg - MATS.ORE_GATE) / (1 - MATS.ORE_GATE);
+  const n1 = vnoise(x * MATS.VEIN_F + o, y * MATS.VEIN_F, z * MATS.VEIN_F);
+  const n2 = vnoise(x * MATS.VEIN_F + 41 + o, y * MATS.VEIN_F + 17,
+                    z * MATS.VEIN_F + 73);
+  const w = MATS.VEIN_W * strength;
+  const d1 = Math.abs(n1 - 0.5), d2 = Math.abs(n2 - 0.5);
+  if (d1 >= w || d2 >= w) return MATS.STONE;
+  if (z < MATS.GEM_Z && d1 < w * MATS.GEM_CORE && d2 < w * MATS.GEM_CORE) {
+    return MATS.GEM;
+  }
+  return MATS.ORE;
+}
+
+// Material at a world point. gz is terrainH(x, y) - every caller has it.
+// Mirror of WGSL matAt. KEEP IN SYNC.
+function matAt(x, y, z, gz) {
+  if (z > gz - soilDepth(x, y)) return MATS.DIRT;
+  return rockMat(x, y, z);
+}
+
+// Is this ground tin country? A pure function of where you are standing,
+// independent of whether there is any ore under it - the province is the
+// place, the vein is the luck. Mirror of WGSL tinCountry. KEEP IN SYNC.
+function tinCountry(x, y) {
+  return vn2(x * MATS.TIN_F, y * MATS.TIN_F, (CFG.SEED ^ 0x7104) >>> 0) >
+         MATS.TIN_GATE;
+}
+
+// Which metal a vein carries. Depth decides iron; above that the ground
+// does, which is what makes bronze the first thing in this world nobody can
+// make without leaving home.
+function oreItem(x, y, z) {
+  if (z < MATS.IRON_Z) return 'iron';
+  return tinCountry(x, y) ? 'tin' : 'copper';
+}
+
+// species index for the tree anchored in cell (ix, iy) - deterministic,
+// independent of the placement hash so size and species do not correlate
+function treeSpecies(ix, iy) {
+  return Math.min(2, Math.floor(hash01(ix, iy, (CFG.SEED ^ 0x5EED) >>> 0) * 3));
+}
+
+// -------- loose stones and boulders. KEEP IN SYNC with the WGSL --------
+// One prop per cell, hash-placed like the trees, so the cleared-cell set in
+// js/removed.js covers all of them with a single "ix,iy".
+const PROPS = {
+  STONE_D: 0.055,   // chance a cell holds a loose stone
+  STONE_R: 0.13,    // stone bounding radius, plus a hashed share again
+  // View cutoffs, set from each prop's LARGEST possible size at the range
+  // where it stops covering even one character cell (a cell is ~0.0106 rad
+  // at the default field of view). Cut any nearer and a prop vanishes while
+  // it is still drawable, which reads as flicker as you walk.
+  STONE_VIEW: 52,   // biggest stone is under a cell past 49
+  ROCK_D: 0.011,    // chance a cell holds a boulder
+  ROCK_R: 0.68,     // boulder bounding radius, plus a hashed share again
+  ROCK_VIEW: 140,   // biggest boulder holds a cell to 256; MAX_DIST cuts first
+  // Stones are not spheres: each is a bounding sphere with this many flat
+  // cuts taken out of it, giving a faceted silhouette and flat per-face
+  // normals. Measured over 30 boulders, this leaves 89% of the surface flat
+  // - a low-poly read rather than a weathered one - and because every cut
+  // sits at least CUT_MIN of the radius out, no rock can be clipped away.
+  FACES: 11,
+  CUT_MIN: 0.48,
+  CUT_MAX: 0.78,
+  // The cuts mean a rock fills roughly this much of its bounding sphere, so
+  // collision has to use it or you would be stopped short of thin air.
+  SOLID: 0.8,
+};
+
+// A loose stone: small, sits on the ground, free to pick up by hand.
+// Mirror of WGSL stoneAt. KEEP IN SYNC.
+function stoneAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  if (hash01(ix, iy, (s ^ 0x570E) >>> 0) >= PROPS.STONE_D) return null;
+  const h2 = hash2i(ix, iy, (s ^ 0x5C0B) >>> 0);
+  const r = PROPS.STONE_R * (1 + h2[0]);
+  return { cx: ix + 0.2 + h2[0] * 0.6, cy: iy + 0.2 + h2[1] * 0.6, r };
+}
+
+// A boulder: too big to lift, wants a pickaxe, and blocks the way.
+// Mirror of WGSL rockAt. KEEP IN SYNC.
+function rockAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  if (hash01(ix, iy, (s ^ 0xB017) >>> 0) >= PROPS.ROCK_D) return null;
+  if (treeAt(ix, iy)) return null;        // one prop to a cell
+  const h2 = hash2i(ix, iy, (s ^ 0xB0DA) >>> 0);
+  const r = PROPS.ROCK_R * (1 + h2[0]);
+  return { cx: ix + 0.5, cy: iy + 0.5, r,
+           // sunk into the ground so it reads as bedded, not dropped
+           z: -r * 0.35 };
+}
+
+// -------- tree placement — mirror of WGSL treeAt --------
+// Shared with the shader the same way the terrain constants are: the
+// canopy's shape and its erosion noise are written down once. The erosion
+// numbers matter twice over, because the primary ray and the shadow ray
+// each carve the canopy's holes independently - if those two drifted, a
+// tree would shadow gaps the eye can see straight through.
+const TREE = {
+  FOREST_F: 0.021,   // frequency of the forest-region field
+  DENS_LO: 0.45,     // region gate: below LO is open ground
+  DENS_HI: 0.72,
+  DENS_A: 0.16,      // per-cell tree chance deep inside a forest
+  DENS_MIN: 0.004,   // and out on the open ground, the occasional lone tree
+  OFF: 0.3,          // anchor jitter within the cell
+  OFF_VAR: 0.4,
+  R_MIN: 1.0,        // canopy radius
+  R_VAR: 0.5,
+  TRUNK_H: 2.6,      // trunk height
+  TRUNK_H_VAR: 1.2,
+  TRUNK_R: 0.085,    // trunk radius: a constant plus a share of the canopy
+  TRUNK_R_K: 0.055,
+  CAN_Z: 0.55,       // canopy centre above the trunk top, in canopy radii
+  // canopy erosion: two octaves of 3D noise thin the sphere into foliage
+  DENS_F1: 2.6, DENS_W1: 0.75,
+  DENS_F2: 6.5, DENS_W2: 0.25,
+  EXT: 1.35,         // extinction along the chord through the canopy
+  EXT_MIN: 0.35,     // floor and gain applied to the density before it
+  EXT_K: 1.3,
+  ALPHA_MIN: 0.03,   // below this the canopy is a hole, not foliage
+};
+
+function treeAt(ix, iy) {
+  const s = CFG.SEED >>> 0;
+  const forest = vn2(ix * TREE.FOREST_F, iy * TREE.FOREST_F, (s ^ 0xF0F0) >>> 0);
+  const density = smoothstep(TREE.DENS_LO, TREE.DENS_HI, forest) * TREE.DENS_A +
+                  TREE.DENS_MIN;
+  if (hash01(ix, iy, (s ^ 0x7EE7) >>> 0) >= density) return null;
+  const h2 = hash2i(ix, iy, (s ^ 0xA11C) >>> 0);
+  const r = TREE.R_MIN + h2[0] * TREE.R_VAR;
+  return {
+    cx: ix + TREE.OFF + h2[0] * TREE.OFF_VAR,
+    cy: iy + TREE.OFF + h2[1] * TREE.OFF_VAR,
+    r,
+    trunkH: TREE.TRUNK_H + h2[1] * TREE.TRUNK_H_VAR,
+    trunkR: TREE.TRUNK_R + r * TREE.TRUNK_R_K,
+  };
+}
+</script>
+<script>
+// ---- js/chronicle.js ----
+// The chronicle: six thousand years of people on this ground, run rather
+// than written. Six peoples rise in turn, settle where the ground is
+// worth settling, cut roads between what they build, quarrel, fail, and
+// leave. Every ruin the game finds is the residue of something that
+// happened here, on a date, for a reason.
+//
+// Pure CPU and a pure function of CFG.SEED - no DOM, no storage, no clock.
+// Two runs of a seed agree down to the last abandoned farm, so the record
+// costs nothing on disk and nothing on the wire.
+//
+// The sim stores only what it cannot derive: sites, links and events, each
+// stamped with the year it happened. Territory, ruin stage and burial depth
+// are functions of a year you ask for, which is why the map can scrub.
+
+const HIST = {
+  CELL: 128,      // sim cell, world units; roads inherit this granularity
+  N: 64,          // cells per side. N * CELL is the width of the *settled*
+                  // world - the terrain runs on forever, only history stops.
+  SPAN: 6000,     // years simulated, ending at "now"
+  PEOPLES: 6,     // one culture cycle is roughly a thousand years, so six
+                  // millennia want six peoples, not one long-lived one
+
+  // Tick resolution is coarse in deep time and fine near now, because the
+  // player reads the recent past in detail and the deep past as strata.
+  TICK_OLD: 20, TICK_MID: 10, TICK_NEW: 5,
+  MID_FROM: 3600, NEW_FROM: 5700,
+
+  // settlement
+  CAP_POP: 900,      // carrying capacity of perfect ground
+  SEED_POP: 40,      // a site is founded at this size
+  GROW: 0.25,        // logistic growth per decade
+  SPAWN_POP: 260,    // a site this big can throw a daughter settlement
+  SPAWN_R: 7,        // and does it within this many cells
+  MAX_SITES: 18,     // per people, so the cast stays readable
+  MIN_SEP: 2,        // cells between any two sites
+  // Ore does not replace good ground, it multiplies it: a seam under a
+  // barren rock is worth less than the same seam under a field, because the
+  // people working it still have to eat. Scoring these as alternatives made
+  // every delving people build nothing but mines.
+  LIVE_FLOOR: 0.15,  // you can settle thin ground, but not nothing
+  ORE_PULL: 2.0,     // how far metal lifts a place, times how much they want it
+  MINE_T: 0.25,      // ore * delve above this and the place is dug, not farmed
+  SITE_MIN: 0.25,    // below this a place is worth neither food nor metal
+  RETURN: 0.6,       // chance a people comes back to the old heartland rather
+                     // than arriving somewhere of its own
+  ROOM: 9,           // cells from the region edge before a place counts as
+                     // having room to grow around it. Enough to discourage
+                     // the outer band, not so much that everyone huddles in
+                     // the middle - the aim is variety, not a bullseye.
+  PICK_SHARP: 3,     // how hard the weighted draw leans toward good ground
+  RESETTLE: 2.2,     // how much a later people is drawn to ground an earlier
+                     // one already used. This is what makes a tell, and it
+                     // is also the only reason the peoples ever meet.
+
+  // going out. A people settles only where it has been, so somebody has to
+  // go and look first - which is what stops the whole record happening in
+  // one valley, and gives the far ruins somebody to have built them.
+  KNOWN_HOME: 8,       // cells a people knows around its first site
+  KNOWN_SITE: 4,       // and around everything it builds after
+  EXPLORE: 0.34,       // chance a people sends an expedition, per tick, in prime
+  EXPLORE_LEN: 24,     // cells an expedition covers before turning for home
+  EXPLORE_SEE: 3,      // how wide a band it learns on the way
+  EXPLORE_LOST: 0.18,  // chance it does not come back
+  COLONY: 0.45,        // chance crowded people send settlers out instead of budding
+  COLONY_MIN: 9,       // a colony sits at least this far from anything of ours
+  CROWD_R: 6, CROWD_N: 4,   // this many of ours this close is too many
+
+  // roads
+  ROAD_R: 12,        // a new site links to a neighbour within this range
+  SLOPE_COST: 26,    // travel cost per unit of grade
+  WATER_COST: 6,     // crossing water: dear, but not so dear that a long
+                     // detour always wins - a short neck is worth a bridge
+  COLONY_ROAD: 30,   // a colony's road home may run much further than that
+  ROAD_DISCOUNT: 0.45, // reuse of an existing road, so routes bundle
+  BRIDGE_MIN: 1,     // water cells in a row before it is called a bridge
+
+  // trouble. Rates are per tick and climb as a people ages, so nobody
+  // simply grows forever; the fall is emergent, only the rise is scheduled.
+  WAR_BASE: 0.05, WAR_AGE: 0.16,
+  DISASTER: 0.035,
+  CONTACT: 14,       // cells between peoples before they can quarrel
+  COLLAPSE: 2,       // living sites below this and the people is finished
+  END_WINDOW: 250,   // the years before a fall that actually say what did it
+  BROKEN_SITES: 5,   // a people whose seat has been taken and who is down to
+                     // this many places does not get up again. Without it a
+                     // conquest could never finish anybody: decline ground
+                     // every people down to nothing first, and war was only
+                     // ever a footnote on the way.
+
+  // A people has a prime and then does not. Past it the ground is tired,
+  // no more daughters leave, and the small places are walked away from -
+  // which is what makes the three of them a succession instead of three
+  // neighbours who all happen to still be here.
+  PRIME: 700,
+  DECLINE: 700,      // years from the end of the prime to near-nothing
+  LEAVE_POP: 22,     // a site smaller than this is simply left
+
+  // people. Nobody is born into this record without a reason to be in it,
+  // which is what keeps the cast small enough to remember.
+  LIFE: 55, LIFE_VAR: 26, ADULT: 22,
+  MAX_FIGURES: 700,   // a seat turns over roughly every forty years, and
+                      // expeditions go out for as long as a people has the
+                      // vigour, so six millennia of six peoples is a long
+                      // roster. It must not bind: a starved cast means a
+                      // people with nobody at the head of it. The memorable
+                      // layer is S.heroes, not this.
+
+  // war. A war is a state, not an event: it is declared, fought over some
+  // years in battles that happen where the two peoples actually touch, and
+  // then it ends - by peace, or because one side is gone.
+  WAR_LEN: 90,        // years before peace becomes likely
+  PEACE: 0.30,        // chance per tick an old war ends
+  BATTLE: 0.55,       // chance of a battle per tick while at war
+  CMD_EDGE: 0.35,     // how far a good commander tilts the odds
+  CMD_FALLS: 0.45,    // chance the losing commander does not come back
+  TAKES_SITE: 0.40,   // chance a won battle takes the place it was fought for
+
+  // what a world remembers
+  HEROES: 24,         // how many people stay named
+  HERO_MIN: 6,        // and how much they must have done to
+  LEGENDS: 24,        // how many things keep a story attached to them
+
+  // making
+  MAKE: 0.40,         // chance a people makes something, per tick, in its prime
+  MAX_ARTIFACTS: 200,
+
+  // what the ground keeps
+  GRAVE_GOODS: 0.55,  // chance a notable death is buried with something
+  HOARD: 0.50,        // chance a sacked or plagued place hid what it had
+  VOTIVE: 0.10,       // offerings at the water's edge
+  ROB: 0.35,          // chance a later people digs up an older deposit
+  ROB_R: 3,           // cells within which they would find it
+  ROB_WAIT: 120,      // years before the dead stop being anybody's dead
+  HOLD_MAX: 3,        // nobody walks around with a museum. Without this a
+                      // people arriving on an old heartland robs every grave
+                      // near it in its founding year, and the one person alive
+                      // to receive them ends up holding the lot.
+
+  // decay. Timber goes first and stone stands; the roof is what matters,
+  // because a building starts sinking as soon as it stops shedding water.
+  ROOF_TIMBER: 45, ROOF_STONE: 130,
+  WALL_TIMBER: 260, WALL_STONE: 900,
+  SINK_MAX: 3.0,       // metres, on the softest ground: the deepest anything
+                       // ever gets. History lives in the topsoil - the caves
+                       // start at -12 and have nothing to do with it.
+  SINK_TAU: 2200,      // years to settle most of the way down. Tuned to the
+                       // span: too short and everything older than a couple
+                       // of millennia sits at the same depth, and depth
+                       // stops telling you the date.
+  SINK_SOFT: 1.0,      // full rate on deep soil
+  SINK_HARD: 0.2,      // and a fifth of it on bare rock, where a wall may
+                       // still be standing when everything else is under
+  GONE_DEPTH: 0.9,     // buried this far and there is nothing left to see
+};
+
+const Chronicle = {
+  // ---- deterministic draws ----
+  // Keyed by (salt, a, b), never a running sequence: a shared stream makes
+  // the whole sim order-dependent, and then adding one entity type quietly
+  // rewrites every world. This way the ticks can be reordered freely.
+  rnd(salt, a, b) {
+    return jsUhash(jsUhash((a | 0) >>> 0, (b | 0) >>> 0) ^ (CFG.SEED >>> 0),
+                   (salt | 0) >>> 0) / 4294967296;
+  },
+  pick(tbl, salt, a, b) { return tbl[Math.floor(this.rnd(salt, a, b) * tbl.length) % tbl.length]; },
+
+  // cell <-> world. Cell (0,0) is the far corner; the region is centred on
+  // the origin, which is where the player starts.
+  wx(i) { return (i - HIST.N / 2 + 0.5) * HIST.CELL; },
+  wy(j) { return (j - HIST.N / 2 + 0.5) * HIST.CELL; },
+  inBounds(i, j) { return i >= 0 && j >= 0 && i < HIST.N && j < HIST.N; },
+
+  // ---- the ground, before anyone is on it ----
+  // Suitability is a pure function of terrain: no simulation, no state. The
+  // chronicle only ever reads it, and it is what makes two seeds settle
+  // differently rather than the same shapes in different places.
+  survey() {
+    const N = HIST.N, n = N * N;
+    const g = {
+      h: new Float32Array(n), slope: new Float32Array(n),
+      water: new Uint8Array(n), coast: new Float32Array(n),
+      fert: new Float32Array(n), ore: new Float32Array(n),
+      cost: new Float32Array(n), soil: new Float32Array(n),
+    };
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const k = j * N + i, x = this.wx(i), y = this.wy(j);
+      const h = terrainH(x, y);
+      // Sampled at the scale the terrain actually varies at (~40 u), not at
+      // the cell width - a gradient taken across 128 u aliases the hills
+      // away and reports the whole region as flat.
+      const e = 6;
+      const hx = terrainH(x + e, y) - terrainH(x - e, y);
+      const hy = terrainH(x, y + e) - terrainH(x, y - e);
+      const slope = Math.hypot(hx, hy) / (2 * e);
+      g.h[k] = h;
+      g.slope[k] = slope;
+      g.water[k] = h < CFG.SEA_LEVEL ? 1 : 0;
+      g.soil[k] = soilDepth(x, y);
+      // ore follows the same region noise the rock does, so a mine sits
+      // where the player would actually find metal underfoot
+      g.ore[k] = Math.max(0, vn2(x * MATS.ORE_F, y * MATS.ORE_F,
+                                 (CFG.SEED ^ 0x0e) >>> 0) - MATS.ORE_GATE);
+      g.cost[k] = 1 + slope * HIST.SLOPE_COST + (g.water[k] ? HIST.WATER_COST : 0);
+    }
+    // distance to water, in cells, by a two-pass sweep - farms want a river
+    const INF = 1e9, d = new Float32Array(n).fill(INF);
+    for (let k = 0; k < n; k++) if (g.water[k]) d[k] = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const fwd = pass === 0;
+      for (let s = 0; s < n; s++) {
+        const k = fwd ? s : n - 1 - s;
+        const i = k % N, j = (k - i) / N;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+          if (!this.inBounds(i + di, j + dj)) continue;
+          const step = (di && dj) ? 1.414 : 1;
+          const v = d[(j + dj) * N + i + di] + step;
+          if (v < d[k]) d[k] = v;
+        }
+      }
+    }
+    for (let k = 0; k < n; k++) {
+      g.coast[k] = d[k];
+      if (g.water[k]) { g.fert[k] = 0; continue; }
+      // flat, low, watered, with soil on it. Steep ground grows nothing and
+      // the highest ground is bare rock, so settlement finds the valleys.
+      const flat = 1 - clamp(g.slope[k] / 0.45, 0, 1);
+      const low = 1 - clamp((g.h[k] - CFG.SEA_LEVEL) / (CFG.TERRAIN_MAX * 0.7), 0, 1);
+      const wet = 1 - clamp((d[k] - 1) / 9, 0, 1);
+      const dirt = clamp(g.soil[k] / MATS.SOIL_MAX, 0, 1);
+      g.fert[k] = flat * flat * (0.35 + 0.65 * low) * (0.3 + 0.7 * wet) * (0.4 + 0.6 * dirt);
+    }
+    return g;
+  },
+
+  // ---- who they are ----
+  // Each people gets its own mouth-feel, so a name tells you which of the
+  // three you are reading about before the date does.
+  // The peoples do not simply improve. The third of them is the height of
+  // this world - it works steel, builds further and makes more than anybody
+  // before or after - and when it goes, the working of steel goes with it.
+  // Everyone after falls back to what can be had without them: bronze while
+  // the old trade still runs, then iron, which anybody can dig.
+  // craft / reach / holds are multipliers on making, exploring and how many
+  // places a people can hold at once; 1 is ordinary.
+  // The peoples do not simply improve. The third of them is the height of
+  // this world - it works steel, builds further and makes more than anybody
+  // before or after - and when it goes, the working of steel goes with it.
+  // What follows is a long way down: delvers who go after iron because it is
+  // what is left, then a quiet folk who mostly farm and will not start a
+  // fight, and then you, holding a small place among all of it.
+  // craft / reach / holds / warlike are multipliers on making, exploring,
+  // how much a people can hold, and how readily it declares war; 1 is
+  // ordinary. `player` marks the people the game is played in.
+  PHON: [
+    { head: ['ur', 'anu', 'esh', 'ama', 'ish', 'ena', 'uru', 'ada'],
+      tail: ['ara', 'im', 'una', 'esh', 'ani', 'aya', 'ir'],
+      mat: 'timber', metal: 'bone', delve: 0.2, kind: 'the First People' },
+    { head: ['kra', 'tesh', 'bur', 'dag', 'vok', 'sil', 'mur', 'tak'],
+      tail: ['ak', 'osh', 'ur', 'eth', 'ik', 'un', 'ar'],
+      mat: 'timber', metal: 'copper', delve: 0.6, kind: 'the Ashfolk' },
+    { head: ['bran', 'coel', 'dun', 'gwyn', 'mael', 'tre', 'arv', 'cul'],
+      tail: ['ach', 'wyd', 'or', 'eth', 'ain', 'ynt', 'as'],
+      mat: 'stone', metal: 'steel', delve: 1.3, kind: 'the Kingdom',
+      craft: 1.9, reach: 1.45, holds: 1.35 },
+    { head: ['kar', 'thal', 'ves', 'gor', 'rin', 'urd', 'skal', 'mor'],
+      tail: ['az', 'orn', 'eth', 'ir', 'und', 'esk', 'ol'],
+      mat: 'stone', metal: 'iron', delve: 2.8, kind: 'the Delvers',
+      reach: 1.15 },
+    { head: ['lin', 'mera', 'sol', 'ael', 'nim', 'hala', 'ryn', 'ela'],
+      tail: ['wen', 'ith', 'nis', 'ryl', 'la', 'mor', 'sel', 'din'],
+      mat: 'timber', metal: 'copper', delve: 0.3, kind: 'the Quiet Folk',
+      craft: 0.55, warlike: 0.10, holds: 0.85 },
+    { head: ['hald', 'grim', 'stov', 'bre', 'fenn', 'oder', 'wulf', 'krast'],
+      tail: ['and', 'ung', 'ost', 'elm', 'ard', 'ick', 'orn'],
+      mat: 'stone', metal: 'iron', delve: 1.0, kind: 'the Last Hold',
+      craft: 0.7, holds: 0.6, player: true },
+  ],
+
+  cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); },
+
+  // A person or a place must not come out carrying the name of a people. The
+  // draw is fair either way, but "Vesesk, of the Vesesk" reads as a mistake.
+  freshName(S, p, salt, a) {
+    let nm = this.nameFor(p.id, salt, a);
+    for (let t = 0; t < 5; t++) {
+      let clash = false;
+      for (const q of S.peoples) if (q.name === nm) { clash = true; break; }
+      if (!clash) return nm;
+      nm = this.nameFor(p.id, salt + 101 + t * 37, a);
+    }
+    return nm;
+  },
+  nameFor(p, salt, a) {
+    const ph = this.PHON[p % this.PHON.length];
+    return this.cap(this.pick(ph.head, salt, a, p * 977 + 3) +
+                    this.pick(ph.tail, salt + 1, a, p * 977 + 11));
+  },
+
+  // ---- what they say came before the record ----
+  // The myth is generated last and reads the ground rather than shaping it:
+  // the highest place, the richest seam and the nearest water are already
+  // facts about this seed, and the story is fitted to them. That is the
+  // reverse of the intention in the PRD, where the myth biases the terrain -
+  // doing it that way needs the heightfield itself to change, which is
+  // shader work. What the player sees is the same either way: the myth names
+  // places that are really there, and gives a bearing you can walk.
+  ELDER: {
+    head: ['ush', 'keth', 'arn', 'thal', 'oum', 'vash', 'eng', 'mor', 'ekru', 'zaan'],
+    tail: ['mar', 'anu', 'oth', 'ira', 'esh', 'un', 'aal', 'ekh', 'ora', 'iel'],
+  },
+  elderName(a, b) {
+    return this.cap(this.pick(this.ELDER.head, 200, a, b) +
+                    this.pick(this.ELDER.tail, 201, a, b + 5));
+  },
+
+  // Eight points, by comparison rather than by atan2: the trigonometric
+  // functions are not guaranteed identical between engines, and the whole
+  // record has to come out the same everywhere.
+  bearing(i, j) {
+    const dx = i - HIST.N / 2, dy = j - HIST.N / 2;
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    if (ax < 1 && ay < 1) return 'under this very ground';
+    const ns = dy < 0 ? 'north' : 'south', ew = dx < 0 ? 'west' : 'east';
+    if (ax < ay * 0.45) return ns;
+    if (ay < ax * 0.45) return ew;
+    return ns + '-' + ew;
+  },
+  leagues(i, j) {
+    return Math.round(Math.hypot(i - HIST.N / 2, j - HIST.N / 2));
+  },
+
+  myth(S) {
+    const N = HIST.N;
+    let high = 0, deep = 0, wet = -1, wetD = 1e9;
+    for (let k = 0; k < N * N; k++) {
+      const i = k % N, j = (k - i) / N;
+      if (!S.grid.water[k] && S.grid.h[k] > S.grid.h[high]) high = k;
+      if (!S.grid.water[k] && S.grid.ore[k] > S.grid.ore[deep]) deep = k;
+      if (S.grid.water[k]) {
+        const d = Math.hypot(i - N / 2, j - N / 2);
+        if (d < wetD) { wetD = d; wet = k; }
+      }
+    }
+    const cell = k => ({ i: k % N, j: (k - (k % N)) / N });
+    const sky = this.elderName(1, 2), stone = this.elderName(3, 7), sea = this.elderName(11, 13);
+    const hi = cell(high), dp = cell(deep), wa = wet >= 0 ? cell(wet) : hi;
+    const took = this.pick(['swallowed it', 'took it down', 'closed a hand over it',
+                            'carried it under'], 202, 0, 0);
+    const why = this.pick(['out of hunger', 'out of envy', 'because it was bright',
+                           'for no reason anybody kept'], 203, 0, 0);
+    const cradle = S.peoples[0] && S.peoples[0].capital !== undefined
+      ? S.sites[S.peoples[0].capital] : null;
+    const m = {
+      powers: [{ name: sky, of: 'the sky' }, { name: stone, of: 'the stone' },
+               { name: sea, of: 'the water' }],
+      places: [
+        { name: 'the seat of ' + sky, i: hi.i, j: hi.j, what: 'the high ground' },
+        { name: 'the wound of ' + stone, i: dp.i, j: dp.j, what: 'where the metal is' },
+        { name: 'the tears of ' + sea, i: wa.i, j: wa.j, what: 'water' },
+      ],
+      lines: [],
+    };
+    m.lines = [
+      'Before the record there was ' + sky + ', who was the sky,',
+      'and ' + stone + ', who was the stone under it.',
+      'They did not quarrel. There was nothing yet to quarrel over.',
+      '',
+      'Then ' + sky + ' made a light and set it walking,',
+      'and ' + stone + ' ' + took + ', ' + why + '.',
+      '',
+      'Where ' + stone + ' lies with it still, the metal runs richest:',
+      'the ground ' + this.bearing(dp.i, dp.j) + ' of here, ' +
+        this.leagues(dp.i, dp.j) + ' leagues out.',
+      'The high place ' + this.bearing(hi.i, hi.j) + ' is where ' + sky + ' sat',
+      'and watched, and did not come down.',
+      '',
+      sea + ' came out of that wound and has not stopped since.',
+      'You can see the water ' + this.bearing(wa.i, wa.j) + ' of here.',
+    ];
+    if (cradle) m.lines.push('', 'The first people woke on the ground at ' + cradle.name + '.',
+                             'Everything after that is written down.');
+    m.lines = m.lines.map(l => l.replace(/[^ -~]/g, ''));
+    return m;
+  },
+
+  // ---- the run ----
+  run() {
+    const g = this.survey();
+    const S = {
+      grid: g, peoples: [], sites: [], links: [], events: [],
+      figures: [], wars: [], battles: [], artifacts: [], deposits: [],
+      heroes: [], legends: [],
+      player: -1,       // the people the game is played in, filled in below
+      known: [],        // per people, which cells anybody has actually seen
+      roaded: new Uint8Array(HIST.N * HIST.N),   // cells a road already crosses
+      now: HIST.SPAN, seed: CFG.SEED,
+    };
+    // Rises are staggered across the span with overlapping tails, so the
+    // peoples meet at their edges instead of politely taking turns.
+    // Spread so the last people is still young enough to be standing at
+    // "now", and so the tails overlap: they meet at their edges rather than
+    // politely taking turns.
+    const step = (HIST.SPAN - HIST.PRIME) / Math.max(1, HIST.PEOPLES - 1);
+    for (let p = 0; p < HIST.PEOPLES; p++) {
+      S.known.push(new Uint8Array(HIST.N * HIST.N));
+      S.peoples.push({
+        id: p, name: this.nameFor(p, 1, 7), kind: this.PHON[p].kind,
+        mat: this.PHON[p].mat, delve: this.PHON[p].delve,
+        metal: this.PHON[p].metal,
+        craft: this.PHON[p].craft || 1, reach: this.PHON[p].reach || 1,
+        holds: this.PHON[p].holds || 1, warlike: this.PHON[p].warlike || 1,
+        player: !!this.PHON[p].player,
+        rise: Math.floor(p * step + this.rnd(2, p, 0) * step * 0.18),
+        known: p,   // index into S.known
+        fell: -1, cause: null, founded: false, sites: [], peak: 0, broken: -1,
+      });
+    }
+    for (const p of S.peoples) if (p.player) S.player = p.id;
+    for (let y = 0; y < HIST.SPAN; ) {
+      const dt = y < HIST.MID_FROM ? HIST.TICK_OLD
+               : y < HIST.NEW_FROM ? HIST.TICK_MID : HIST.TICK_NEW;
+      this.tick(S, y, dt);
+      y += dt;
+    }
+    S.myth = this.myth(S);
+    this.crown(S);
+    return S;
+  },
+
+  log(S, t, actor, action, target, place, cause, who) {
+    S.events.push({ t, actor, action, target, place, cause,
+                    who: who === undefined ? null : who });
+  },
+
+  living(S, p, y) {
+    return p.sites.filter(id => {
+      const s = S.sites[id];
+      return s.founded <= y && (s.abandoned < 0 || s.abandoned > y);
+    });
+  },
+
+  tick(S, y, dt) {
+    this.age(S, y);
+    for (const w of S.wars) if (w.ended < 0) this.fight(S, w, y, dt);
+    for (const p of S.peoples) {
+      if (y < p.rise || p.fell >= 0) continue;
+      if (!p.founded) { this.found(S, p, y); continue; }
+      this.leader(S, p, y);
+      this.grow(S, p, y, dt);
+      this.expand(S, p, y);
+      if (this.vigour(p, y) > 0.6 && this.rnd(83, p.id, y) < HIST.MAKE * p.craft * (dt / 10))
+        this.make(S, p, y);
+      if (this.vigour(p, y) > 0.5 && this.rnd(97, p.id, y) < HIST.EXPLORE * (dt / 10))
+        this.explore(S, p, y);
+      this.trouble(S, p, y, dt);
+      // A people is finished when it is gone, or when it is a shadow of
+      // what it was - not merely because it is young and still small.
+      const live = this.living(S, p, y).length;
+      if (live > p.peak) p.peak = live;
+      const seatGone = p.broken >= 0 && p.broken >= y - HIST.END_WINDOW;
+      if (!p.player &&
+          (live === 0 || (live < HIST.COLLAPSE && p.peak > HIST.COLLAPSE) ||
+           (seatGone && live < HIST.BROKEN_SITES))) {
+        p.fell = y;
+        // What finished them is read off how their places actually went,
+        // rather than latched the first time they lost a field.
+        // Only the last years count. Every people abandons most of its
+        // places quietly on the way down, so weighing a whole lifetime
+        // buries the difference between fading out and being taken apart.
+        let sacked = 0, quiet = 0;
+        for (const id of p.sites) {
+          const st = S.sites[id];
+          if (st.abandoned < 0 || st.abandoned < y - HIST.END_WINDOW) continue;
+          if (st.cause === 'sacked') sacked++; else quiet++;
+        }
+        if (!sacked && !quiet) for (const id of p.sites) {
+          const st = S.sites[id];
+          if (st.abandoned < 0) continue;
+          if (st.cause === 'sacked') sacked++; else quiet++;
+        }
+        p.cause = (seatGone || (sacked > 0 && quiet === 0)) ? 'war'
+                : sacked > 0 ? 'war and decline' : 'decline';
+        this.log(S, y, p.id, 'ended', null, null, p.cause);
+        // Nobody after them can work it. A steel thing in a later grave was
+        // therefore taken out of one of theirs, which is a fact the ground
+        // states without anybody having to write it down.
+        if (p.metal !== 'bone' &&
+            !S.peoples.some(q => q.id !== p.id && q.metal === p.metal &&
+                                 (q.fell < 0 || q.fell > y)))
+          this.log(S, y, p.id, 'lost the craft', null, null, p.metal);
+      }
+    }
+  },
+
+  // The capital goes on the best unclaimed ground anywhere in the region.
+  // Deliberately global: a people's first choice is the thing everything
+  // else about them is downstream of.
+  // Where a people arrives. Deliberately not the single best cell in the
+  // region: an argmax over a noisy field lands as readily in a corner as
+  // anywhere, and a capital with a wall on two sides bends everything that
+  // follows it. So score the whole region, then draw from the good ground
+  // by weight - sharpened so the draw still strongly prefers good ground,
+  // but no longer always picks the one extreme cell.
+  found(S, p, y) {
+    // some peoples come back to the old heartland; some arrive somewhere
+    // of their own, which is what keeps six millennia off one hill
+    const back = this.rnd(10, p.id, 3) < HIST.RETURN;
+    const cand = [];
+    let total = 0;
+    for (let k = 0; k < HIST.N * HIST.N; k++) {
+      if (S.grid.water[k]) continue;
+      const i = k % HIST.N, j = (k - i) / HIST.N;
+      if (this.tooClose(S, i, j, y, HIST.MIN_SEP + 2)) continue;
+      // room to grow: the edge of the region is the edge of the world to a
+      // people who would otherwise spend their whole history against it
+      const edge = Math.min(i, j, HIST.N - 1 - i, HIST.N - 1 - j);
+      let sc = S.grid.fert[k] * (0.62 + 0.38 * clamp(edge / HIST.ROOM, 0, 1));
+      // Good ground stays good ground, for those who come looking for it:
+      // that is how a mound accumulates, and why anybody is ever close
+      // enough to anybody else to quarrel with them.
+      if (back) sc *= 1 + HIST.RESETTLE * this.pastSettlement(S, i, j, y);
+      if (sc <= 0) continue;
+      sc = Math.pow(sc, HIST.PICK_SHARP);
+      cand.push(k); total += sc;
+      cand.push(sc);            // flat pairs: cell, weight
+    }
+    if (!cand.length) return;
+    let r = this.rnd(11 + p.id, y, 7) * total, best = cand[0];
+    for (let n = 0; n < cand.length; n += 2) {
+      r -= cand[n + 1];
+      if (r <= 0) { best = cand[n]; break; }
+    }
+    const i = best % HIST.N, j = (best - i) / HIST.N;
+    const id = this.addSite(S, p, i, j, 'hold', y);
+    p.founded = true;
+    p.capital = id;
+    this.learn(S, p, i, j, HIST.KNOWN_HOME);
+    this.log(S, y, p.id, 'founded', id, id, null);
+    this.rob(S, p, y, i, j);   // only once the people has a head to hand it to
+  },
+
+  // How much of somebody else's ruin field lies under this cell.
+  pastSettlement(S, i, j, y) {
+    let n = 0;
+    for (const s of S.sites) {
+      if (s.founded > y) continue;
+      if (Math.abs(s.i - i) > 2 || Math.abs(s.j - j) > 2) continue;
+      n++;
+    }
+    return clamp(n / 3, 0, 1);
+  },
+
+  tooClose(S, i, j, y, sep) {
+    for (const s of S.sites) {
+      if (s.abandoned >= 0 && s.abandoned <= y) continue;
+      if (Math.abs(s.i - i) < sep && Math.abs(s.j - j) < sep) return true;
+    }
+    return false;
+  },
+
+  addSite(S, p, i, j, kind, y) {
+    const k = j * HIST.N + i;
+    const id = S.sites.length;
+    S.sites.push({
+      id, people: p.id, i, j, kind,
+      x: this.wx(i), y: this.wy(j), z: S.grid.h[k],
+      name: this.freshName(S, p, 20 + id, i * 31 + j),
+      founded: y, abandoned: -1, cause: null,
+      pop: HIST.SEED_POP, peak: HIST.SEED_POP,
+      mat: kind === 'farm' ? 'timber' : p.mat,
+    });
+    p.sites.push(id);
+    return id;
+  },
+
+  vigour(p, y) {
+    const past = y - p.rise - HIST.PRIME;
+    // The floor has to sit below what LEAVE_POP will tolerate, or a spent
+    // people settles into a permanent shrunken twilight and never ends.
+    return past <= 0 ? 1 : Math.max(0.01, 1 - past / HIST.DECLINE);
+  },
+
+  grow(S, p, y, dt) {
+    const vig = this.vigour(p, y);
+    for (const id of this.living(S, p, y)) {
+      const s = S.sites[id];
+      const k = s.j * HIST.N + s.i;
+      let cap = HIST.CAP_POP * S.grid.fert[k];
+      if (s.kind === 'mine') cap = HIST.CAP_POP * (0.25 + S.grid.ore[k] * 6);
+      if (s.kind === 'hold') cap *= 1.5;
+      cap = Math.max(cap, HIST.SEED_POP) * vig;
+      s.pop += HIST.GROW * (dt / 10) * s.pop * (1 - s.pop / cap);
+      s.pop = Math.max(0, s.pop);
+      if (s.pop > s.peak) s.peak = s.pop;
+      // the commonest way a place ends is that everybody left
+      if (s.pop < HIST.LEAVE_POP && vig < 1) this.abandon(S, s, y, 'left', p.id);
+    }
+  },
+
+  // A big enough site throws a daughter onto the best ground near it. What
+  // that ground is good for decides what the daughter becomes, which is why
+  // mines end up on the ore and farms end up on the flats.
+  expand(S, p, y) {
+    const live = this.living(S, p, y);
+    if (live.length >= HIST.MAX_SITES * p.holds) return;
+    if (this.vigour(p, y) < 0.75) return;   // nobody leaves a failing people
+    const known = S.known[p.id];
+    for (const id of live) {
+      const s = S.sites[id];
+      if (s.pop < HIST.SPAWN_POP) continue;
+      if (this.rnd(31, id, y) > 0.55) continue;
+      // hemmed in by our own? then somebody goes a long way off instead
+      if (this.crowded(S, p, y, s) && this.rnd(96, id, y) < HIST.COLONY &&
+          this.colonise(S, p, y) !== null) { s.pop *= 0.82; return; }
+      let best = null, bestScore = 0;
+      for (let dj = -HIST.SPAWN_R; dj <= HIST.SPAWN_R; dj++)
+        for (let di = -HIST.SPAWN_R; di <= HIST.SPAWN_R; di++) {
+          const i2 = s.i + di, j2 = s.j + dj;
+          if (!this.inBounds(i2, j2)) continue;
+          const k = j2 * HIST.N + i2;
+          if (S.grid.water[k] || !known[k]) continue;
+          if (this.tooClose(S, i2, j2, y, HIST.MIN_SEP)) continue;
+          const ore = S.grid.ore[k] * p.delve;
+          const sc = (HIST.LIVE_FLOOR + S.grid.fert[k]) * (1 + ore * HIST.ORE_PULL) *
+                     (0.8 + 0.4 * this.rnd(41, i2 * 7 + id, j2 + y));
+          if (sc > bestScore) { bestScore = sc; best = { i: i2, j: j2, k, ore }; }
+        }
+      if (!best || bestScore < HIST.SITE_MIN) continue;
+      const kind = best.ore > HIST.MINE_T ? 'mine' : 'farm';
+      const nid = this.addSite(S, p, best.i, best.j, kind, y);
+      this.rob(S, p, y, best.i, best.j);
+      this.learn(S, p, best.i, best.j, HIST.KNOWN_SITE);
+      s.pop *= 0.78;   // the daughter is people who left
+      this.log(S, y, p.id, 'settled', nid, nid, null);
+      this.road(S, nid, y);
+      return;          // one founding per people per tick keeps growth legible
+    }
+  },
+
+  // ---- going out ----
+  // Sixteen headings, written out rather than computed: Math.sin and cos are
+  // not guaranteed identical between engines, and the record has to come out
+  // the same everywhere from the seed alone.
+  DIRS: [[1, 0], [0.92, 0.38], [0.71, 0.71], [0.38, 0.92],
+         [0, 1], [-0.38, 0.92], [-0.71, 0.71], [-0.92, 0.38],
+         [-1, 0], [-0.92, -0.38], [-0.71, -0.71], [-0.38, -0.92],
+         [0, -1], [0.38, -0.92], [0.71, -0.71], [0.92, -0.38]],
+
+  learn(S, p, i, j, r) {
+    const k = S.known[p.id];
+    for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) {
+      if (di * di + dj * dj > r * r) continue;
+      const x = i + di, z = j + dj;
+      if (this.inBounds(x, z)) k[z * HIST.N + x] = 1;
+    }
+  },
+
+  // An expedition walks a heading out from the capital, learns a band either
+  // side of its track, and reports the best ground it crossed. Some of them
+  // do not come back, and those are the ones anybody remembers.
+  explore(S, p, y) {
+    const from = S.sites[p.capital];
+    if (!from) return null;
+    // Somebody who has come back before goes again, so a life of walking
+    // accumulates onto one name instead of a new stranger every expedition.
+    let f = null;
+    for (const g of S.figures) {
+      if (g.people !== p.id || g.role !== 'explorer' || !this.figureAlive(S, g, y)) continue;
+      if (!f || g.deeds.length > f.deeds.length) f = g;
+    }
+    if (!f) f = this.newFigure(S, p, y, 'explorer', from.id);
+    if (!f) return null;
+    const d = this.DIRS[Math.floor(this.rnd(91, p.id, y) * this.DIRS.length) % this.DIRS.length];
+    let best = null, bestScore = 0, reach = 0, lastI = from.i, lastJ = from.j;
+    const far = Math.round(HIST.EXPLORE_LEN * p.reach);
+    for (let n = 1; n <= far; n++) {
+      const i = Math.round(from.i + d[0] * n + (this.rnd(92, p.id * 131 + n, y) - 0.5) * 3);
+      const j = Math.round(from.j + d[1] * n + (this.rnd(93, p.id * 131 + n, y) - 0.5) * 3);
+      if (!this.inBounds(i, j)) break;
+      this.learn(S, p, i, j, HIST.EXPLORE_SEE);
+      reach = n; lastI = i; lastJ = j;
+      const k = j * HIST.N + i;
+      if (S.grid.water[k]) continue;
+      const sc = (HIST.LIVE_FLOOR + S.grid.fert[k]) *
+                 (1 + S.grid.ore[k] * p.delve * HIST.ORE_PULL);
+      if (sc > bestScore) { bestScore = sc; best = { i, j, k }; }
+    }
+    if (best) {
+      const what = S.grid.ore[best.k] * p.delve > HIST.MINE_T
+        ? 'metal in the ground' : 'good ground';
+      this.deed(S, f, y, 'walked ' + reach + ' leagues out and found ' + what);
+    } else {
+      this.deed(S, f, y, 'walked ' + reach + ' leagues out and found nothing');
+    }
+    // the wild keeps some of them
+    if (this.rnd(94, f.id, y) < HIST.EXPLORE_LOST) {
+      f.died = y;
+      f.cause = best && S.grid.ore[best.k] > 0.1 ? 'the deep' : 'the wild';
+      // Whatever they were carrying is out there with them, a long way from
+      // anywhere anybody built. Nobody buries an expedition.
+      for (const aid of f.holds) {
+        const a = S.artifacts[aid];
+        a.owners.push({ who: f.id, from: y, how: 'lost in the wild with' });
+        a.rest = { i: lastI, j: lastJ, t: y, how: 'lost', figure: f.id };
+        this.deposit(S, lastI, lastJ, 'lost', y, p.id, f.id, aid, a.cls);
+      }
+      f.holds = [];
+      this.log(S, y, p.id, 'never came back', null, from.id, f.cause, f.id);
+    }
+    return f;
+  },
+
+  // Is this place hemmed in by our own?
+  crowded(S, p, y, s) {
+    let n = 0;
+    for (const id of this.living(S, p, y)) {
+      const o = S.sites[id];
+      if (Math.abs(o.i - s.i) <= HIST.CROWD_R && Math.abs(o.j - s.j) <= HIST.CROWD_R) n++;
+    }
+    return n >= HIST.CROWD_N;
+  },
+
+  // Settlers go a long way to somewhere already walked, and take the road
+  // home with them. This is the whole reason the map is not one valley.
+  colonise(S, p, y) {
+    const known = S.known[p.id];
+    const live = this.living(S, p, y);
+    let best = null, bestScore = 0;
+    for (let k = 0; k < HIST.N * HIST.N; k++) {
+      if (!known[k] || S.grid.water[k]) continue;
+      const i = k % HIST.N, j = (k - i) / HIST.N;
+      let near = 1e9;
+      for (const id of live) {
+        const o = S.sites[id];
+        const dd = Math.hypot(o.i - i, o.j - j);
+        if (dd < near) near = dd;
+      }
+      if (near < HIST.COLONY_MIN) continue;
+      if (this.tooClose(S, i, j, y, HIST.MIN_SEP)) continue;
+      const edge = Math.min(i, j, HIST.N - 1 - i, HIST.N - 1 - j);
+      const sc = (HIST.LIVE_FLOOR + S.grid.fert[k]) *
+                 (1 + S.grid.ore[k] * p.delve * HIST.ORE_PULL) *
+                 (0.55 + 0.45 * clamp(edge / HIST.ROOM, 0, 1)) *
+                 (0.85 + 0.3 * this.rnd(95, i * 17 + j, y));
+      if (sc > bestScore) { bestScore = sc; best = { i, j, k }; }
+    }
+    if (!best || bestScore < HIST.SITE_MIN) return null;
+    const kind = S.grid.ore[best.k] * p.delve > HIST.MINE_T ? 'mine' : 'farm';
+    const id = this.addSite(S, p, best.i, best.j, kind, y);
+    this.rob(S, p, y, best.i, best.j);
+    this.learn(S, p, best.i, best.j, HIST.KNOWN_SITE);
+    const led = this.newFigure(S, p, y, 'settler', id);
+    if (led) this.deed(S, led, y, 'led the settling of ' + S.sites[id].name, id);
+    this.log(S, y, p.id, 'settled far out at', id, id, null, led ? led.id : null);
+    this.road(S, id, y, HIST.COLONY_ROAD);
+    return id;
+  },
+
+  // ---- roads ----
+  // A road is the cheapest path over the travel-cost field, which means
+  // bridges are not designed: they are what happens when the cheapest path
+  // still has to get wet.
+  road(S, id, y, reach) {
+    const s = S.sites[id];
+    const max = reach === undefined ? HIST.ROAD_R : reach;
+    let bestId = -1, bestD = 1e9;
+    for (const other of this.living(S, S.peoples[s.people], y)) {
+      if (other === id) continue;
+      const o = S.sites[other];
+      const d = Math.hypot(o.i - s.i, o.j - s.j);
+      if (d < bestD && d <= max) { bestD = d; bestId = other; }
+    }
+    if (bestId < 0) return null;
+    const path = this.path(S, s, S.sites[bestId]);
+    if (!path) return null;
+    // a run of water cells on the route is a crossing that had to be built
+    const bridges = [];
+    let run = null;
+    for (const k of path) {
+      if (S.grid.water[k]) { (run || (run = [])).push(k); }
+      else if (run) { if (run.length >= HIST.BRIDGE_MIN) bridges.push(run); run = null; }
+    }
+    if (run && run.length >= HIST.BRIDGE_MIN) bridges.push(run);
+    const link = {
+      id: S.links.length, a: id, b: bestId, people: s.people,
+      built: y, path, bridges,
+    };
+    S.links.push(link);
+    // Once per cell, not once per crossing. Compounding made the busiest
+    // corridors twenty thousand times cheaper than open ground, so the late
+    // network was shaped by repeated multiplication rather than by terrain.
+    for (const k of path) {
+      if (S.roaded[k]) continue;
+      S.roaded[k] = 1;
+      S.grid.cost[k] *= HIST.ROAD_DISCOUNT;
+    }
+    if (bridges.length) {
+      this.log(S, y, s.people, 'bridged', link.id, id, null);
+    }
+    this.log(S, y, s.people, 'roaded', link.id, id, null);
+    return link;
+  },
+
+  // Dijkstra over the cell grid. 4096 nodes and a road every few ticks, so
+  // a binary heap is more than enough and an A* heuristic is not worth the
+  // extra surface to get wrong.
+  path(S, a, b) {
+    const N = HIST.N, n = N * N;
+    const dist = new Float32Array(n).fill(Infinity);
+    const prev = new Int32Array(n).fill(-1);
+    const seen = new Uint8Array(n);
+    const src = a.j * N + a.i, dst = b.j * N + b.i;
+    dist[src] = 0;
+    const heap = [[0, src]];
+    const push = (d, k) => {
+      heap.push([d, k]);
+      let c = heap.length - 1;
+      while (c > 0) {
+        const p = (c - 1) >> 1;
+        if (heap[p][0] <= heap[c][0]) break;
+        const t = heap[p]; heap[p] = heap[c]; heap[c] = t; c = p;
+      }
+    };
+    const pop = () => {
+      const top = heap[0], last = heap.pop();
+      if (heap.length) {
+        heap[0] = last;
+        let c = 0;
+        for (;;) {
+          const l = c * 2 + 1, r = l + 1;
+          let m = c;
+          if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
+          if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
+          if (m === c) break;
+          const t = heap[m]; heap[m] = heap[c]; heap[c] = t; c = m;
+        }
+      }
+      return top;
+    };
+    while (heap.length) {
+      const [d, k] = pop();
+      if (seen[k]) continue;
+      seen[k] = 1;
+      if (k === dst) break;
+      const i = k % N, j = (k - i) / N;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        if (!di && !dj) continue;
+        const i2 = i + di, j2 = j + dj;
+        if (!this.inBounds(i2, j2)) continue;
+        const k2 = j2 * N + i2;
+        if (seen[k2]) continue;
+        const step = (di && dj) ? 1.414 : 1;
+        const nd = d + S.grid.cost[k2] * step;
+        if (nd < dist[k2]) { dist[k2] = nd; prev[k2] = k; push(nd, k2); }
+      }
+    }
+    if (!seen[dst]) return null;
+    const out = [];
+    for (let k = dst; k >= 0; k = prev[k]) out.push(k);
+    return out.reverse();
+  },
+
+  // ---- trouble ----
+  // Pressure climbs with a people's age, so growth is not free forever, but
+  // which site actually falls is decided by where it sits and who is next
+  // to it - never by a script.
+  trouble(S, p, y, dt) {
+    const age = clamp((y - p.rise) / (HIST.PRIME + HIST.DECLINE), 0, 1);
+    const scale = dt / 10;
+    if (this.rnd(51, p.id, y) < (HIST.DISASTER * scale)) {
+      const live = this.living(S, p, y);
+      // Disasters take sites, not peoples: the last one standing survives
+      // until the people has had a run at it. Otherwise a bad roll in the
+      // first century deletes a third of the record before it happens.
+      const spared = live.length === 1 && p.peak < 3;
+      if (live.length && !spared) {
+        const s = S.sites[this.pick(live, 52, p.id, y)];
+        const k = s.j * HIST.N + s.i;
+        const cause = S.grid.coast[k] < 1.1 ? 'flood'
+                    : s.kind === 'mine' ? 'the deep'
+                    : this.rnd(53, s.id, y) < 0.5 ? 'plague' : 'famine';
+        this.abandon(S, s, y, cause, p.id);
+      }
+    }
+    // Wars are ticked once each in tick(); here a people only decides
+    // whether to start another, which it will not do while already in one.
+    let fighting = false;
+    for (const w of S.wars)
+      if (w.ended < 0 && (w.a === p.id || w.b === p.id)) fighting = true;
+    if (!fighting &&
+        this.rnd(54, p.id, y) <
+          (HIST.WAR_BASE + HIST.WAR_AGE * age) * scale * p.warlike) {
+      const foe = this.neighbour(S, p, y);
+      if (foe && !this.atWar(S, p.id, foe.id)) {
+        this.declare(S, p, foe, y);
+        this.fortify(S, p, foe, y);
+      }
+    }
+  },
+
+  // War leaves something standing as well as something burnt: the side
+  // that lost ground puts a fort on the high ground between itself and the
+  // people who took it. It is the only site kind nobody chooses to build.
+  fortify(S, p, foe, y) {
+    if (this.living(S, p, y).length >= HIST.MAX_SITES) return null;
+    const cap = S.sites[p.capital];
+    let near = null, nd = 1e9;
+    for (const id of this.living(S, foe, y)) {
+      const f = S.sites[id];
+      const d = Math.hypot(f.i - cap.i, f.j - cap.j);
+      if (d < nd) { nd = d; near = f; }
+    }
+    if (!near) return null;
+    const mi = Math.round(cap.i + (near.i - cap.i) * 0.45);
+    const mj = Math.round(cap.j + (near.j - cap.j) * 0.45);
+    let best = null, bestScore = -1;
+    for (let dj = -3; dj <= 3; dj++) for (let di = -3; di <= 3; di++) {
+      const i = mi + di, j = mj + dj;
+      if (!this.inBounds(i, j)) continue;
+      const k = j * HIST.N + i;
+      if (S.grid.water[k]) continue;
+      if (this.tooClose(S, i, j, y, HIST.MIN_SEP)) continue;
+      const sc = S.grid.slope[k] + S.grid.h[k] / CFG.TERRAIN_MAX;
+      if (sc > bestScore) { bestScore = sc; best = { i, j }; }
+    }
+    if (!best) return null;
+    const id = this.addSite(S, p, best.i, best.j, 'fort', y);
+    this.rob(S, p, y, best.i, best.j);
+    // an army that marches to the border learns the border
+    this.learn(S, p, best.i, best.j, HIST.KNOWN_SITE);
+    this.log(S, y, p.id, 'fortified', id, id, 'war');
+    this.road(S, id, y);
+    return id;
+  },
+
+  neighbour(S, p, y) {
+    for (const q of S.peoples) {
+      if (q.id === p.id || q.fell >= 0 || !q.founded) continue;
+      for (const a of this.living(S, p, y)) for (const b of this.living(S, q, y)) {
+        const sa = S.sites[a], sb = S.sites[b];
+        if (Math.hypot(sa.i - sb.i, sa.j - sb.j) <= HIST.CONTACT) return q;
+      }
+    }
+    return null;
+  },
+
+  // How a site ends decides what is left in it. Sacked and drowned sites
+  // keep their contents because nobody packed; a slow decline takes the
+  // good things away with the people. The deposition pass reads this.
+  abandon(S, s, y, cause, by) {
+    // nothing is founded and ended in the same breath; it reads as a bug
+    if (s.abandoned >= 0 || s.founded >= y) return;
+    s.abandoned = y;
+    s.cause = cause;
+    s.endedBy = by === undefined ? null : by;
+    s.sudden = (cause === 'sacked' || cause === 'flood' ||
+                cause === 'plague' || cause === 'the deep');
+    // Nobody packs when a place ends suddenly, so what they had is still in
+    // it. A slow decline takes the good things away with the people, which
+    // is why a quiet ruin is a poorer dig than a burnt one.
+    if (s.sudden) this.deposit(S, s.i, s.j, 'abandon', y, s.people, null, null);
+    if (cause === 'sacked' && s.id === S.peoples[s.people].capital)
+      S.peoples[s.people].broken = y;
+    if ((cause === 'sacked' || cause === 'plague') && this.rnd(78, s.id, y) < HIST.HOARD) {
+      // Somebody put what they had into the ground meaning to come back for
+      // it. A hoard exists precisely because they did not - which is why
+      // hoards cluster on the bad years and hold the good things.
+      // whoever of theirs was carrying something, and best of all somebody
+      // who actually lived here
+      let hid = null;
+      for (const f of S.figures) {
+        if (f.people !== s.people) continue;
+        if (!this.figureAlive(S, f, y) || !f.holds.length) continue;
+        if (f.home === s.id) { hid = f; break; }
+        if (!hid) hid = f;
+      }
+      if (hid) {
+        const aid = hid.holds.shift();
+        const a = S.artifacts[aid];
+        a.owners.push({ who: hid.id, from: y, how: 'put into the ground for safety by' });
+        a.rest = { i: s.i, j: s.j, t: y, how: 'hoard', figure: hid.id };
+        this.deposit(S, s.i, s.j, 'hoard', y, s.people, hid.id, aid, a.cls);
+      } else {
+        this.deposit(S, s.i, s.j, 'hoard', y, s.people, null, null);
+      }
+    }
+    // whoever was holding the place may not have left it
+    const p = S.peoples[s.people];
+    const lord = p.leader === undefined ? null : S.figures[p.leader];
+    if (s.sudden && lord && lord.home === s.id && this.figureAlive(S, lord, y) &&
+        this.rnd(79, s.id, y) < 0.4) {
+      lord.died = y; lord.cause = cause;
+      this.bury(S, lord, y, s.id);
+    }
+    this.log(S, y, by === undefined ? null : by, 'ended', s.id, s.id, cause);
+  },
+
+  // ---- individuals ----
+  // Nobody enters this record without a reason to be in it: a figure is made
+  // when a people needs a head, a battle needs a commander, or something is
+  // made that needs a maker. That is what keeps the cast small enough to
+  // remember - not an arbitrary cap, but the fact that a name has to be
+  // earned by a deed.
+  EPITHET: {
+    war:  ['the Unbroken', 'the Iron-Handed', 'Shieldbreaker', 'the Red', 'the Wall'],
+    make: ['the Maker', 'Goldhand', 'the Patient', 'who worked the deep vein'],
+    lead: ['the Old', 'the Long-Reigning', 'the Quiet', 'who held the gate'],
+    deep: ['who went down', 'the Lost', 'who did not come up again'],
+    far:  ['the Far-Walker', 'who went out', 'the Wanderer', 'who found the way'],
+  },
+
+  newFigure(S, p, y, role, siteId) {
+    if (S.figures.length >= HIST.MAX_FIGURES) return null;
+    const id = S.figures.length;
+    const f = {
+      id, people: p.id, role,
+      name: this.freshName(S, p, 300 + (id % 97), y + id * 7),
+      born: y - HIST.ADULT - Math.floor(this.rnd(60, id, y) * 14),
+      life: HIST.LIFE + Math.floor(this.rnd(61, id, y) * HIST.LIFE_VAR),
+      died: -1, cause: null, epithet: null,
+      home: siteId === undefined ? p.capital : siteId,
+      wins: 0, losses: 0, made: 0, led: -1, deeds: [], holds: [], renown: 0,
+    };
+    S.figures.push(f);
+    return f;
+  },
+
+  figureAlive(S, f, y) { return !!f && f.born <= y && (f.died < 0 || f.died > y); },
+
+  deed(S, f, y, what, place) {
+    f.deeds.push({ t: y, what, place: place === undefined ? null : place });
+    this.log(S, y, f.people, what, null, place === undefined ? null : place, null, f.id);
+  },
+
+  // The people's current head. When the old one is gone a successor takes
+  // the seat, so the line is unbroken for as long as the people is.
+  leader(S, p, y) {
+    const old = p.leader === undefined ? null : S.figures[p.leader];
+    if (this.figureAlive(S, old, y)) return old;
+    const f = this.newFigure(S, p, y, 'lord');
+    if (!f) return null;
+    p.leader = f.id;
+    f.led = y;
+    // what the last one held passes on, unless it went into the ground
+    if (old) for (const a of old.holds) { f.holds.push(a);
+      S.artifacts[a].owners.push({ who: f.id, from: y, how: 'inherited' }); }
+    if (old) old.holds = [];
+    this.deed(S, f, y, old ? 'took the seat after ' + old.name : 'led them here', p.capital);
+    return f;
+  },
+
+  // The best commander a people has, or a new one if there is nobody left
+  // who has done it before. Reusing the living one is what lets a captain
+  // accumulate a record instead of every battle inventing a stranger.
+  captain(S, p, y) {
+    let best = null;
+    for (const f of S.figures) {
+      if (f.people !== p.id || f.role !== 'captain' || !this.figureAlive(S, f, y)) continue;
+      if (!best || f.wins > best.wins) best = f;
+    }
+    return best || this.newFigure(S, p, y, 'captain');
+  },
+
+  // Reused the same way a captain is, so a smith accumulates a body of work
+  // instead of every object inventing a stranger to have made it.
+  smith(S, p, y, siteId) {
+    let best = null;
+    for (const f of S.figures) {
+      if (f.people !== p.id || f.role !== 'smith' || !this.figureAlive(S, f, y)) continue;
+      if (!best || f.made > best.made) best = f;
+    }
+    return best || this.newFigure(S, p, y, 'smith', siteId);
+  },
+
+  age(S, y) {
+    for (const f of S.figures) {
+      if (f.died >= 0 || f.born + f.life > y) continue;
+      f.died = y;
+      f.cause = 'age';
+      this.bury(S, f, y);
+    }
+  },
+
+  // ---- what people make ----
+  // Five classes, because what a thing was for decides where it ends up:
+  // weapons and armour are lost on fields and go down with fighters, tools
+  // are left where the work was, vessels go into graves and hoards, and
+  // what somebody wore is the thing most likely to still be on them.
+  ART_CLASS: {
+    weapon: ['sword', 'longsword', 'axe', 'war-axe', 'spear', 'blade',
+             'war-pick', 'long knife', 'mace', 'halberd'],
+    armour: ['helm', 'shield', 'mail-coat', 'greaves', 'war-mask',
+             'breastplate', 'gauntlets', 'scale-coat'],
+    wear:   ['torc', 'ring', 'brooch', 'circlet', 'amulet', 'pendant',
+             'armband', 'belt-buckle', 'diadem', 'cloak-pin'],
+    tool:   ['pick', 'chisel', 'awl', 'saw', 'plumb-bob', 'lamp',
+             'adze', 'file', 'tongs', 'drill'],
+    vessel: ['bowl', 'cup', 'urn', 'cauldron', 'flask', 'ewer',
+             'platter', 'drinking-horn', 'basin'],
+  },
+  // ornament is not made of what the tools are made of
+  ART_RICH: ['gold', 'silver'],
+  ART_ORN: ['amber', 'jet', 'greenstone', 'shell'],
+  // What a thing is worth before anything has happened to it. Deliberately
+  // small: this separates things whose histories are otherwise equal, and
+  // must not decide the ranking on its own, or the list becomes an
+  // inventory of gold rather than a set of stories.
+  WORTH: { gold: 2, silver: 2, steel: 2, amber: 1, greenstone: 1, jet: 1,
+           shell: 0, iron: 1, bronze: 1, copper: 0, bone: 0 },
+  CLASS_WORTH: { wear: 1, weapon: 1, armour: 1, vessel: 0, tool: 0 },
+  ART_ADJ: ['bright', 'grey', 'weeping', 'long', 'cold', 'first', 'quiet',
+            'red', 'nine-fold', 'unlucky', 'thin', 'black', 'twice-broken',
+            'plain', 'crooked', 'star-marked', 'silent', 'old'],
+
+  // What a people reaches for depends on what it is doing: at war it makes
+  // war-gear, delving it makes tools, and at ease it makes things to eat and
+  // drink out of, which are the things worth burying somebody with.
+  wantClass(S, p, y) {
+    const atWar = S.wars.some(w => w.ended < 0 && (w.a === p.id || w.b === p.id));
+    const r = this.rnd(84, p.id, y);
+    if (atWar) return r < 0.38 ? 'weapon' : r < 0.66 ? 'armour'
+                   : r < 0.84 ? 'wear' : 'vessel';
+    if (p.delve > 1.2) return r < 0.40 ? 'tool' : r < 0.60 ? 'vessel'
+                   : r < 0.80 ? 'wear' : r < 0.92 ? 'weapon' : 'armour';
+    return r < 0.28 ? 'vessel' : r < 0.56 ? 'wear' : r < 0.74 ? 'tool'
+         : r < 0.90 ? 'weapon' : 'armour';
+  },
+
+  // Something is made, by somebody, in a year, out of what the ground gave.
+  // Nobody writes the story of an object; the object collects one.
+  make(S, p, y) {
+    if (S.artifacts.length >= HIST.MAX_ARTIFACTS) return null;
+    const live = this.living(S, p, y);
+    if (!live.length) return null;
+    const at = S.sites[this.pick(live, 80, p.id, y)];
+    const smith = this.smith(S, p, y, at.id);
+    if (!smith) return null;
+    const cls = this.wantClass(S, p, y);
+    const k = at.j * HIST.N + at.i;
+    const id = S.artifacts.length;
+    // Gold is for things that are looked at rather than used, and what
+    // somebody wore was never made of the same stuff as their pick.
+    const rich = S.grid.ore[k] > 0.14;
+    const mat = cls === 'wear'
+      ? (rich ? this.pick(this.ART_RICH, 87, id, y) : this.pick(this.ART_ORN, 88, id, y))
+      : (cls === 'vessel' || cls === 'armour') && rich ? 'gold' : p.metal;
+    const a = {
+      id, cls, kind: this.pick(this.ART_CLASS[cls], 81, id, y), mat,
+      made: y, madeBy: smith.id, madeAt: at.id, people: p.id,
+      owners: [], rest: null,
+    };
+    a.name = 'the ' + this.pick(this.ART_ADJ, 82, id, y) + ' ' + mat + ' ' +
+             a.kind + ' of ' + (this.rnd(86, id, y) < 0.5 ? at.name : p.name);
+    S.artifacts.push(a);
+    smith.made++;
+    this.deed(S, smith, y, 'made ' + a.name, at.id);
+    // War-gear goes to whoever leads the fighting rather than to the seat,
+    // which is why so much of it ends its life on a field instead of in a
+    // barrow - and why the things worth remembering were carried by the
+    // people worth remembering.
+    let to = (cls === 'weapon' || cls === 'armour')
+      ? this.captain(S, p, y) : this.leader(S, p, y);
+    if (to && to.holds.length >= HIST.HOLD_MAX) {
+      // their hands are full; it is made for somebody else
+      for (const f of S.figures)
+        if (f.people === p.id && this.figureAlive(S, f, y) &&
+            f.holds.length < HIST.HOLD_MAX) { to = f; break; }
+    }
+    if (to) { a.owners.push({ who: to.id, from: y, how: 'made for' }); to.holds.push(id); }
+    this.log(S, y, p.id, 'made', id, at.id, null, smith.id);
+    return a;
+  },
+
+  // ---- what survives being left ----
+  // How long a material lasts once nobody is looking after it, as the years
+  // at which roughly a third of it is left. Gold comes up exactly as it went
+  // down; iron does not, and after enough centuries there is a rust stain
+  // and a shape in the soil where the blade was. This is the quiet reason
+  // that what a people worked decides how much of them there is to find.
+  KEEPS: {
+    gold: 1e9, greenstone: 1e9, silver: 4000, jet: 6000, amber: 3000,
+    // Steel barely rusts: it was worked past what anybody after could manage,
+    // and it is the reason the height of this world is also the part of it
+    // there is most left to find.
+    steel: 9000, bronze: 2500, copper: 2000, shell: 1500, iron: 900, bone: 700,
+  },
+  CONDITION: [[0.75, 'sound'], [0.45, 'worn'], [0.22, 'corroded'],
+              [0.07, 'a fragment'], [0, 'a stain in the soil']],
+
+  // Years a thing has actually spent in the ground. Time in somebody's hands
+  // does not count against it - what is in use gets looked after, and a
+  // blade carried for two centuries and then buried has only been rusting
+  // for the years since it was buried.
+  buriedYears(S, a, now) {
+    let total = 0, since = -1;
+    for (const o of a.owners) {
+      if (o.how === 'taken out of the ground by') {
+        if (since >= 0) { total += Math.max(0, o.from - since); since = -1; }
+      } else if (o.how === 'went into the ground with' ||
+                 o.how === 'lost on the field' ||
+                 o.how === 'put into the ground for safety by') {
+        if (since < 0) since = o.from;
+      }
+    }
+    if (since >= 0) total += Math.max(0, now - since);
+    return total;
+  },
+
+  // 1 is as-made, 0 is gone. Pure function of material and buried time.
+  condition(S, a, now) {
+    const keeps = this.KEEPS[a.mat] || 2000;
+    return Math.exp(-this.buriedYears(S, a, now) / keeps);
+  },
+
+  conditionWord(c) {
+    for (const [t, w] of this.CONDITION) if (c >= t) return w;
+    return 'gone';
+  },
+
+  // ---- what the ground keeps ----
+  deposit(S, i, j, kind, y, people, figure, artifact, cls) {
+    const d = {
+      id: S.deposits.length, i, j, kind, t: y, people,
+      figure: figure === undefined ? null : figure,
+      artifact: artifact === undefined ? null : artifact,
+      cls: cls === undefined ? null : cls,
+      robbed: -1, robbedBy: null,
+    };
+    S.deposits.push(d);
+    return d;
+  },
+
+  // A grave is where a person's things stop moving. What goes in with them
+  // depends on what they were: a captain takes their war-gear down, a lord
+  // takes the cup they drank from.
+  bury(S, f, y, place) {
+    const home = S.sites[place === undefined ? f.home : place] ||
+                 S.sites[S.peoples[f.people].capital];
+    if (!home) return;
+    // the burial ground sits just outside the settlement
+    const i = clamp(home.i + (f.id % 3) - 1, 0, HIST.N - 1);
+    const j = clamp(home.j + ((f.id >> 2) % 3) - 1, 0, HIST.N - 1);
+    if (!f.holds.length) {
+      if (this.rnd(70, f.id, y) > HIST.GRAVE_GOODS) return;
+      this.deposit(S, i, j, 'grave', y, f.people, f.id, null,
+                   f.role === 'captain' ? 'weapon' : 'wear');
+    } else {
+      // everything they had goes down with them; anything skipped here
+      // would be an object that afterwards exists nowhere at all
+      for (const aid of f.holds) {
+        const a = S.artifacts[aid];
+        a.owners.push({ who: f.id, from: y, how: 'went into the ground with' });
+        a.rest = { i, j, t: y, how: 'grave', figure: f.id };
+        this.deposit(S, i, j, 'grave', y, f.people, f.id, aid, a.cls);
+      }
+      f.holds = [];
+    }
+    this.log(S, y, f.people, 'was buried', null, home.id, f.cause, f.id);
+  },
+
+  // Later peoples dig up earlier ones. A robbed grave is empty, and that is
+  // a story rather than a disappointment - the trench is still there, and
+  // whatever came out of it went back into somebody's hands.
+  rob(S, p, y, i, j) {
+    for (const d of S.deposits) {
+      if (d.robbed >= 0 || d.people === p.id) continue;
+      if (y - d.t < HIST.ROB_WAIT) continue;
+      if (Math.abs(d.i - i) > HIST.ROB_R || Math.abs(d.j - j) > HIST.ROB_R) continue;
+      if (this.rnd(71, d.id, y) > HIST.ROB) continue;
+      d.robbed = y;
+      d.robbedBy = p.id;
+      if (d.artifact !== null) {
+        const a = S.artifacts[d.artifact];
+        // Whoever was there, not always the seat. Funnelling every robbed
+        // thing to the current lord put a large part of a world's treasure
+        // into one grave, which is both unlikely and makes the whole record
+        // of that world read as a single story.
+        const here = [];
+        for (const f of S.figures)
+          if (f.people === p.id && this.figureAlive(S, f, y)) here.push(f);
+        const taker = here.length ? this.pick(here, 72, d.id, y) : this.leader(S, p, y);
+        // arms full: this one stays in the ground for somebody else to find
+        if (taker && taker.holds.length >= HIST.HOLD_MAX) {
+          d.robbed = -1; d.robbedBy = null; continue;
+        }
+        if (taker) {
+          a.owners.push({ who: taker.id, from: y, how: 'taken out of the ground by' });
+          a.rest = null;
+          taker.holds.push(a.id);
+        }
+      }
+      this.log(S, y, p.id, 'opened a grave of', d.people, null, null, null);
+    }
+  },
+
+  // ---- war ----
+  atWar(S, a, b) {
+    for (const w of S.wars) {
+      if (w.ended >= 0) continue;
+      if ((w.a === a && w.b === b) || (w.a === b && w.b === a)) return w;
+    }
+    return null;
+  },
+
+  declare(S, p, foe, y) {
+    const w = {
+      id: S.wars.length, a: p.id, b: foe.id, began: y, ended: -1,
+      winner: null, battles: [], took: [],
+      cause: this.pick(['a border', 'a road', 'an insult', 'a mine',
+                        'a marriage refused', 'a grave opened'], 72, p.id, y),
+    };
+    S.wars.push(w);
+    this.log(S, y, p.id, 'declared war on', foe.id, null, w.cause);
+    return w;
+  },
+
+  peace(S, w, y, winner) {
+    w.ended = y;
+    w.winner = winner === null ? null : winner.id;
+    this.log(S, y, w.a, winner ? 'lost the war to' : 'made peace with',
+             w.b, null, null, null);
+  },
+
+  fight(S, w, y, dt) {
+    const A = S.peoples[w.a], B = S.peoples[w.b];
+    const la = this.living(S, A, y).length, lb = this.living(S, B, y).length;
+    if (!la || !lb || A.fell >= 0 || B.fell >= 0) {
+      return this.peace(S, w, y, !la ? B : !lb ? A : null);
+    }
+    if (this.rnd(73, w.id, y) < HIST.BATTLE * (dt / 10)) this.battle(S, w, y);
+    if (y - w.began > HIST.WAR_LEN && this.rnd(74, w.id, y) < HIST.PEACE * (dt / 10))
+      this.peace(S, w, y, null);
+  },
+
+  // Named for the ground rather than for the nearest settlement, which stays
+  // the nearest for a whole war and made every battle in it share a name.
+  // Fighting the same ford twice is real; saying it the same way twice is
+  // what read as a stutter.
+  FIELD_ORD: ['the field at ', 'the second field at ', 'the third field at ',
+              'the fourth field at ', 'the fifth field at ', 'the sixth field at ',
+              'the seventh field at '],
+  fieldName(S, i, j, owner) {
+    let prior = 0;
+    for (const b of S.battles) if (b.i === i && b.j === j) prior++;
+    return this.FIELD_ORD[Math.min(prior, this.FIELD_ORD.length - 1)] +
+           this.nameFor(owner, 400 + i, j * 31 + 7);
+  },
+
+  strength(S, p, y, cmd) {
+    let n = 0;
+    for (const id of this.living(S, p, y)) n += S.sites[id].pop;
+    return Math.max(1, n) * (cmd ? 1 + HIST.CMD_EDGE * clamp(cmd.wins / 5, 0, 1) : 1);
+  },
+
+  // A battle happens where the two peoples actually touch - between their
+  // nearest living pair - and is decided mostly by weight of numbers, tilted
+  // by whoever is commanding. What the loser drops stays on the field.
+  battle(S, w, y) {
+    const A = S.peoples[w.a], B = S.peoples[w.b];
+    let pa = null, pb = null, pd = 1e9;
+    for (const x of this.living(S, A, y)) for (const z of this.living(S, B, y)) {
+      const sa = S.sites[x], sb = S.sites[z];
+      const d = Math.hypot(sa.i - sb.i, sa.j - sb.j);
+      if (d < pd) { pd = d; pa = sa; pb = sb; }
+    }
+    if (!pa) return null;
+    let i = Math.round((pa.i + pb.i) / 2), j = Math.round((pa.j + pb.j) / 2);
+    for (let n = 0; n < 4 && S.grid.water[j * HIST.N + i]; n++) {
+      i = clamp(i + 1, 0, HIST.N - 1);              // nobody fights in the lake
+      if (S.grid.water[j * HIST.N + i]) j = clamp(j + 1, 0, HIST.N - 1);
+    }
+    if (S.grid.water[j * HIST.N + i]) return null;
+    const ca = this.captain(S, A, y), cb = this.captain(S, B, y);
+    const sa = this.strength(S, A, y, ca), sb = this.strength(S, B, y, cb);
+    const winA = this.rnd(75, w.id, y) < sa / (sa + sb);
+    const win = winA ? A : B, lose = winA ? B : A;
+    const wc = winA ? ca : cb, lc = winA ? cb : ca;
+    const held = winA ? pb : pa;
+    const b = {
+      id: S.battles.length, war: w.id, t: y, i, j,
+      x: this.wx(i), y: this.wy(j), a: A.id, b: B.id, winner: win.id,
+      cmdWin: wc ? wc.id : null, cmdLose: lc ? lc.id : null,
+      name: this.fieldName(S, i, j, held.people), fell: [],
+    };
+    S.battles.push(b);
+    w.battles.push(b.id);
+    // both sides now know the ground they fought over
+    this.learn(S, A, i, j, HIST.KNOWN_SITE);
+    this.learn(S, B, i, j, HIST.KNOWN_SITE);
+    if (wc) { wc.wins++; this.deed(S, wc, y, 'won ' + b.name, held.id); }
+    if (lc) {
+      lc.losses++;
+      if (this.rnd(76, lc.id, y) < HIST.CMD_FALLS) {
+        lc.died = y;
+        lc.cause = 'battle';
+        b.fell.push(lc.id);
+        for (const aid of lc.holds) {
+          const a = S.artifacts[aid];
+          a.owners.push({ who: null, from: y, how: 'lost on the field' });
+          a.rest = { i, j, t: y, how: 'battle', figure: lc.id };
+          this.deposit(S, i, j, 'battle', y, lose.id, lc.id, aid, a.cls);
+        }
+        lc.holds = [];
+        this.log(S, y, lose.id, 'fell at', b.id, null, 'battle', lc.id);
+      }
+    }
+    // war-gear, broken and dropped, whether or not anybody named was there
+    this.deposit(S, i, j, 'battle', y, lose.id, null, null,
+                 this.rnd(85, b.id, y) < 0.6 ? 'weapon' : 'armour');
+    this.log(S, y, win.id, 'won a battle at', b.id, null, null, wc ? wc.id : null);
+    if (this.rnd(77, b.id, y) < HIST.TAKES_SITE) {
+      // The same mercy the disasters get: a people is not wiped off the map
+      // in its first generation by one bad afternoon. Once it has been
+      // something, it can be destroyed.
+      const lp = S.peoples[held.people];
+      const itsLast = this.living(S, lp, y).length <= 1 && lp.peak < 3;
+      if (!itsLast) {
+        this.abandon(S, held, y, 'sacked', win.id);
+        w.took.push(held.id);
+      }
+    }
+    return b;
+  },
+
+  // ---- heroes ----
+  // A hero is not declared, only recognised. Renown is a count of what a
+  // figure actually did, and the epithet is chosen from the deeds - so the
+  // name a people remembers somebody by is a fact about them.
+  // One measure per role. Counting a smith's objects *and* the deed each one
+  // logged scored them three times over for the same act, which is how they
+  // came to be four fifths of everyone remembered.
+  renownOf(f) {
+    const gone = f.cause === 'battle' || f.cause === 'the deep' || f.cause === 'the wild';
+    let n;
+    // Capped, because these accumulate with reuse: one explorer can walk out
+    // a dozen times in a life and one smith can work for forty years, while
+    // a captain needs a war to win anything at all. Uncapped, the people a
+    // world remembers are simply whoever had the most repeatable job.
+    if (f.role === 'captain') n = f.wins * 4;
+    else if (f.role === 'smith') n = Math.min(f.made, 6) * 2;
+    else if (f.role === 'explorer') n = Math.min(f.deeds.length, 5) * 2;
+    else if (f.role === 'settler') n = f.deeds.length * 3;
+    else n = f.deeds.length;
+    // a long reign is its own kind of being remembered
+    if (f.led >= 0) n += 2 + (f.died >= 0 ? Math.floor((f.died - f.led) / 25) : 0);
+    return n + (gone ? 3 : 0);
+  },
+
+  // A thing is legendary for the same reason a person is: because of what
+  // happened to it. Hands it passed through, whether somebody remembered
+  // carried it, whether it was lost on a field, and how often the ground
+  // has failed to keep it.
+  // Which peoples have ever had their hands on it. An object that outlived
+  // the people who made it and was picked up by another is the single
+  // strongest sign that a story is attached to it.
+  crossed(S, a) {
+    const seen = new Set([a.people]);
+    for (const o of a.owners) if (o.who !== null) seen.add(S.figures[o.who].people);
+    return seen.size;
+  },
+
+  fameOf(S, a, heroes) {
+    let n = a.owners.length;
+    for (const o of a.owners) {
+      if (o.how === 'taken out of the ground by') n += 3;
+      if (o.how === 'lost on the field') n += 5;
+      if (o.how === 'put into the ground for safety by') n += 4;
+      if (o.how === 'lost in the wild with') n += 5;
+      if (o.who !== null && heroes.has(o.who)) n += 5;
+    }
+    n += (this.crossed(S, a) - 1) * 4;
+    n += Math.floor((S.now - a.made) / 2000);   // sheer survival counts a little
+    n += (this.WORTH[a.mat] || 0) + (this.CLASS_WORTH[a.cls] || 0);
+    return n;
+  },
+
+  // What to call a thing, read off its own history. Current resting place
+  // first, because a title that says "lost on the field" about something
+  // sitting in a barrow is simply wrong - it was recovered and reburied,
+  // and that is a different story worth telling.
+  // What to call a thing, read off its own history. Ordered most specific
+  // first: where it lies now, then what befell it, then who had it, and
+  // only at the bottom the generic counts - which will otherwise catch
+  // almost everything on the way past and flatten the whole list.
+  titleFor(S, a, heroes) {
+    const robbed = a.owners.filter(o => o.how === 'taken out of the ground by').length;
+    const wasLost = a.owners.some(o => o.how === 'lost on the field');
+    const hero = a.owners.find(o => o.who !== null && heroes.has(o.who));
+    const peoples = this.crossed(S, a);
+    const how = a.rest ? a.rest.how : null;
+    if (how === 'battle') return 'lost on the field and never lifted';
+    if (wasLost) return 'taken off a battlefield and buried again';
+    if (how === 'hoard') return 'hidden against a bad year, and never come back for';
+    if (how === 'lost') return 'out in the country with ' +
+      S.figures[a.rest.figure].name + ', who did not come back';
+    if (hero) return 'which ' + S.figures[hero.who].name + ' carried';
+    if (heroes.has(a.madeBy)) return 'out of the hands of ' + S.figures[a.madeBy].name;
+    if (peoples > 1) {
+      // who actually had it, in the order they had it
+      const chain = [], seen = new Set();
+      const add = pid => { if (!seen.has(pid)) { seen.add(pid); chain.push(S.peoples[pid].name); } };
+      add(a.people);
+      for (const o of a.owners) if (o.who !== null) add(S.figures[o.who].people);
+      if (chain.length > 2) return 'held by ' + chain.join(', then ');
+      if (robbed >= 3) return 'which will not stay buried';
+      // Name the person who lifted it, not just their people: within one
+      // world the same two peoples do most of the robbing, so the pair alone
+      // reads as one story told over and over. A name is also better telling.
+      const lifter = a.owners.find(o => o.how === 'taken out of the ground by');
+      if (lifter && lifter.who !== null) {
+        const base = 'put in the ground by ' + chain[0] + ', and taken out of it by ' +
+                     S.figures[lifter.who].name;
+        // where it finally came to rest separates things that one lord took
+        // out of one people's graves in a single sweep
+        if (a.rest && a.rest.figure !== null && a.rest.figure !== lifter.who)
+          return base + ', to lie with ' + S.figures[a.rest.figure].name;
+        return base;
+      }
+      return 'buried by ' + chain[0] + ' and dug up by ' + chain[1];
+    }
+    if (robbed >= 3) return 'which will not stay buried';
+    if (!how) return 'never put down';
+    // How it would actually come up is a fact worth leading with, and it is
+    // the one thing that separates two objects with the same history.
+    const cond = this.condition(S, a, S.now);
+    const under = this.buriedYears(S, a, S.now);
+    if (cond < 0.08) return 'gone to nothing but its own shape in the soil';
+    if (cond > 0.95 && under > 2000)
+      return Math.round(under / 100) + ' centuries under, and still bright';
+    if (robbed >= 1) return 'dug up ' + robbed + (robbed === 1 ? ' time' : ' times') + ' since';
+    // for anything still lying where it was put, say who it is lying with
+    if (a.rest && a.rest.figure !== null)
+      return 'in the ground with ' + S.figures[a.rest.figure].name + ' since ' + a.rest.t;
+    if (S.now - a.made > HIST.SPAN * 0.75) return 'out of the first years, and still whole';
+    if ((this.WORTH[a.mat] || 0) >= 2) return 'still where it was put, and worth the digging';
+    return 'through ' + a.owners.length + ' pairs of hands';
+  },
+
+  crown(S) {
+    for (const f of S.figures) f.renown = this.renownOf(f);
+    const ranked = S.figures.slice().sort((a, b) => b.renown - a.renown || a.id - b.id);
+    S.heroes = ranked.filter(f => f.renown >= HIST.HERO_MIN)
+                     .slice(0, HIST.HEROES).map(f => f.id);
+    for (const id of S.heroes) {
+      const f = S.figures[id];
+      const kind = f.cause === 'the deep' ? 'deep'
+                 : f.role === 'explorer' ? 'far'
+                 : f.wins >= 2 ? 'war'
+                 : f.made > 0 ? 'make' : 'lead';
+      f.epithet = this.pick(this.EPITHET[kind], 90, f.id, f.born);
+    }
+    // and the things. Fame is reckoned after the people, because carrying a
+    // thing is one of the ways a thing becomes worth carrying.
+    const heroes = new Set(S.heroes);
+    for (const a of S.artifacts) a.fame = this.fameOf(S, a, heroes);
+    S.legends = S.artifacts.slice()
+      .sort((x, z) => z.fame - x.fame || x.id - z.id)
+      .slice(0, HIST.LEGENDS).map(a => a.id);
+    for (const id of S.legends) S.artifacts[id].title = this.titleFor(S, S.artifacts[id], heroes);
+  },
+
+  // ---- what an ordinary dig turns up ----
+  // The named things are a few dozen; potsherds and broken tools are without
+  // end, so they are a function rather than a list. How long people stood
+  // here and how long ago is the whole of it.
+  bulkAt(S, i, j, now) {
+    let years = 0, last = -1, who = -1;
+    for (const s of S.sites) {
+      if (Math.abs(s.i - i) > 1 || Math.abs(s.j - j) > 1) continue;
+      const end = s.abandoned < 0 ? now : s.abandoned;
+      years += Math.max(0, end - s.founded);
+      if (end > last) { last = end; who = s.people; }
+    }
+    if (!years) return null;
+    return {
+      density: clamp(years / 600, 0, 1),
+      people: who,
+      depth: this.buryDepth(S, i, j, last < 0 ? 0 : now - last),
+      what: who < 0 ? [] : ['potsherds', 'charcoal', 'bone', 'broken ' +
+        (S.peoples[who].delve > 1.2 ? 'tools' : 'vessels')],
+    };
+  },
+
+  // ---- what is left, at a given year ----
+  // None of this is stored. Age since the roof went, plus the material and
+  // the ground it stands on, is the whole model.
+  roofYears(s) { return s.mat === 'timber' ? HIST.ROOF_TIMBER : HIST.ROOF_STONE; },
+  wallYears(s) { return s.mat === 'timber' ? HIST.WALL_TIMBER : HIST.WALL_STONE; },
+
+  // 0 lived-in, 1 standing but empty, 2 roofless, 3 walls falling,
+  // 4 footprint only, 5 nothing above ground
+  stage(S, s, now) {
+    if (s.abandoned < 0 || now < s.abandoned) return 0;
+    const age = now - s.abandoned;
+    if (age < this.roofYears(s) * 0.4) return 1;
+    if (age < this.roofYears(s)) return 2;
+    if (age < this.wallYears(s)) return 3;
+    if (this.sink(S, s, now) < HIST.GONE_DEPTH) return 4;
+    return 5;
+  },
+
+  // Descent begins when the roof does. Soft valley ground swallows a
+  // building; on rock it barely moves, which is why some old walls are
+  // still standing where nothing else is.
+  sink(S, s, now) {
+    if (s.abandoned < 0 || now < s.abandoned) return 0;
+    const roofless = now - s.abandoned - this.roofYears(s);
+    if (roofless <= 0) return 0;
+    return this.buryDepth(S, s.i, s.j, roofless);
+  },
+
+  // Saturating, not linear: a thing settles until it meets ground that will
+  // not take it, and then stops. Six thousand years fits in the top three
+  // metres - roughly what a real site accumulates - so the whole record is
+  // spade-depth, and everything below it belongs to the caves rather than
+  // to people. Buildings and grave goods share the one curve.
+  buryDepth(S, i, j, years) {
+    if (years <= 0) return 0;
+    const k = j * HIST.N + i;
+    const soft = clamp(S.grid.soil[k] / MATS.SOIL_MAX, 0, 1);
+    const rate = HIST.SINK_HARD + (HIST.SINK_SOFT - HIST.SINK_HARD) * soft;
+    return HIST.SINK_MAX * rate * (1 - Math.exp(-years / HIST.SINK_TAU));
+  },
+
+  depositDepth(S, d, now) { return this.buryDepth(S, d.i, d.j, now - d.t); },
+
+  // A road stops being repaired when either end dies. After that it is a
+  // hollow-way: still visibly straight, slowly filling in.
+  linkLive(S, l, y) {
+    const a = S.sites[l.a], b = S.sites[l.b];
+    const ends = [a, b].map(s => s.abandoned < 0 ? Infinity : s.abandoned);
+    return Math.min(ends[0], ends[1]);
+  },
+};
+</script>
+<script>
+// A map of the chronicle, scrubbable by year. Nothing here is stored: the
+// sim hands over sites, links and events with dates on them, and every
+// frame recomputes territory, road condition and ruin state for the year
+// being asked about. If it can be derived it is not kept.
+const S_PX = 11;                       // pixels per sim cell
+const cv = document.getElementById('map'), cx = cv.getContext('2d');
+cv.width = HIST.N * S_PX; cv.height = HIST.N * S_PX;
+
+// One per people, ordered as the material succession runs: bone and tan,
+// then copper, brass, the green of old bronze, then two irons.
+const HUE = ['#b08968', '#c97b4a', '#c9a94b', '#6fae8f', '#5f96c4', '#8f7fc0'];
+let S = null, year = HIST.SPAN, playing = false, picked = null;
+let speed = 4, looping = true, showFinds = false, showSeen = false;
+// The game's text resolution, derived rather than typed: a 16:9 screen at
+// 1080p divided by the glyph cell the renderer actually uses.
+const A_COLS = Math.floor(1920 / CFG.CELL_W), A_ROWS = Math.floor(1080 / CFG.CELL_H);
+const A_MAP_W = 88, A_MAP_H = A_ROWS - 1, A_PANEL = A_COLS - A_MAP_W - 2;
+let ascii = false;
+// The prologue holds the screen before the record starts running: one line
+// of the myth every few frames, then a pause, then six thousand years. Any
+// key goes straight through it.
+let phase = 'record', mythT = 0;
+const MYTH_STEP = 16, MYTH_HOLD = 100;
+// A time lapse has to show change, not just state. Anything built or lost
+// inside living memory keeps a ring on it for a few years of playback, so
+// the eye catches the moment rather than only the aftermath.
+const FLASH = 45;
+
+function run(seed) {
+  CFG.SEED = seed;
+  const t0 = performance.now();
+  S = Chronicle.run();
+  const ms = performance.now() - t0;
+  document.getElementById('stat').textContent =
+    `${S.sites.length} sites  ${S.links.length} roads  ` +
+    `${S.links.reduce((a, l) => a + l.bridges.length, 0)} bridges  ${ms.toFixed(0)} ms`;
+  picked = null;
+  drawPeoples();
+  draw();
+}
+
+// Territory is not simulated and not stored: at any year it is simply the
+// people whose living site is nearest, out to a day's walk.
+const TERR_R = 6;
+function territory(y) {
+  const N = HIST.N, own = new Int8Array(N * N).fill(-1);
+  const best = new Float32Array(N * N).fill(1e9);
+  for (const s of S.sites) {
+    if (s.founded > y || (s.abandoned >= 0 && s.abandoned <= y)) continue;
+    for (let dj = -TERR_R; dj <= TERR_R; dj++) for (let di = -TERR_R; di <= TERR_R; di++) {
+      const i = s.i + di, j = s.j + dj;
+      if (!Chronicle.inBounds(i, j)) continue;
+      const d = Math.hypot(di, dj);
+      if (d > TERR_R) continue;
+      const k = j * N + i;
+      if (d < best[k]) { best[k] = d; own[k] = s.people; }
+    }
+  }
+  return own;
+}
+
+function draw() {
+  document.getElementById('year').textContent = 'year ' + year;
+  if (ascii) { drawAscii(); return; }
+  const N = HIST.N, g = S.grid;
+  // ground
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const k = j * N + i;
+    if (g.water[k]) cx.fillStyle = '#0d1a26';
+    else {
+      const v = Math.round(24 + 52 * clamp(g.h[k] / CFG.TERRAIN_MAX, 0, 1));
+      cx.fillStyle = `rgb(${v},${v + 2},${v + 4})`;
+    }
+    cx.fillRect(i * S_PX, j * S_PX, S_PX, S_PX);
+  }
+  // The country anybody has actually walked. Settlement can only ever
+  // follow this, so it is the shape of the frontier at any given year.
+  if (showSeen) {
+    const up = S.peoples.filter(pe => year >= pe.rise && (pe.fell < 0 || year < pe.fell));
+    cx.fillStyle = '#161b21';
+    for (let k = 0; k < N * N; k++) {
+      let any = false;
+      for (const pe of up) if (S.known[pe.id][k]) { any = true; break; }
+      if (any) cx.fillRect((k % N) * S_PX, ((k - k % N) / N) * S_PX, S_PX, S_PX);
+    }
+  }
+
+  // territory, faintly
+  const own = territory(year);
+  cx.globalAlpha = 0.16;
+  for (let k = 0; k < N * N; k++) {
+    if (own[k] < 0) continue;
+    cx.fillStyle = HUE[own[k]];
+    cx.fillRect((k % N) * S_PX, ((k - k % N) / N) * S_PX, S_PX, S_PX);
+  }
+  cx.globalAlpha = 1;
+
+  // roads. A road stops being repaired when either end dies; after that it
+  // is a hollow-way, still visibly straight and slowly filling in.
+  for (const l of S.links) {
+    if (l.built > year) continue;
+    const until = Chronicle.linkLive(S, l);
+    const dead = year - until;
+    cx.strokeStyle = HUE[l.people];
+    cx.globalAlpha = dead <= 0 ? 0.85 : Math.max(0.12, 0.85 - dead / 700);
+    cx.lineWidth = dead <= 0 ? 2 : 1;
+    cx.beginPath();
+    l.path.forEach((k, n) => {
+      const x = (k % N) * S_PX + S_PX / 2, y = ((k - k % N) / N) * S_PX + S_PX / 2;
+      n ? cx.lineTo(x, y) : cx.moveTo(x, y);
+    });
+    cx.stroke();
+    // bridges read as a break in the line with piers either side
+    cx.globalAlpha = 1;
+    for (const b of l.bridges) for (const k of b) {
+      const x = (k % N) * S_PX, y = ((k - k % N) / N) * S_PX;
+      cx.fillStyle = dead <= 0 ? '#e8eef4' : '#6a7482';
+      cx.fillRect(x + 2, y + 2, S_PX - 4, S_PX - 4);
+    }
+  }
+  cx.globalAlpha = 1;
+
+  // sites
+  for (const s of S.sites) {
+    if (s.founded > year) continue;
+    const gone = s.abandoned >= 0 && s.abandoned <= year;
+    const st = Chronicle.stage(S, s, year);
+    const sink = Chronicle.sink(S, s, year);
+    const x = s.i * S_PX + S_PX / 2, y = s.j * S_PX + S_PX / 2;
+    const r = 2 + Math.sqrt(Math.max(s.pop, 20)) / 7;
+    cx.beginPath(); cx.arc(x, y, r, 0, 6.284);
+    if (!gone) { cx.fillStyle = HUE[s.people]; cx.fill(); }
+    else {
+      // a ruin fades as it goes down; below ground it is a ring only
+      cx.strokeStyle = HUE[s.people];
+      cx.globalAlpha = st >= 5 ? 0.28 : 0.75;
+      cx.lineWidth = 1; cx.stroke();
+      cx.globalAlpha = 1;
+      if (sink > 1) {
+        cx.fillStyle = '#000'; cx.globalAlpha = clamp(sink / 18, 0, 0.8);
+        cx.fill(); cx.globalAlpha = 1;
+      }
+    }
+    if (s.kind === 'hold') {   // capitals get a mark you can find at a glance
+      cx.strokeStyle = HUE[s.people]; cx.globalAlpha = gone ? 0.5 : 1;
+      cx.strokeRect(x - r - 3, y - r - 3, 2 * r + 6, 2 * r + 6);
+      cx.globalAlpha = 1;
+    }
+    const built = year - s.founded, lost = gone ? year - s.abandoned : -1;
+    if (lost >= 0 && lost < FLASH) {
+      cx.strokeStyle = '#d4674a'; cx.lineWidth = 1.5;
+      cx.globalAlpha = 1 - lost / FLASH;
+      cx.beginPath(); cx.arc(x, y, r + 4 + 7 * (lost / FLASH), 0, 6.284); cx.stroke();
+      cx.globalAlpha = 1;
+    } else if (built >= 0 && built < FLASH) {
+      cx.strokeStyle = '#e8eef4'; cx.lineWidth = 1.5;
+      cx.globalAlpha = 1 - built / FLASH;
+      cx.beginPath(); cx.arc(x, y, r + 4 + 5 * (built / FLASH), 0, 6.284); cx.stroke();
+      cx.globalAlpha = 1;
+    }
+    if (picked === s.id) {
+      cx.strokeStyle = '#e8eef4'; cx.lineWidth = 1;
+      cx.beginPath(); cx.arc(x, y, r + 5, 0, 6.284); cx.stroke();
+    }
+  }
+  // Battles: a cross where two peoples actually met, bright while it is
+  // still in living memory and a faint scar afterwards.
+  for (const b of S.battles) {
+    if (b.t > year) continue;
+    const bAge = year - b.t;
+    const bx = b.i * S_PX + S_PX / 2, by = b.j * S_PX + S_PX / 2;
+    const fresh = bAge < FLASH;
+    const r = 3 + (fresh ? 4 * (1 - bAge / FLASH) : 0);
+    cx.strokeStyle = '#d4674a';
+    cx.globalAlpha = fresh ? 1 : 0.3;
+    cx.lineWidth = fresh ? 2 : 1;
+    cx.beginPath();
+    cx.moveTo(bx - r, by - r); cx.lineTo(bx + r, by + r);
+    cx.moveTo(bx + r, by - r); cx.lineTo(bx - r, by + r);
+    cx.stroke();
+    cx.globalAlpha = 1;
+  }
+
+  // What is in the ground. Gold means something named is down there; grey
+  // means ordinary goods; dark means somebody has already been for it.
+  if (showFinds) for (const d of S.deposits) {
+    if (d.t > year) continue;
+    const robbed = d.robbed >= 0 && d.robbed <= year;
+    cx.fillStyle = robbed ? '#3a4048' : d.artifact !== null ? '#e8c46a' : '#7f8794';
+    const ox = ((d.id % 3) - 1) * 3, oy = (((d.id / 3) | 0) % 3 - 1) * 3;
+    cx.fillRect(d.i * S_PX + S_PX / 2 + ox - 1, d.j * S_PX + S_PX / 2 + oy - 1, 2, 2);
+  }
+
+  // playhead across the era bars, and who is actually standing right now
+  const ph = document.querySelectorAll('.era b');
+  for (let n = 0; n < ph.length; n++) ph[n].style.left = (100 * year / HIST.SPAN) + '%';
+  const up = S.peoples.filter(p => year >= p.rise && (p.fell < 0 || year < p.fell));
+  document.getElementById('alive').textContent =
+    up.length ? up.map(p => p.name).join(' · ') : 'nobody';
+  drawHeroes();
+  drawLegends();
+  drawLog();
+  drawPick();
+}
+
+// Heroes are not declared: renown is a count of what somebody actually did,
+// and the epithet is chosen from the deeds themselves.
+function drawHeroes() {
+  const out = S.heroes.filter(id => S.figures[id].born <= year).map(id => {
+    const f = S.figures[id], pe = S.peoples[f.people];
+    const rec = [f.wins ? f.wins + ' battles won' : null,
+                 f.made ? f.made + ' things made' : null,
+                 f.led >= 0 ? 'held the seat' : null].filter(Boolean).join(' · ');
+    const dead = f.died >= 0 && f.died <= year;
+    return `<div class="lane"><span class="sw" style="background:${HUE[f.people]}"></span>
+      <b>${f.name}${f.epithet ? ' ' + f.epithet : ''}</b></div>
+      <div class="dim yr">${pe.name} · ${f.born}–${dead ? f.died : ''} · ${rec}
+      ${dead && f.cause === 'battle' ? ' · fell in battle' : ''}</div>`;
+  }).join('');
+  document.getElementById('heroes').innerHTML =
+    out || '<span class="dim">nobody has done anything worth remembering yet</span>';
+}
+
+// ---- the game's own screen ----
+// One glyph per character cell, the same grid the renderer draws the world
+// into. The map is compressed to fit: 64 sim cells across 88 columns and
+// down 48 rows, which is what 16:9 leaves once a cell is taller than wide.
+const A_SITE = { hold: '@', fort: 'A', mine: '%', farm: 'n' };
+
+function drawAscii() {
+  if (phase === 'myth') return drawMyth();
+  const N = HIST.N;
+  const ch = [], col = [];
+  for (let r = 0; r < A_ROWS; r++) { ch.push(new Array(A_COLS).fill(' ')); col.push(new Array(A_COLS).fill(null)); }
+  const put = (x, y, c, k) => {
+    if (x < 0 || y < 0 || x >= A_COLS || y >= A_ROWS) return;
+    ch[y][x] = c; col[y][x] = k;
+  };
+  const sx = i => Math.min(A_MAP_W - 1, Math.floor(i * A_MAP_W / N));
+  const sy = j => 1 + Math.min(A_MAP_H - 1, Math.floor(j * A_MAP_H / N));
+
+  // ground
+  for (let y = 1; y <= A_MAP_H; y++) for (let x = 0; x < A_MAP_W; x++) {
+    const i = Math.min(N - 1, Math.floor(x * N / A_MAP_W));
+    const j = Math.min(N - 1, Math.floor((y - 1) * N / A_MAP_H));
+    const k = j * N + i;
+    if (S.grid.water[k]) { put(x, y, '~', '#24506e'); continue; }
+    const h = clamp(S.grid.h[k] / CFG.TERRAIN_MAX, 0, 1);
+    put(x, y, h > 0.62 ? '^' : h > 0.34 ? ':' : '.', h > 0.62 ? '#5c5347' : '#3b4048');
+  }
+  // territory tints the ground under whoever holds it
+  const own = territory(year);
+  for (let y = 1; y <= A_MAP_H; y++) for (let x = 0; x < A_MAP_W; x++) {
+    const i = Math.min(N - 1, Math.floor(x * N / A_MAP_W));
+    const j = Math.min(N - 1, Math.floor((y - 1) * N / A_MAP_H));
+    const o = own[j * N + i];
+    if (o >= 0 && ch[y][x] !== '~') col[y][x] = HUE[o];
+  }
+  // roads, then what is on them
+  for (const l of S.links) {
+    if (l.built > year) continue;
+    const dead = year - Chronicle.linkLive(S, l);
+    for (const k of l.path) {
+      const i = k % N, j = (k - i) / N;
+      put(sx(i), sy(j), dead > 0 ? '-' : '=', dead > 0 ? '#4a5058' : HUE[l.people]);
+    }
+    for (const b of l.bridges) for (const k of b) {
+      const i = k % N, j = (k - i) / N;
+      put(sx(i), sy(j), '#', dead > 0 ? '#6a7482' : '#e8eef4');
+    }
+  }
+  if (showFinds) for (const d of S.deposits) {
+    if (d.t > year) continue;
+    const robbed = d.robbed >= 0 && d.robbed <= year;
+    put(sx(d.i), sy(d.j), '*', robbed ? '#3a4048' : d.artifact !== null ? '#e8c46a' : '#7f8794');
+  }
+  for (const b of S.battles) {
+    if (b.t > year) continue;
+    put(sx(b.i), sy(b.j), 'x', year - b.t < FLASH ? '#ff8a63' : '#8c4a37');
+  }
+  for (const s of S.sites) {
+    if (s.founded > year) continue;
+    const gone = s.abandoned >= 0 && s.abandoned <= year;
+    const st = Chronicle.stage(S, s, year);
+    const glyph = gone ? (st >= 4 ? ',' : (A_SITE[s.kind] || 'o').toLowerCase())
+                       : (A_SITE[s.kind] || 'o');
+    put(sx(s.i), sy(s.j), glyph, gone ? (st >= 4 ? '#454b54' : '#7a8290') : HUE[s.people]);
+  }
+
+  // ---- the record, down the right ----
+  const px = A_MAP_W + 2;
+  // The glyph atlas is ASCII 32..126 and nothing else, so anything the
+  // record wants to say has to survive being flattened to it. Doing this
+  // here is also how the game screen catches typography that would simply
+  // not draw once this text is going through the renderer.
+  const a7 = t => String(t)
+    .replace(/[\u2014\u2013]/g, '-').replace(/\u00b7/g, '.')
+    .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
+    .replace(/\u2026/g, '...').replace(/[^\x20-\x7e]/g, '?');
+  const line = (y, str, c) => {
+    const t = a7(str).slice(0, A_PANEL);
+    for (let n = 0; n < t.length; n++) put(px + n, y, t[n], c);
+  };
+  const up = S.peoples.filter(p => year >= p.rise && (p.fell < 0 || year < p.fell));
+  line(0, 'THE CHRONICLE', '#e8eef4');
+  const hdr = 'year ' + String(year).padStart(4) + '   ' +
+              (up.length ? up.map(p => p.name).join(', ') : 'nobody');
+  const hdr7 = a7(hdr);
+  for (let n = 0; n < hdr7.length && n < A_MAP_W; n++)
+    put(A_MAP_W - hdr7.length + n, 0, hdr7[n], '#8b949e');
+
+  line(1, 'WHO IS REMEMBERED', '#8b949e');
+  const heroes = S.heroes.filter(id => S.figures[id].born <= year);
+  for (let n = 0; n < 14; n++) {
+    if (n >= heroes.length) break;
+    const f = S.figures[heroes[n]];
+    const dead = f.died >= 0 && f.died <= year;
+    line(2 + n, (f.name + (f.epithet ? ' ' + f.epithet : '')).padEnd(34).slice(0, 34) +
+                (dead ? f.born + '-' + f.died : f.born + '-'), HUE[f.people]);
+  }
+  line(17, 'WHAT IS REMEMBERED', '#8b949e');
+  const legs = S.legends.filter(id => S.artifacts[id].made <= year);
+  for (let n = 0; n < 7; n++) {
+    if (n >= legs.length) break;
+    const a = S.artifacts[legs[n]];
+    line(18 + n * 2, a.name, HUE[a.people]);
+    const rest = a.rest && a.rest.t <= year ? a.rest : null;
+    const z = rest ? Chronicle.buryDepth(S, rest.i, rest.j, year - rest.t) : 0;
+    line(19 + n * 2, '   ' + (a.title || '') +
+         (rest ? '  (' + z.toFixed(1) + ' m down, ' +
+          Chronicle.conditionWord(Chronicle.condition(S, a, year)) + ')' : ''), '#6c7480');
+  }
+  line(33, 'WHAT HAPPENED', '#8b949e');
+  const evs = [];
+  for (const e of S.events) { if (e.t > year) break; evs.push(e); }
+  const tail = evs.slice(-15);
+  for (let n = 0; n < tail.length; n++)
+    line(34 + n, String(tail[n].t).padStart(4) + '  ' + evLine(tail[n]),
+         n === tail.length - 1 ? '#c8d2dc' : '#7f8794');
+
+  // one pass of run-length spans per row keeps this cheap enough to animate
+  let out = '';
+  for (let y = 0; y < A_ROWS; y++) {
+    let run = '', cur = null;
+    for (let x = 0; x < A_COLS; x++) {
+      const c = col[y][x];
+      if (c !== cur) {
+        if (run) out += cur ? `<span style="color:${cur}">${esc(run)}</span>` : esc(run);
+        run = ''; cur = c;
+      }
+      run += ch[y][x];
+    }
+    if (run) out += cur ? `<span style="color:${cur}">${esc(run)}</span>` : esc(run);
+    out += '\n';
+  }
+  document.getElementById('ascii').innerHTML = out;
+}
+function esc(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+// What they say came before any of it. Held on the same grid, so it reads as
+// part of the game rather than as a title card in front of it.
+// The renderer's cell is CFG.CELL_W x CFG.CELL_H. Whatever font actually
+// wins the stack has its own advance width, so measure it and derive the
+// line-height from it - that reproduces the game's cell aspect exactly
+// instead of assuming a ratio that only holds for one of the fallbacks.
+function fitAscii() {
+  const el = document.getElementById('ascii');
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;' +
+    'font:bold 100px var(--mono);';
+  probe.textContent = '0'.repeat(50);
+  document.body.appendChild(probe);
+  const ratio = probe.getBoundingClientRect().width / 50 / 100;   // advance per em
+  probe.remove();
+  if (!ratio) return;
+  const avail = document.documentElement.clientWidth - 40;
+  const size = Math.max(6, Math.min(18, avail / (A_COLS * ratio)));
+  el.style.fontSize = size.toFixed(2) + 'px';
+  el.style.lineHeight = (size * ratio * (CFG.CELL_H / CFG.CELL_W)).toFixed(2) + 'px';
+}
+
+function drawMyth() {
+  const lines = S.myth.lines;
+  const shown = Math.min(lines.length, Math.floor(mythT / MYTH_STEP));
+  const top = Math.max(2, Math.floor((A_ROWS - lines.length) / 2));
+  const left = Math.max(2, Math.floor((A_COLS - 62) / 2));
+  const rows = [];
+  for (let r = 0; r < A_ROWS; r++) rows.push({ x: 0, t: '', c: null });
+  let out = '';
+  for (let r = 0; r < A_ROWS; r++) {
+    let text = '', colr = null;
+    const n = r - top;
+    if (n >= 0 && n < shown) {
+      text = lines[n]; colr = n < 3 ? '#8b949e' : '#c8d2dc';
+    } else if (r === A_ROWS - 2 && shown >= lines.length) {
+      text = 'any key'; colr = '#566070';
+    }
+    const pad = text ? ' '.repeat(left) : '';
+    const body = pad + text;
+    const fill = ' '.repeat(Math.max(0, A_COLS - body.length));
+    out += (colr ? `${esc(pad)}<span style="color:${colr}">${esc(text)}</span>`
+                 : esc(body)) + esc(fill) + '\n';
+  }
+  document.getElementById('ascii').innerHTML = out;
+}
+
+function drawPeoples() {
+  document.getElementById('peoples').innerHTML = S.peoples.map((p, n) => {
+    const end = p.fell >= 0 ? p.fell : HIST.SPAN;
+    const l = 100 * p.rise / HIST.SPAN, w = 100 * (end - p.rise) / HIST.SPAN;
+    return `<div class="lane"><span class="sw" style="background:${HUE[n]}"></span>
+      <b>${p.name}</b><span class="dim">${p.kind}${p.player ? ' — yours' : ''}
+      · builds in ${p.mat}, works ${p.metal}</span></div>
+      <div class="era"><i style="left:${l}%;width:${w}%;background:${HUE[n]}"></i><b></b></div>
+      <div class="dim yr">rose ${p.rise} ·
+      ${p.fell >= 0 ? 'ended ' + p.fell + ' (' + p.cause + ')' : 'still here'}</div>`;
+  }).join('');
+}
+
+// Things are remembered for the same reason people are: because of what
+// happened to them. The title is read off the object's own history.
+function drawLegends() {
+  const out = S.legends.filter(id => S.artifacts[id].made <= year).map(id => {
+    const a = S.artifacts[id];
+    const rest = a.rest && a.rest.t <= year ? a.rest : null;
+    const z = rest ? Chronicle.buryDepth(S, rest.i, rest.j, year - rest.t) : 0;
+    const where = rest
+      ? `${rest.how === 'grave' ? 'in a grave' : rest.how === 'hoard' ? 'hidden'
+           : rest.how === 'lost' ? 'out in the country' : 'on the field'}` +
+        ` at ${rest.i},${rest.j} — ${z.toFixed(1)} m down`
+      : 'still above ground';
+    return `<div class="thing">
+      <span class="sw" style="background:${HUE[a.people]};display:inline-block"></span>
+      ${a.name}<br><i>${a.title || ''}</i>
+      <span class="dim"> · ${a.cls}, made ${a.made} · ${where}
+      · ${Chronicle.conditionWord(Chronicle.condition(S, a, year))}</span></div>`;
+  }).join('');
+  document.getElementById('legends').innerHTML =
+    out || '<span class="dim">nothing has a story attached to it yet</span>';
+}
+
+// Most events are structured; a figure's own deeds log their sentence as the
+// action, so anything unrecognised is already readable as written.
+function evLine(e) {
+  const who = (e.who !== null && e.who !== undefined) ? S.figures[e.who] : null;
+  const pe = (e.actor !== null && e.actor !== undefined) ? S.peoples[e.actor] : null;
+  const at = (e.place !== null && e.place !== undefined) ? S.sites[e.place] : null;
+  const nm = x => x ? x.name : 'somebody';
+  switch (e.action) {
+    case 'founded':   return `${nm(pe)} founded ${nm(at)}`;
+    case 'settled':   return `${nm(pe)} settled ${nm(at)}`;
+    case 'roaded':    return `${nm(pe)} cut a road to ${nm(at)}`;
+    case 'bridged':   return `${nm(pe)} bridged the water near ${nm(at)}`;
+    case 'fortified': return `${nm(pe)} fortified ${nm(at)}`;
+    case 'declared war on':
+      return `${nm(pe)} declared war on ${nm(S.peoples[e.target])} over ${e.cause}`;
+    case 'made peace with':
+      return `${nm(pe)} made peace with ${nm(S.peoples[e.target])}`;
+    case 'lost the war to':
+      return `${nm(pe)} lost the war to ${nm(S.peoples[e.target])}`;
+    case 'won a battle at':
+      return `${nm(pe)} won ${S.battles[e.target].name}` + (who ? `, under ${who.name}` : '');
+    case 'fell at':
+      return `${who ? who.name : 'their commander'} fell at ${S.battles[e.target].name}`;
+    case 'made':
+      return `${who ? who.name : nm(pe)} made ${S.artifacts[e.target].name}`;
+    case 'was buried':
+      return `${who ? who.name : 'somebody'} was buried at ${nm(at)}` +
+             (e.cause && e.cause !== 'age' ? ` — ${e.cause}` : '');
+    case 'lost the craft':
+      return `the working of ${e.cause} went into the ground with ${nm(pe)} — ` +
+             `nobody after them could do it`;
+    case 'opened a grave of':
+      return `${nm(pe)} opened a grave of ${nm(S.peoples[e.target])}`;
+    case 'ended':
+      return e.target === null ? `${nm(pe)} came to an end — ${e.cause}`
+                               : `${nm(at)} was lost — ${e.cause}`;
+    default:
+      return `${who ? who.name + ' ' : ''}${e.action}`;
+  }
+}
+
+function drawLog() {
+  const out = [];
+  for (const e of S.events) {
+    if (e.t > year) break;
+    out.push(`<div class="ev"><span class="t">${e.t}</span>${evLine(e)}</div>`);
+  }
+  const el = document.getElementById('log');
+  el.innerHTML = out.slice(-400).reverse().join('') || '<span class="dim">nothing yet</span>';
+}
+
+function drawPick() {
+  const el = document.getElementById('pick');
+  if (picked === null) {
+    el.innerHTML = '<div class="dim" style="margin-bottom:6px">what they say came before</div>' +
+      S.myth.lines.map(l => l ? `<div>${l}</div>` : '<div>&nbsp;</div>').join('') +
+      '<div class="dim yr" style="margin-top:6px">click the map for what stands there</div>';
+    return;
+  }
+  const s = S.sites[picked], p = S.peoples[s.people];
+  if (s.founded > year) {
+    el.innerHTML = `<span class="dim">nothing here yet — ${s.name} is not founded until ${s.founded}</span>`;
+    return;
+  }
+  const gone = s.abandoned >= 0 && s.abandoned <= year;
+  const st = Chronicle.stage(S, s, year), sink = Chronicle.sink(S, s, year);
+  const WHAT = ['lived in', 'standing and empty', 'roofless', 'walls falling',
+                'a footprint in the grass', 'nothing left above ground'];
+  el.innerHTML = `<div class="lane"><span class="sw" style="background:${HUE[s.people]}"></span>
+    <b>${s.name}</b><span class="dim">a ${s.mat}-built ${s.kind} of ${p.name}</span></div>
+    <div>built ${s.founded}${gone ? `, lost ${s.abandoned} — ${s.cause}` : ''}</div>
+    <div>${WHAT[st]}${sink > 0.3 ? `, ${sink.toFixed(1)} m down` : ''}</div>
+    <div class="dim">${gone ? (s.sudden ? 'left in a hurry — what they had is still in it'
+                                        : 'emptied slowly — they took the good things with them')
+                          : Math.round(s.pop) + ' people'}</div>
+    ${finds(s)}`;
+}
+
+// Everything named that is lying in the ground within a couple of cells,
+// with how deep it has gone and whether anybody has already been for it.
+function finds(s) {
+  const near = S.artifacts.filter(a => a.rest && a.rest.t <= year &&
+    Math.abs(a.rest.i - s.i) <= 2 && Math.abs(a.rest.j - s.j) <= 2);
+  const dug = S.deposits.filter(d => d.t <= year &&
+    Math.abs(d.i - s.i) <= 2 && Math.abs(d.j - s.j) <= 2);
+  const robbed = dug.filter(d => d.robbed >= 0 && d.robbed <= year).length;
+  if (!near.length && !dug.length) return '';
+  const list = near.slice(0, 4).map(a => {
+    const z = Chronicle.buryDepth(S, a.rest.i, a.rest.j, year - a.rest.t);
+    const cw = Chronicle.conditionWord(Chronicle.condition(S, a, year));
+    return `<div class="dim yr">· ${a.name} — ${a.rest.how}, ${z.toFixed(1)} m down, ${cw}</div>`;
+  }).join('');
+  return `<div class="dim yr" style="margin-top:6px">${dug.length} deposits in this ground` +
+         (robbed ? `, ${robbed} already opened` : '') + `</div>${list}`;
+}
+
+cv.addEventListener('click', ev => {
+  const r = cv.getBoundingClientRect();
+  const i = Math.floor((ev.clientX - r.left) / S_PX), j = Math.floor((ev.clientY - r.top) / S_PX);
+  let best = null, bd = 4;
+  for (const s of S.sites) {
+    if (s.founded > year) continue;
+    const d = Math.hypot(s.i - i, s.j - j);
+    if (d < bd) { bd = d; best = s.id; }
+  }
+  picked = best;
+  draw();
+});
+
+const scrub = document.getElementById('scrub');
+scrub.max = HIST.SPAN;
+scrub.addEventListener('input', () => { year = +scrub.value; draw(); });
+const playBtn = document.getElementById('play');
+function step() {
+  if (!playing) return;
+  if (phase === 'myth') {
+    mythT += 1;
+    drawAscii();
+    if (mythT > S.myth.lines.length * MYTH_STEP + MYTH_HOLD) phase = 'record';
+    requestAnimationFrame(step);
+    return;
+  }
+  year += speed;
+  if (year >= HIST.SPAN) {
+    year = HIST.SPAN;
+    scrub.value = year;
+    draw();
+    if (looping && !ascii) { year = 0; }   // straight round again
+    else { playing = false; playBtn.textContent = 'play'; return; }
+  }
+  scrub.value = year;
+  draw();
+  requestAnimationFrame(step);
+}
+playBtn.addEventListener('click', function () {
+  playing = !playing;
+  this.textContent = playing ? 'pause' : 'play';
+  if (playing) {
+    if (year >= HIST.SPAN) year = 0;   // at the end, start over
+    requestAnimationFrame(step);
+  }
+});
+for (const b of document.querySelectorAll('.sp')) {
+  b.addEventListener('click', function () {
+    speed = +this.dataset.sp;
+    for (const o of document.querySelectorAll('.sp')) o.classList.remove('on');
+    this.classList.add('on');
+  });
+}
+document.getElementById('loop').addEventListener('change', function () {
+  looping = this.checked;
+});
+document.getElementById('finds').addEventListener('change', function () {
+  showFinds = this.checked;
+  draw();
+});
+document.getElementById('seen').addEventListener('change', function () {
+  showSeen = this.checked;
+  draw();
+});
+
+// x drops into the game's own screen, where the record plays through once
+// from the beginning and then stands at the present.
+window.addEventListener('keydown', function (e) {
+  if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  // anything at all goes past the prologue
+  if (ascii && phase === 'myth' && e.key !== 'x' && e.key !== 'X') {
+    phase = 'record';
+    draw();
+    return;
+  }
+  if (e.key !== 'x' && e.key !== 'X') return;
+  ascii = !ascii;
+  document.body.classList.toggle('ascii', ascii);
+  if (ascii) fitAscii();
+  if (ascii) {
+    year = 0;
+    phase = 'myth';
+    mythT = 0;
+    playing = true;
+    playBtn.textContent = 'pause';
+    requestAnimationFrame(step);
+  } else {
+    phase = 'record';
+    playing = false;
+    playBtn.textContent = 'play';
+    year = HIST.SPAN;
+    scrub.value = year;
+  }
+  draw();
+});
+const seedBox = document.getElementById('seed');
+seedBox.value = CFG.SEED;
+document.getElementById('go').addEventListener('click', () => {
+  const v = Number(seedBox.value);
+  if (Number.isInteger(v) && v >= 0 && v < (1 << 24)) run(v);
+});
+window.addEventListener('resize', function () { if (ascii) { fitAscii(); draw(); } });
+run(CFG.SEED);
+</script>
+</body>
+</html>

@@ -28,11 +28,15 @@ jobs:
         run: node scripts/test-edits.js
       - name: gameplay
         run: node scripts/test-game.js
+      - name: assets
+        run: node scripts/test-assets.js
+      - name: steadings
+        run: node scripts/test-steading.js
 
-      - name: dist/index.html is in step with the sources
+      - name: dist/ is in step with the sources
         run: |
           node build.js
-          git diff --exit-code -- dist/index.html || {
-            echo "::error::dist/index.html is stale - run 'node build.js' and commit the result"
+          git diff --exit-code -- dist/ || {
+            echo "::error::a file in dist/ is stale - run 'node build.js' and commit the result"
             exit 1
           }

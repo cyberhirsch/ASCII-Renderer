@@ -64,6 +64,20 @@ const GPURenderer = {
     });
     this.removedCount = 0;
 
+    // what people built: bounding spheres per building, primitives behind
+    this.steadHead = new Float32Array(CFG.STEAD_HEAD * 8);
+    this.steadPrim = new Float32Array(CFG.STEAD_PRIM * 20);
+    this.steadHeadBuf = device.createBuffer({
+      size: this.steadHead.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.steadPrimBuf = device.createBuffer({
+      size: this.steadPrim.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.steadCount = 0;
+    this.steadAt = null;      // where the resident set was packed from
+
     this.buildAtlas(CFG.GLYPH_SET);
 
     this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
@@ -209,6 +223,8 @@ const GPURenderer = {
         { binding: 4, resource: { buffer: this.editDataBuf } },
         { binding: 5, resource: { buffer: this.removedBuf } },
         { binding: 6, resource: { buffer: this.starBuf } },
+        { binding: 7, resource: { buffer: this.steadHeadBuf } },
+        { binding: 8, resource: { buffer: this.steadPrimBuf } },
       ],
     });
     this.renderBind = this.device.createBindGroup({
@@ -273,6 +289,25 @@ const GPURenderer = {
       Edits.gpuDirty = false;
     }
 
+    // Buildings are repacked when the player has walked far enough to
+    // change what is in range, not every frame: laying out a village is
+    // milliseconds of work and the answer only changes as you move.
+    if (typeof Steading !== 'undefined' && typeof Lore !== 'undefined' && Lore.S) {
+      const moved = !this.steadAt ||
+        Math.hypot(Player.x - this.steadAt[0], Player.y - this.steadAt[1]) > CFG.STEAD_STEP;
+      if (moved) {
+        const r = Steading.pack(Lore.S, Player.x, Player.y, Lore.S.now,
+                                this.steadHead, this.steadPrim,
+                                CFG.STEAD_HEAD, CFG.STEAD_PRIM);
+        this.steadCount = r.heads;
+        this.steadAt = [Player.x, Player.y];
+        if (r.heads > 0) {
+          dev.queue.writeBuffer(this.steadHeadBuf, 0, this.steadHead, 0, r.heads * 8);
+          dev.queue.writeBuffer(this.steadPrimBuf, 0, this.steadPrim, 0, r.prims * 20);
+        }
+      }
+    }
+
     if (Removed.gpuDirty) {
       this.removedCount = Removed.pack(Player.x, Player.y);
       dev.queue.writeBuffer(this.removedBuf, 0, Removed.data);
@@ -316,6 +351,7 @@ const GPURenderer = {
     u.set(sky.moonDir, 60);
     u[63] = sky.night;
     u.set(sky.keyDir, 64);
+    u[67] = this.steadCount;
     dev.queue.writeBuffer(this.uniBuf, 0, u);
     dev.queue.writeBuffer(this.rparBuf, 0, new Float32Array([
       this.cols, this.rows, this.levels, CFG.MONO ? 1 : 0,

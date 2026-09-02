@@ -60,6 +60,7 @@ const Player = {
 
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => {
+      if (Game.mode === 'myth') { Game.mode = 'title'; Game.uiDirty = true; return; }
       if (Game.mode === 'title') Game.close();
       canvas.requestPointerLock();
     });

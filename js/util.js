@@ -381,7 +381,15 @@ const MATS = {
   VEIN_W: 0.05,     // vein half-width in noise-value units
   GEM_CORE: 0.22,   // fraction of the vein width that is gem, not ore
   GEM_Z: -6.0,      // gems only form below this depth
-  IRON_Z: -14.0,    // ore below this is iron, above it copper
+  IRON_Z: -14.0,    // ore below this is iron; above it, place decides
+  // Tin does not lie with copper. Cassiterite belongs to its own granites,
+  // and that one geological fact is why the bronze age ran on trade rather
+  // than on local smelting - the two halves of the alloy come out of two
+  // different parts of the country. Here it is a province: a coarse 2D
+  // field, so tin is somewhere you GO, not something you happen to hit.
+  TIN_F: 0.004,     // province frequency: a 250 u noise cell, which runs
+                    // out to provinces several hundred units across
+  TIN_GATE: 0.70,   // province noise above this carries tin instead of copper
   // Glow lichen on cave rock. Mirrored: the shader decides where it grows
   // and World.classifySolid decides where you may pick it, so a divergence
   // here offers a harvest off a bare wall.
@@ -434,8 +442,21 @@ function matAt(x, y, z, gz) {
   return rockMat(x, y, z);
 }
 
-// which ore this depth yields
-function oreItem(z) { return z < MATS.IRON_Z ? 'iron' : 'copper'; }
+// Is this ground tin country? A pure function of where you are standing,
+// independent of whether there is any ore under it - the province is the
+// place, the vein is the luck. Mirror of WGSL tinCountry. KEEP IN SYNC.
+function tinCountry(x, y) {
+  return vn2(x * MATS.TIN_F, y * MATS.TIN_F, (CFG.SEED ^ 0x7104) >>> 0) >
+         MATS.TIN_GATE;
+}
+
+// Which metal a vein carries. Depth decides iron; above that the ground
+// does, which is what makes bronze the first thing in this world nobody can
+// make without leaving home.
+function oreItem(x, y, z) {
+  if (z < MATS.IRON_Z) return 'iron';
+  return tinCountry(x, y) ? 'tin' : 'copper';
+}
 
 // species index for the tree anchored in cell (ix, iy) - deterministic,
 // independent of the placement hash so size and species do not correlate

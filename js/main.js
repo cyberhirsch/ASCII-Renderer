@@ -9,6 +9,9 @@
   Edits.init();       // load persisted digs before the first frame
   Removed.init();     // load persisted cleared cells
   Game.init();        // load persisted inventory
+  Boot.set('running the centuries');
+  await breathe();
+  Lore.init();        // six thousand years, ~40 ms, before anything asks
   Boot.set('finding a door');
   await breathe();
   Player.init();      // spawn scan: the heavy synchronous bit

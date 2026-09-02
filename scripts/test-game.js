@@ -11,13 +11,13 @@ const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
-             'removed', 'lore', 'items', 'game']
+             'removed', 'chronicle', 'lore', 'items', 'game']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
-   'Quality', 'saveKey']
+   'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -353,6 +353,25 @@ if (c.Removed) {
   const all = c.RECIPES.every(r => G.canCraft(r));
   all ? ok(`all ${c.RECIPES.length} recipes craftable with materials`)
       : fail('canCraft broken');
+
+  // a recipe that yields more than one gives more than one
+  {
+    const multi = c.RECIPES.filter(r => r.n > 1);
+    (multi.length > 0) ? ok(`${multi.length} recipe(s) yield more than one`)
+                       : fail('no multi-yield recipe to check');
+    for (const r of multi) {
+      G.inv.clear();
+      for (const [id, cnt] of Object.entries(r.needs)) G.give(id, cnt);
+      G.cursor = c.RECIPES.indexOf(r);
+      G.confirm();
+      (G.count(r.out) === r.n)
+        ? ok(`${r.out} smelts ${r.n} at a time and spends the lot`)
+        : fail(`${r.out} yielded ${G.count(r.out)}, wanted ${r.n}`);
+      const leftover = Object.keys(r.needs).some(id => G.count(id) !== 0);
+      (!leftover) ? ok(`${r.out} consumed every ingredient`)
+                  : fail(`${r.out} left ingredients behind`);
+    }
+  }
   G.close();
 }
 
@@ -446,10 +465,49 @@ if (c.matAt) {
   (shallowGem === 0) ? ok('no gems above the gem depth')
                      : fail(`${shallowGem} gems formed too shallow`);
 
-  // ore type splits by depth
-  (oreItem(-5) === 'copper' && oreItem(-40) === 'iron')
-    ? ok('ore type splits by depth (copper up, iron down)')
-    : fail('oreItem depth split wrong');
+  // Ore type: depth decides iron, and above that the ground decides between
+  // copper and tin. Bronze needs both, so the map has to actually contain
+  // both - a world that is all tin country or none of it cannot be alloyed
+  // in, and that would be a dead end nobody could see coming.
+  {
+    const { tinCountry } = c;
+    let cu = null, sn = null;
+    for (let d = 0; d < 6000 && (cu === null || sn === null); d += 23) {
+      if (cu === null && !tinCountry(d, -d)) cu = d;
+      if (sn === null && tinCountry(d, -d)) sn = d;
+    }
+    (cu !== null && sn !== null)
+      ? ok(`the map holds both metals: copper ground at ${cu}, tin country at ${sn}`)
+      : fail('no tin country found, or no copper ground');
+    (oreItem(cu, -cu, -40) === 'iron' && oreItem(sn, -sn, -40) === 'iron')
+      ? ok('deep ore is iron wherever you stand')
+      : fail('deep ore is not iron everywhere');
+    (oreItem(cu, -cu, -5) === 'copper' && oreItem(sn, -sn, -5) === 'tin')
+      ? ok('shallow ore follows the country: copper outside it, tin within')
+      : fail('the tin province is not respected');
+
+    // How much of the world is tin country. Too little and bronze is a
+    // lottery; too much and the journey the alloy is supposed to cost
+    // stops being a journey at all.
+    let inTin = 0, total = 0;
+    for (let x = -3000; x <= 3000; x += 60)
+      for (let y = -3000; y <= 3000; y += 60) { total++; if (tinCountry(x, y)) inTin++; }
+    const frac = inTin / total;
+    (frac > 0.03 && frac < 0.40)
+      ? ok(`tin country covers ${(frac * 100).toFixed(1)}% of the map`)
+      : fail(`tin country covers ${(frac * 100).toFixed(1)}% - bronze is a lottery or a gift`);
+
+    // and it has to be somewhere, not everywhere: a walk, not a shimmer
+    let runs = 0, was = tinCountry(-3000, 0);
+    for (let x = -3000; x <= 3000; x += 20) {
+      const now = tinCountry(x, 0);
+      if (now !== was) runs++;
+      was = now;
+    }
+    (runs > 0 && runs < 40)
+      ? ok(`tin country is regions, not speckle (${runs} crossings over 6000 u)`)
+      : fail(`tin province granularity wrong: ${runs} crossings`);
+  }
 }
 
 // ---- 11. digging is gated by material ----
@@ -506,16 +564,70 @@ if (c.matAt) {
     // dig at the ore point directly: matAt must agree it is ore down there
     const gz = terrainH(orePt[0], orePt[1]);
     if (matAt(orePt[0], orePt[1], orePt[2], gz) === MATS.ORE) {
-      const id = c.oreItem(orePt[2]);
+      const id = c.oreItem(...orePt);
       const before = G.count(id);
       G.digAt(...orePt);
       (G.count(id) === before + 1) ? ok(`mining a vein yields ${id}`)
                                    : fail(`ore dig yielded nothing: ${id}`);
     } else ok('ore point sits under soil cover (skipped)');
   } else fail('no ore point found for the dig test');
+
+  // ---- the pick ladder: a point only bites what it is harder than ----
+  {
+    // an iron vein and a gem pocket, deep enough that both are real
+    let ironPt = null;
+    for (let ix = 0; ix < 70 && !ironPt; ix++)
+      for (let iy = 0; iy < 70 && !ironPt; iy++)
+        for (let iz = 0; iz < 22; iz++) {
+          const x = ix * 3.1, y = iy * 2.9, z = -15 - iz * 1.3;
+          if (c.rockMat(x, y, z) === MATS.ORE &&
+              matAt(x, y, z, terrainH(x, y)) === MATS.ORE) { ironPt = [x, y, z]; break; }
+        }
+    (ironPt && c.oreItem(...ironPt) === 'iron')
+      ? ok('found an iron vein to test the ladder on')
+      : fail('no iron vein found');
+
+    if (ironPt && gemPt && matAt(gemPt[0], gemPt[1], gemPt[2], terrainH(gemPt[0], gemPt[1])) === MATS.GEM) {
+      G.inv.clear();
+      G.give('pick', 1);
+      (G.pickTier() === 1) ? ok('a stone pick is the first rung') : fail('pickTier wrong');
+      (G.digAt(...ironPt) === 0 && G.toastMsg.includes('bronze'))
+        ? ok('a stone pick turns on iron, and says so')
+        : fail(`stone pick cut iron: "${G.toastMsg}"`);
+      (G.digAt(...gemPt) === 0 && G.toastMsg.includes('iron'))
+        ? ok('a stone pick turns on a gem pocket, and says so')
+        : fail(`stone pick cut a gem: "${G.toastMsg}"`);
+
+      G.give('bronzepick', 1);
+      (G.pickTier() === 2) ? ok('bronze is the second rung') : fail('bronze tier wrong');
+      const fe = G.count('iron');
+      (G.digAt(...ironPt) > 0 && G.count('iron') === fe + 1)
+        ? ok('a bronze pick frees iron') : fail('bronze pick failed on iron');
+      (G.digAt(...gemPt) === 0)
+        ? ok('but bronze still turns on a gem pocket') : fail('bronze pick cut a gem');
+
+      G.give('ironpick', 1);
+      (G.pickTier() === 3) ? ok('iron is the top rung') : fail('iron tier wrong');
+      const gm = G.count('gem');
+      (G.digAt(...gemPt) > 0 && G.count('gem') === gm + 1)
+        ? ok('an iron pick frees a gem') : fail('iron pick failed on a gem');
+
+      // the ladder has to actually be climbable from nothing but the ground
+      const chain = ['bronze', 'bronzepick', 'ironpick'];
+      const byOut = {};
+      for (const r of c.RECIPES) byOut[r.out] = r;
+      const reachable = chain.every(id => byOut[id] &&
+        Object.keys(byOut[id].needs).every(n =>
+          ['wood', 'stone', 'copper', 'tin', 'iron', 'gem', 'lichen'].includes(n) ||
+          byOut[n] !== undefined));
+      reachable ? ok('every rung is craftable from what the ground gives')
+                : fail('a rung of the ladder needs something unobtainable');
+    } else ok('no gem/iron pair available at this seed (skipped)');
+  }
   if (gemPt) {
     const gz = terrainH(gemPt[0], gemPt[1]);
     if (matAt(gemPt[0], gemPt[1], gemPt[2], gz) === MATS.GEM) {
+      G.give('ironpick', 1);   // gem pockets are the top rung; say so here
       const before = G.count('gem');
       G.digAt(...gemPt);
       (G.count('gem') === before + 1) ? ok('mining a gem pocket yields a gem')
@@ -858,101 +970,157 @@ if (c.stoneAt) {
   }
 }
 
-// ---- 14. the record: generated history, the goal, and the save ----
+// ---- 14. the record: read off the chronicle, laid out by depth ----
 if (c.Lore) {
   const { Lore, Game: G } = c;
+  Lore.S = null;
+  const S = Lore.init();
 
-  // the same seed tells the same story, twice
-  Lore._civ = null;
-  const c1 = JSON.stringify(Lore.civ());
-  Lore._civ = null;
-  const c2 = JSON.stringify(Lore.civ());
-  (c1 === c2) ? ok(`civilisation deterministic: ${Lore.civ().name}, the ${Lore.civ().people}`)
-              : fail('civ nondeterministic');
-
-  // every field got filled in, nothing reads "undefined"
-  const civ = Lore.civ();
-  const holes = Object.entries(civ).filter(([, v]) =>
-    v === undefined || v === null || v === '' || String(v).includes('undefined'));
-  (holes.length === 0) ? ok('every fact about them is filled in')
-                       : fail('gaps in the civ: ' + JSON.stringify(holes));
-
-  // an inscription exists at every depth, is deterministic, and says something
-  let badIns = 0, seen = new Set();
-  for (const k of [-1, -2, -3]) {
-    for (let i = 0; i < 40; i++) {
-      const ins = Lore.inscription(i, i * 3, k);
-      const again = Lore.inscription(i, i * 3, k);
-      if (JSON.stringify(ins) !== JSON.stringify(again)) badIns++;
-      if (!ins.lines.length || ins.lines.some(l => !l || l.includes('undefined'))) badIns++;
-      ins.lines.forEach(l => seen.add(l));
-    }
+  {
+    const one = JSON.stringify(Lore.inscription(3, 5, -2));
+    Lore.S = null; Lore.init();
+    const two = JSON.stringify(Lore.inscription(3, 5, -2));
+    (one === two) ? ok('the same wall carries the same words twice')
+                  : fail('inscriptions are not deterministic');
   }
-  (badIns === 0) ? ok('inscriptions deterministic and complete at every depth')
-                 : fail(`${badIns} broken inscriptions`);
-  (seen.size >= 9)
-    ? ok(`${seen.size} distinct lines of record across the depths`)
-    : fail(`too little variety: only ${seen.size} lines`);
 
-  // the story is laid out by depth, so the bands do not share beats
-  const band = k => new Set(
-    Array.from({ length: 30 }, (_, i) => Lore.inscription(i, i * 5, k).lines[0]));
-  const b1 = band(-1), b3 = band(-3);
-  ([...b1].every(l => !b3.has(l)))
-    ? ok('the founding and the ending are told at different depths')
-    : fail('beats leak between bands');
+  // Halls the chronicle actually reaches. Not every cell holds one and not
+  // every hall stands near a settlement, so this walks until it has a sample.
+  const found = [];
+  for (let cx = -14; cx <= 14 && found.length < 60; cx++)
+    for (let cy = -14; cy <= 14 && found.length < 60; cy++)
+      for (const k of [-1, -2, -3]) {
+        const ins = Lore.inscription(cx, cy, k);
+        if (ins) found.push({ cx, cy, k, ins });
+      }
+  (found.length > 12)
+    ? ok(`${found.length} halls carry a record in the settled region`)
+    : fail(`only ${found.length} halls have anything cut in them`);
 
-  // the goal: reading all three depths completes the record
-  G.read = []; G.done = false; G.used.clear();
-  (G.objective().includes('find')) ? ok('the goal starts by pointing you at the halls')
-                                   : fail('opening objective wrong: ' + G.objective());
-  G.readInscription(Lore.inscription(1, 1, -1));
-  G.close();
-  (!G.done && G.bandsRead().size === 1)
-    ? ok('one depth read is not the whole story') : fail('completed too early');
-  G.readInscription(Lore.inscription(2, 2, -2));
-  G.close();
-  G.readInscription(Lore.inscription(3, 3, -3));
-  (G.done === true)
-    ? ok('reading all three depths completes the record') : fail('never completed');
-  (G.objective().includes('whole'))
-    ? ok('the objective reports it is finished') : fail('objective wrong at the end');
-  G.close();
+  // THE RULE: a hall belongs to the people whose settlement is nearest it
+  {
+    let wrong = 0, checked = 0;
+    for (const f of found) {
+      const a = c.hallAt(f.cx, f.cy, f.k);
+      if (!a) continue;
+      let best = null, bd = Infinity;
+      for (const st of S.sites) {
+        const d = (st.x - a.ax) ** 2 + (st.y - a.ay) ** 2;
+        if (d < bd) { bd = d; best = st; }
+      }
+      checked++;
+      if (best.people !== f.ins.people) wrong++;
+    }
+    (checked > 0 && wrong === 0)
+      ? ok(`every hall belongs to its nearest settlement's people (${checked} checked)`)
+      : fail(`${wrong} of ${checked} halls name the wrong people`);
+  }
 
-  // re-reading the same hall does not double count
-  const before = G.read.length;
-  G.readInscription(Lore.inscription(3, 3, -3));
-  G.close();
-  (G.read.length === before) ? ok('re-reading a hall does not count twice')
-                             : fail('duplicate record entries');
+  {
+    let bad = 0, longest = 0;
+    for (const f of found) for (const l of f.ins.lines) {
+      if (typeof l !== 'string' || l.includes('undefined') || l.includes('null')) bad++;
+      if (l.length > longest) longest = l.length;
+    }
+    (bad === 0) ? ok(`every line is filled in (longest ${longest} chars)`)
+                : fail(`${bad} broken inscription lines`);
+    (longest <= 52) ? ok('every line fits the panel') : fail(`a line runs to ${longest}`);
+  }
 
-  // the journal renders the story it has
+  {
+    let bad = 0, outside = 0;
+    for (const f of found) {
+      const p = S.peoples[f.ins.people];
+      if (!p) { bad++; continue; }
+      const to = p.fell >= 0 ? p.fell : S.now;
+      for (const l of f.ins.lines) {
+        const m = /In the (\d+)(?:st|nd|rd|th) year/.exec(l);
+        if (m && (+m[1] < p.rise || +m[1] > to)) outside++;
+      }
+    }
+    (bad === 0) ? ok('every hall names a people who existed') : fail(`${bad} name nobody`);
+    (outside === 0) ? ok('and cuts only years that people lived through')
+                    : fail(`${outside} lines date outside their people's life`);
+  }
+
+  // depth is time: within one people, deeper is later
+  {
+    let checked = 0, wrong = 0;
+    for (const f of found) {
+      if (f.k !== -1) continue;
+      const deep = Lore.inscription(f.cx, f.cy, -3);
+      if (!deep || deep.people !== f.ins.people) continue;
+      const yr = ins => { let hi = -1;
+        for (const l of ins.lines) { const m = /In the (\d+)/.exec(l);
+          if (m && +m[1] > hi) hi = +m[1]; } return hi; };
+      const a = yr(f.ins), b = yr(deep);
+      if (a < 0 || b < 0) continue;
+      checked++;
+      if (b < a) wrong++;
+    }
+    (checked === 0 || wrong === 0)
+      ? ok(`going down goes forward in one people's life (${checked} pairs)`)
+      : fail(`${wrong} of ${checked} deep halls predate the shallow ones`);
+  }
+
+  {
+    const who = new Set(found.map(f => f.ins.people));
+    (who.size > 1) ? ok(`the caves are ${who.size} peoples' work, not one`)
+                   : fail('every hall belongs to the same people');
+  }
+
+  {
+    const far = Lore.inscription(400, 400, -1);
+    (far === null) ? ok('a hall beyond the record has blank pillars')
+                   : fail('the record reaches somewhere it should not');
+  }
+
+  const pick = k => found.find(f => f.k === k);
+  const one = pick(-1), two = pick(-2), three = pick(-3);
+  if (one && two && three) {
+    G.read = []; G.done = false; G.used.clear();
+    (G.objective().includes('find')) ? ok('the goal starts by pointing at the halls')
+                                     : fail('opening objective wrong: ' + G.objective());
+    G.readInscription(one.ins); G.close();
+    (!G.done && G.bandsRead().size === 1)
+      ? ok('one depth read is not the whole story') : fail('completed too early');
+    G.readInscription(two.ins); G.close();
+    G.readInscription(three.ins);
+    (G.done === true) ? ok('reading all three depths completes the record')
+                      : fail('never completed');
+    (G.objective().includes('whole')) ? ok('the objective reports it is finished')
+                                      : fail('objective wrong at the end');
+    G.close();
+    const before = G.read.length;
+    G.readInscription(three.ins); G.close();
+    (G.read.length === before) ? ok('re-reading a hall does not count twice')
+                               : fail('duplicate record entries');
+  } else fail('could not find a hall at each of the three depths');
+
   c.Overlay.clear();
   G.open('journal');
   G.drawUI();
   {
     let text = '';
-    for (let i = 0; i < c.Overlay.data.length; i++) {
+    for (let i = 0; i < c.Overlay.data.length; i++)
       if (c.Overlay.data[i] > 32) text += String.fromCharCode(c.Overlay.data[i]);
-    }
     text.includes('RECORD') ? ok('the journal renders into the glyph grid')
                             : fail('journal missing from overlay');
   }
   G.close();
 
-  // the save carries the record, the inventory, and where you stood
   G.inv.clear(); G.give('gem', 2);
   const snap = G.snapshot();
   snap.at = [12.5, -7.25, 1.1, -0.2, 3.4];
   snap.t = 0.42;
+  const readCount = G.read.length;
   G.inv.clear(); G.read = []; G.done = false;
   G.restore(JSON.parse(JSON.stringify(snap)));
-  (G.count('gem') === 2 && G.read.length === 3 && G.done === true &&
+  (G.count('gem') === 2 && G.read.length === readCount && G.done === true &&
    G.spawnAt[0] === 12.5 && Math.abs(c.Sky.t - 0.42) < 1e-9)
     ? ok('the save round-trips items, record, position and time')
     : fail('save round-trip lost something');
 
-  // a fresh world has no saved position, so it falls back to a spawn scan
   G.restore({});
   (G.spawnAt === null && G.read.length === 0 && G.done === false)
     ? ok('an empty save starts a new world cleanly')

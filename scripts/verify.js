@@ -244,7 +244,8 @@ cmp('render', rendDecl, rendEnt);
 // ---- 5. all modules parse ----
 const vm = require('vm');
 const modules = ['config', 'quality', 'util', 'world', 'sky', 'overlay',
-  'entities', 'edits', 'removed', 'lore', 'items', 'game', 'player',
+  'entities', 'edits', 'removed', 'chronicle', 'assets', 'steading', 'lore',
+  'items', 'game', 'player',
   'webgpu/atlas', 'webgpu/shaders', 'webgpu/gpu-renderer', 'main'];
 for (const f of modules) {
   const p = path.join(root, 'js', f + '.js');

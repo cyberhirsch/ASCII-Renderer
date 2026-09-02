@@ -55,8 +55,14 @@ bootstrap: gather stone, break a branch off a tree for wood, and craft your
 way up from there. Chopped trees fall and stay felled.
 
 Rock rarely carries **ore veins** — branching tubes where two noise fields
-intersect, copper near the surface, iron deeper — and in the core of a deep
-vein, **gems**, which glint out of cave walls and are worth walking toward.
+intersect. Deep down they run iron. Nearer the surface what they carry
+depends on where you are standing: mostly copper, but about a fifth of the
+country is **tin**, in provinces a few hundred units across, and tin is
+never found where the copper is. That is deliberate, and it is the reason
+the real bronze age ran on trade — **bronze** is the one thing here you
+cannot make at home, because the two halves of it come out of two different
+parts of the map. In the core of a deep vein sit **gems**, which glint out
+of cave walls and are worth walking toward.
 A torch (wood + cave lichen) brightens your headlamp; a gem lantern brightens
 it far more — and above ground that matters, because the sun sets. A full
 day/night cycle runs in fifty minutes: warm key light by day, red at the
@@ -124,10 +130,76 @@ stays below 2²⁴ so an f32 uniform carries it exactly). Movement, slopes,
 headroom, stair walking, and dug pits all sample the same `solidD` the
 renderer draws.
 
+## The asset sheet
+
+`assets.html` is the catalogue: every building, find, prop and carried item
+in one page, each one traced and drawn as ASCII by the same primitives the
+shader intersects. It is a **review instrument**, not a gallery — every card
+carries an *approved* box and a note field, both kept in `localStorage`
+across reloads, seeds and decay sweeps, and **copy notes** hands the whole
+review back as markdown.
+
+Nothing on it is a mesh. A building is a function of `(kind, seed, decay,
+cause)` returning a list of boxes, cylinders, cones, convex bodies and
+faceted stones — the five shapes the shader already traces, plus a convex
+body that is `hitFaceted`'s slab loop with the plane normals given instead
+of hashed. So the sheet is not a preview of an asset; it *is* the asset,
+and the same parts list can be handed to the renderer without anything
+being baked. That is pillar 1 applied to buildings.
+
+The vocabulary is the chronicle's. A site has a kind (hold, farm, mine), a
+people with a material and a metal, an abandonment year and a cause — and
+those five facts decide what stands there and how much is left, so a ruin
+is the residue of something the sim actually did. Decay runs the five
+stages the chronicle names an artifact's condition with (`standing`,
+`weathered`, `roofless`, `ruined`, `footings`); thatch is gone in decades
+and drystone essentially never, which is why a ruined timber farm is
+postholes and a ruined stone hold is a wall you can lean on. Sites sink as
+they are left, because soil does not stay still and a floor laid level with
+the yard ends up under it — the footing course is what stays readable.
+
+**Section** cuts the turf away on the near side of the object and draws the
+soil profile behind it, the way an excavation is drawn: turf, then the layer
+that came in over the site, then what the place was built on. The middle
+band *is* the sinking — its floor sits at exactly the depth the building has
+gone down by, so the drawing measures the model rather than illustrating it.
+
+A site goes down by up to 1.65 m, which is deep enough that by the last
+stage a stone hall is entirely under the turf. In elevation that leaves the
+**tell**: a low swell where the soil went, which is the only thing such a
+place shows from the outside and is exactly how one is found. In section the
+mound is absent, because the cut has taken the overburden away and the soil
+face is drawing the same soil in profile instead — one body of earth, two
+views, never both at once.
+
+**Life** puts one building's five stages in a row, in section, all five
+framed on the building *as built* — so the turf line sits on the same row in
+every panel and you watch the structure come down as the ground comes up.
+What grows back is staged the same way: moss in the wet corners first, then
+a creeper up whatever masonry is still standing (the stage that reads best,
+because it puts something living against something built and dates the ruin
+at a glance), then a sapling through the hearth, then a young tree.
+
+Finds carry the chronicle's own condition curve, and the bottom of it is
+where an object stops being one: below `Artifact.STAIN` the metal is gone
+and what is left is the discolouration in the soil. **That cannot be picked
+up.** `Assets.make` declines the hold, the camera goes overhead — edge on, a
+stain is nothing at all — and the card says *nothing left to pick up*. A
+blade leaves a line and a bowl leaves a disc, which is how one is told from
+the other in a trench.
+
+Controls: **X** swaps the glyph view for the raw traced image, the same key
+and the same meaning the game gives it. **In hand** puts anything holdable
+where a hand would be and looks at it from `CFG.EYE` through the game's own
+lens, at its true size — a torc is 26 cm and a spear is a metre and a half,
+and which of those you are holding is the only thing that view is for.
+Every card carries its size in metres, a person standing beside it, and a
+one-metre ground grid.
+
 ## Development
 
 Plain scripts under `js/`, shared global scope, no build step for dev.
-`node build.js` inlines everything into `dist/index.html`.
+`node build.js` inlines everything into `dist/`.
 
 The dev sandbox for this project has no GPU, so shader changes are gated by
 static verification plus node tests against the CPU mirrors:
@@ -143,11 +215,23 @@ node scripts/test-edits.js    # dig/fill round-trips, packing, slot diffing,
                               # run-length encoding, v1 save migration
 node scripts/test-game.js     # inventory, panels, examine, the record,
                               # the quality ladder, per-world save keys
+node scripts/test-assets.js   # the catalogue and the ASCII tracer
 ```
 
-All five run in CI on every push, together with a rebuild of
-`dist/index.html` that fails if the committed bundle is not what `build.js`
-produces — that file is the one people actually open.
+`test-assets.js` earns its place with one check in particular. Every review
+pass on the sheet came back with the same sentence in it — *floating
+stones*, *rocks are floating*, *floating pieces when decaying* — because a
+faceted stone is a bounding sphere with cuts taken out of it, and putting
+its centre a radius above the ground leaves it hanging. That is a class of
+bug rather than an instance, so the suite walks every asset at six decay
+levels and fails any part that neither reaches the ground nor rests on
+something that does. It also holds a building to being *whole* at decay
+zero, which is the other thing a reviewer asked and the renderer could not
+answer.
+
+All of them run in CI on every push, together with a rebuild of `dist/`
+that fails if a committed bundle is not what `build.js` produces — those
+files are the ones people actually open.
 
 Shared constants are interpolated into the WGSL template from `CFG`/`CAVES`/
 `TERR`/`TREE`/`MATS`/`PROPS` (`verify.js` rejects literals), so the shader

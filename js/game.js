@@ -16,11 +16,17 @@ const Game = {
   done: false,          // the record has been pieced together
   spawnAt: null,        // where a saved game left the player standing
 
+  // The prologue: what they say came before the record. It runs once, for
+  // somebody who has never been here - a returning player is dropped
+  // straight back in where they stopped, and does not sit through the
+  // creation of the world a second time.
+  mythT: 0,
+  MYTH_LINE: 0.38,   // seconds before the next line of it arrives
+  MYTH_HOLD: 1.2,    // and how long it stands complete before the title
+
   init() {
     this.load();
-    // a returning player is dropped straight back in; a new one gets told
-    // where they are and what there is to find
-    if (!this.spawnAt) this.mode = 'title';
+    if (!this.spawnAt) this.mode = 'myth';
   },
 
   // ---- inventory ----
@@ -46,6 +52,28 @@ const Game = {
 
   // ---- digging: what the ground is made of decides what it takes ----
 
+  // Pickaxes come in three metals and a point only bites what it is harder
+  // than. Stone takes rock and the soft metals; iron ore wants bronze; the
+  // gem pockets want iron. That ladder is what the journey for tin is FOR -
+  // without it bronze is a trinket, and with it bronze is the rung that
+  // reaches iron, which is the rung that reaches the lantern.
+  PICKS: [['pick', 1], ['bronzepick', 2], ['ironpick', 3]],
+  PICK_NAME: ['bare hands', 'a stone pickaxe', 'a bronze pickaxe', 'an iron pickaxe'],
+
+  pickTier() {
+    let t = 0;
+    for (const [id, tier] of this.PICKS) if (this.count(id) && tier > t) t = tier;
+    return t;
+  },
+
+  // how hard this point is to shift, on the same scale
+  needFor(mat, x, y, z) {
+    if (mat === MATS.GEM) return 3;
+    if (mat === MATS.ORE && oreItem(x, y, z) === 'iron') return 2;
+    return 1;
+  },
+
+
   // Returns the scoop radius to carve, or 0 when the right tool is missing
   // (a toast explaining why is already queued). Pays out whatever the
   // material yields. Soil moves in bigger bites than rock does.
@@ -55,12 +83,19 @@ const Game = {
       if (!this.count('shovel')) { this.toast('soil - you need a shovel'); return 0; }
       return CFG.DIG_R * 1.4;
     }
-    if (!this.count('pick')) { this.toast('solid rock - you need a pickaxe'); return 0; }
+    const need = this.needFor(mat, x, y, z);
+    const tier = this.pickTier();
+    if (tier < need) {
+      // say which rung is missing, not just that something is
+      this.toast(tier === 0 ? 'solid rock - you need a pickaxe'
+        : 'the point turns - this wants ' + this.PICK_NAME[need]);
+      return 0;
+    }
     if (mat === MATS.GEM) {
       this.give('gem', 1);
       this.toast('a gem comes loose (' + this.count('gem') + ')');
     } else if (mat === MATS.ORE) {
-      const id = oreItem(z);
+      const id = oreItem(x, y, z);
       this.give(id, 1);
       this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
     } else {
@@ -224,6 +259,11 @@ const Game = {
   // ---- input: returns true when the key was consumed ----
 
   key(code) {
+    // the prologue yields to anything at all, and lands on the title
+    if (this.mode === 'myth') {
+      if (code !== 'F11') { this.mode = 'title'; this.uiDirty = true; }
+      return true;
+    }
     if (this.mode === 'play') {
       if (code === 'Tab') { this.open('inventory'); return true; }
       if (code === 'KeyC') { this.open('craft'); return true; }
@@ -257,8 +297,9 @@ const Game = {
       const r = RECIPES[((this.cursor % n) + n) % n];
       if (!this.canCraft(r)) { this.toast('missing ingredients'); return; }
       for (const [id, cnt] of Object.entries(r.needs)) this.take(id, cnt);
-      this.give(r.out, 1);
-      this.toast('crafted: ' + ITEMS[r.out].name);
+      const made = r.n || 1;
+      this.give(r.out, made);
+      this.toast('crafted: ' + (made > 1 ? made + ' ' : '') + ITEMS[r.out].name);
       return;
     }
     if (this.mode === 'examine' && this.actions.length) {
@@ -338,11 +379,12 @@ const Game = {
         this.toast('+1 glow lichen (' + this.count('lichen') + ')');
       });
     } else if (t.kind === 'ore' || t.kind === 'gem') {
-      const id = t.kind === 'gem' ? 'gem' : oreItem(t.point[2]);
-      const has = this.count('pick') > 0;
+      const id = t.kind === 'gem' ? 'gem' : oreItem(...t.point);
+      const need = t.kind === 'gem' ? 3 : (id === 'iron' ? 2 : 1);
+      const has = this.pickTier() >= need;
       once('mine', 'mine  (+1 ' + ITEMS[id].name + ')' +
-        (has ? '' : '  (needs a pickaxe)'), () => {
-          if (!has) { this.toast('you need a pickaxe for that'); return; }
+        (has ? '' : '  (needs ' + this.PICK_NAME[need] + ')'), () => {
+          if (!has) { this.toast('you need ' + this.PICK_NAME[need] + ' for that'); return; }
           this.give(id, 1);
           this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
         });
@@ -354,7 +396,7 @@ const Game = {
         this.close();
       } });
     } else if (t.kind === 'boulder') {
-      const has = this.count('pick') > 0;
+      const has = this.pickTier() >= 1;   // plain rock: any pick will do
       acts.push({ label: 'break' + (has ? '  (+3 stone)' : '  (needs a pickaxe)'),
         fn: () => {
           if (!has) { this.toast('you need a pickaxe for that'); return; }
@@ -371,10 +413,14 @@ const Game = {
         this.toast('+1 stone (' + this.count('stone') + ')');
       });
     } else if (t.kind === 'pillar' && t.hall) {
+      // Far enough out, no people's record reaches the hall and the pillar
+      // is only a pillar. The region is finite; the world is not.
       const ins = Lore.inscription(t.hall.cx, t.hall.cy, t.hall.k);
-      const seen = this.read.includes(ins.key);
-      acts.push({ label: seen ? 'read again' : 'read the inscription',
-        fn: () => this.readInscription(ins) });
+      if (ins) {
+        const seen = this.read.includes(ins.key);
+        acts.push({ label: seen ? 'read again' : 'read the inscription',
+          fn: () => this.readInscription(ins) });
+      }
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
@@ -433,7 +479,7 @@ const Game = {
                                 'It would take a pickaxe.'];
       case 'water':     return ['WATER', 'Still, dark, patient.'];
       case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
-      case 'ore':       return [ITEMS[oreItem(t.point[2])].name.toUpperCase() + ' VEIN',
+      case 'ore':       return [ITEMS[oreItem(...t.point)].name.toUpperCase() + ' VEIN',
                                 'A seam of metal threading the stone.'];
       case 'gem':       return ['GEM IN THE ROCK',
                                 'Deep in a vein, something is catching',
@@ -459,6 +505,15 @@ const Game = {
   // ---- per-frame ----
 
   tick(dt) {
+    if (this.mode === 'myth') {
+      this.mythT += dt;
+      this.uiDirty = true;
+      const all = (Lore.init().myth || { lines: [] }).lines;
+      // once it has all been said, hold it a moment and then step aside
+      if (this.mythT > all.length * this.MYTH_LINE + this.MYTH_HOLD * 4) {
+        this.mode = 'title';
+      }
+    }
     if (this.toastT > 0) {
       this.toastT -= dt;
       if (this.toastT <= 0) { this.toastMsg = ''; this.uiDirty = true; }
@@ -487,6 +542,7 @@ const Game = {
     if (this.toastMsg) {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
+    if (this.mode === 'myth') this.drawMyth();
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
@@ -494,6 +550,21 @@ const Game = {
     if (this.mode === 'reading') this.drawReading();
     if (this.mode === 'journal') this.drawJournal();
     if (this.mode === 'title') this.drawTitle();
+  },
+
+  // One line of the myth at a time, laid out for the whole of it from the
+  // first line, so the text does not walk up the screen as more arrives.
+  drawMyth() {
+    const all = (Lore.init().myth || { lines: [] }).lines;
+    if (!all.length) { this.mode = 'title'; return; }
+    const shown = Math.min(all.length, Math.floor(this.mythT / this.MYTH_LINE));
+    const w = Math.max(...all.map(l => l.length));
+    const x0 = Math.max(1, (Overlay.cols - w) >> 1);
+    const y0 = Math.max(1, (Overlay.rows - (all.length + 2)) >> 1);
+    for (let i = 0; i < shown; i++) if (all[i]) Overlay.write(x0, y0 + i, all[i]);
+    if (shown >= all.length) {
+      Overlay.write(x0, y0 + all.length + 1, 'press any key');
+    }
   },
 
   drawTitle() {
@@ -535,22 +606,25 @@ const Game = {
   },
 
   drawJournal() {
-    const c = Lore.civ();
-    const lines = ['THE RECORD OF ' + c.name.toUpperCase(), ''];
+    const lines = ['THE RECORD', ''];
     if (this.read.length === 0) {
       lines.push('Nothing yet. Somewhere below, someone');
       lines.push('cut their history into the stone.');
     } else {
-      // in the order the story happened, not the order it was found
+      // Deepest last, so the panel reads the way the descent did. Different
+      // halls can belong to different peoples now, so each entry carries
+      // its own name rather than the panel carrying one for all of them.
       const order = [...this.read].sort((a, b) =>
         Number(b.split(',')[2]) - Number(a.split(',')[2]));
       for (const key of order) {
         const [cx, cy, k] = key.split(',').map(Number);
-        for (const l of Lore.inscription(cx, cy, k).lines) lines.push(l);
+        const ins = Lore.inscription(cx, cy, k);
+        if (!ins) continue;
+        for (const l of ins.lines) lines.push(l);
         lines.push('');
       }
       lines.push(this.done
-        ? 'Nothing else is written. They did not come back up.'
+        ? 'That is as deep as anyone cut. Nobody came back up.'
         : this.objective());
     }
     lines.push('[Q] close');
@@ -587,8 +661,9 @@ const Game = {
         .map(([id, cnt]) => cnt + ' ' + ITEMS[id].name).join(', ');
       const owned = this.count(r.out) ? '  (have ' + this.count(r.out) + ')' : '';
       const mark = this.canCraft(r) ? '' : '  - missing';
+      const out = (r.n > 1 ? r.n + ' ' : '') + ITEMS[r.out].name;
       lines.push((i === cur ? '> ' : '  ') +
-        ITEMS[r.out].name.padEnd(12) + needs + mark + owned);
+        out.padEnd(16) + needs + mark + owned);
     }
     lines.push('');
     lines.push('[W/S] choose  [E] craft  [Q] close');
