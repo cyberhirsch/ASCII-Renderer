@@ -1626,5 +1626,77 @@ if (c.Player) {
     : fail('the half-asked restart survived closing the menu');
 }
 
+// ---- 25. the prologue: the myth, and then the record ----
+if (c.Lore) {
+  const { Lore, Game: G } = c;
+  const S = Lore.init();
+  const chron = Lore.chronology();
+
+  (chron.length > 4) ? ok(`the record fits on one screen (${chron.length} lines)`)
+                     : fail('chronology is empty');
+  (Math.max(...chron.map(l => l.length)) <= 60)
+    ? ok('and every line of it fits the panel')
+    : fail(`a chronology line runs to ${Math.max(...chron.map(l => l.length))}`);
+
+  // it names the peoples who actually stood here, and nobody else
+  {
+    const standing = S.peoples.filter(p => p.founded);
+    const text = chron.join('\n');
+    const named = standing.filter(p => text.includes(p.name)).length;
+    (named === standing.length)
+      ? ok(`all ${named} peoples who founded anything are named`)
+      : fail(`${standing.length - named} peoples missing from the record`);
+    const ghosts = S.peoples.filter(p => !p.founded && text.includes(p.name)).length;
+    (ghosts === 0) ? ok('and nobody who never founded anything is')
+                   : fail(`${ghosts} peoples named who were never here`);
+  }
+
+  // every year and cause on it is the sim's, not a description of one
+  {
+    let bad = 0;
+    for (const p of S.peoples) {
+      if (!p.founded) continue;
+      const row = chron.find(l => l.includes(p.name));
+      if (!row) { bad++; continue; }
+      if (!row.includes(String(p.rise))) bad++;
+      if (p.fell >= 0 && !row.includes(String(p.fell))) bad++;
+      if (p.fell >= 0 && !row.includes(p.cause || 'decline')) bad++;
+      if (p.fell < 0 && !row.includes('still')) bad++;
+    }
+    (bad === 0) ? ok('every date and every ending on it is the record\'s own')
+                : fail(`${bad} rows disagree with the chronicle`);
+  }
+
+  // the same seed writes the same record
+  (JSON.stringify(chron) === JSON.stringify(Lore.chronology()))
+    ? ok('and it is the same record twice') : fail('chronology is not deterministic');
+
+  // a new game shows the myth, then the record, then the world
+  {
+    G.spawnAt = null;
+    G.mythPart = 0; G.mode = 'myth'; G.mythT = 0;
+    const p0 = G.prologue();
+    (p0.length && p0 === S.myth.lines)
+      ? ok('a new game opens on the myth') : fail('prologue does not start on the myth');
+    G.key('KeyW');
+    (G.mode === 'myth' && G.mythPart === 1)
+      ? ok('a keypress moves it on to the record rather than skipping both')
+      : fail(`first key gave mode=${G.mode} part=${G.mythPart}`);
+    (G.prologue().length === chron.length)
+      ? ok('and the second part is the record')
+      : fail('second part is not the chronology');
+    G.key('KeyW');
+    (G.mode === 'title') ? ok('a second keypress hands over to the title')
+                         : fail(`second key gave ${G.mode}`);
+
+    // and it plays through on its own if nobody touches anything
+    G.mythPart = 0; G.mode = 'myth'; G.mythT = 0;
+    for (let i = 0; i < 400 && G.mode === 'myth'; i++) G.tick(0.1);
+    (G.mode === 'title') ? ok('left alone, it plays through and steps aside')
+                         : fail('the prologue never ended by itself');
+  }
+  G.mode = 'play';
+}
+
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\ngame tests passed');

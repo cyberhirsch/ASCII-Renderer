@@ -20,13 +20,34 @@ const Game = {
   // somebody who has never been here - a returning player is dropped
   // straight back in where they stopped, and does not sit through the
   // creation of the world a second time.
+  // Two parts: what they say came before the record, and then the record
+  // itself. Seeing the myth without the history is being told a world is
+  // old without being shown any of it.
   mythT: 0,
+  mythPart: 0,
   MYTH_LINE: 0.38,   // seconds before the next line of it arrives
-  MYTH_HOLD: 1.2,    // and how long it stands complete before the title
+  MYTH_HOLD: 1.2,    // and how long it stands complete before moving on
+
+  prologue() {
+    const L = Lore.init();
+    if (this.mythPart === 0) return (L.myth || { lines: [] }).lines;
+    return Lore.chronology();
+  },
+
+  // Anything at all moves it on: the second part, then the world.
+  mythNext() {
+    if (this.mythPart === 0) {
+      this.mythPart = 1;
+      this.mythT = 0;
+    } else {
+      this.mode = 'title';
+    }
+    this.uiDirty = true;
+  },
 
   init() {
     this.load();
-    if (!this.spawnAt) this.mode = 'myth';
+    if (!this.spawnAt) { this.mode = 'myth'; this.mythPart = 0; this.mythT = 0; }
   },
 
   // ---- inventory ----
@@ -278,9 +299,9 @@ const Game = {
   // ---- input: returns true when the key was consumed ----
 
   key(code) {
-    // the prologue yields to anything at all, and lands on the title
+    // the prologue yields to anything at all
     if (this.mode === 'myth') {
-      if (code !== 'F11') { this.mode = 'title'; this.uiDirty = true; }
+      if (code !== 'F11') this.mythNext();
       return true;
     }
     if (this.mode === 'play') {
@@ -537,10 +558,10 @@ const Game = {
     if (this.mode === 'myth') {
       this.mythT += dt;
       this.uiDirty = true;
-      const all = (Lore.init().myth || { lines: [] }).lines;
-      // once it has all been said, hold it a moment and then step aside
+      const all = this.prologue();
+      // once it has all been said, hold it a moment and then move on
       if (this.mythT > all.length * this.MYTH_LINE + this.MYTH_HOLD * 4) {
-        this.mode = 'title';
+        this.mythNext();
       }
     }
     if (this.toastT > 0) {
@@ -782,7 +803,7 @@ const Game = {
   // One line of the myth at a time, laid out for the whole of it from the
   // first line, so the text does not walk up the screen as more arrives.
   drawMyth() {
-    const all = (Lore.init().myth || { lines: [] }).lines;
+    const all = this.prologue();
     if (!all.length) { this.mode = 'title'; return; }
     const shown = Math.min(all.length, Math.floor(this.mythT / this.MYTH_LINE));
     const w = Math.max(...all.map(l => l.length));

@@ -171,6 +171,31 @@ const Lore = {
     return h ? 'the ' + kind + ' of ' + h.site.name : 'an unnamed ' + kind.toLowerCase();
   },
 
+  // The six peoples, in the order they stood here. This is the record in
+  // one screen: who they were, how long they lasted, and what finished
+  // them - all of it read off the sim rather than described.
+  chronology() {
+    const S = this.init();
+    const out = ['Six peoples have stood on this ground.', ''];
+    let widest = 0;
+    const rows = [];
+    for (const p of S.peoples) {
+      if (!p.founded) continue;
+      const who = p.name + ', ' + p.kind;
+      const when = p.rise + '-' + (p.fell >= 0 ? p.fell : '');
+      const how = p.fell >= 0 ? (p.cause || 'decline') : 'still there';
+      rows.push([who, when, how]);
+      if (who.length > widest) widest = who.length;
+    }
+    for (const [who, when, how] of rows) {
+      out.push('  ' + who.padEnd(widest + 2) + when.padEnd(11) + how);
+    }
+    out.push('');
+    out.push('They cut the halls under you, and wrote on the walls');
+    out.push('as they went. The deeper you read, the later it gets.');
+    return out;
+  },
+
   // Who the world remembers, for the journal. Not one civilisation any
   // more - whichever peoples the player has actually read.
   peopleName(id) {
