@@ -27,9 +27,12 @@ slow, and gives the rays back after a sustained good patch.
 
 **Console:** Enter opens a command line. `seed <n>` walks to another world,
 `quality <low|medium|high|auto>` sets the ray budget, `copy` puts the screen
-on the clipboard as plain text, `time <hour>` jumps the clock, `freeze` stops
+on the clipboard as plain text, `map` sizes the devmode minimap, `time <hour>`
+jumps the clock, `freeze` stops
 it, `daylen <seconds>` sets the cycle length, and `devmode` unlocks the M/X
-debug views. Escape or an empty Enter closes it.
+debug views and a minimap in the top right — `@` you, `>` a cave mouth,
+`HFMT` a settlement still lived in, `hfmt` one that is not. Escape or an
+empty Enter closes the console.
 
 **Controls:** WASD move · **Space** jump · Shift run · click for mouse-look · **LMB** dig ·
 **RMB** fill · **Tab** inventory · **C** craft · **E** examine what you're

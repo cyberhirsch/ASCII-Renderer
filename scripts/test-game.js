@@ -1351,5 +1351,119 @@ if (c.Player) {
   G.close();
 }
 
+// ---- 20. the devmode minimap ----
+if (c.Player) {
+  const G = c.Game, O = c.Overlay, P = c.Player;
+  const read = () => {
+    let t = '';
+    for (let i = 0; i < O.data.length; i++) {
+      t += (O.data[i] > 32 && O.data[i] < 127) ? String.fromCharCode(O.data[i]) : ' ';
+    }
+    return t;
+  };
+  O.resize(120, 40);
+  G.close();
+  P.x = 200; P.y = -150; P.z = c.terrainH(200, -150);
+
+  // off by default: a dev tool must not be on anybody's screen uninvited
+  G.devMode = false;
+  O.clear(); G.drawUI();
+  (!read().includes('map '))
+    ? ok('no minimap without devmode') : fail('the map shows up uninvited');
+
+  G.devMode = true;
+  G.mapKey = '';
+  O.clear(); G.drawUI();
+  const shown = read();
+  (shown.includes('map ' + G.MAP.u + 'u'))
+    ? ok('devmode puts the map on screen') : fail('no map in devmode');
+
+  const rows = G.buildMap();
+  (rows.length === G.MAP.h && rows.every(r => r.length === G.MAP.w))
+    ? ok(`the map is ${G.MAP.w}x${G.MAP.h} and every row is full`)
+    : fail(`ragged map: ${rows.length} rows, widths ${[...new Set(rows.map(r => r.length))]}`);
+
+  // you are in the middle of your own map
+  const mid = rows[(G.MAP.h - 1) >> 1][(G.MAP.w - 1) >> 1];
+  (mid === '@') ? ok('the player sits at the centre of it')
+                : fail(`centre of the map is "${mid}", not the player`);
+
+  // every mark is a character the text atlas can actually draw
+  {
+    let bad = 0;
+    for (const r of rows) for (const ch of r) {
+      const n = ch.charCodeAt(0);
+      if (n <= 32 || n >= 127) bad++;
+    }
+    (bad === 0) ? ok('every mark on it is a printable character')
+                : fail(`${bad} marks the atlas cannot draw`);
+  }
+
+  // north is up, because that is what the inscriptions' bearings mean
+  {
+    const M = G.MAP, uy = M.u * c.CFG.CELL_H / c.CFG.CELL_W;
+    const cy = (M.h - 1) / 2;
+    const northY = P.y + (0 - cy) * uy;
+    (northY < P.y) ? ok('north is up, agreeing with the record\'s bearings')
+                   : fail('the map is upside down against the chronicle');
+  }
+
+  // it redraws when you walk, and not when you stand still
+  {
+    const k0 = G.mapAt();
+    G.buildMap();
+    const same = G.mapAt() === k0 && G.mapKey === k0;
+    P.x += G.MAP.u * 3;
+    const moved = G.mapAt() !== G.mapKey;
+    (same && moved) ? ok('the map rebuilds when you move and not when you do not')
+                    : fail(`map refresh wrong: still=${same} moved=${moved}`);
+    P.x -= G.MAP.u * 3;
+  }
+
+  // it stays inside the overlay, whatever the terminal size
+  {
+    let over = 0;
+    for (const cols of [60, 80, 120, 200]) {
+      O.resize(cols, 40);
+      G.mapKey = '';
+      O.clear();
+      G.drawUI();
+      if (O.data.length !== cols * 40) over++;
+    }
+    (over === 0) ? ok('the map fits every width without running off the grid')
+                 : fail('the map wrote outside the overlay');
+    // and a terminal too small for it simply goes without
+    O.resize(20, 10);
+    O.clear();
+    G.drawUI();
+    (!read().includes('map '))
+      ? ok('a screen too small for it does without, rather than clipping')
+      : fail('the map drew into a screen with no room');
+  }
+
+  // the zoom command is devmode-only and cycles
+  O.resize(120, 40);
+  {
+    G.devMode = false;
+    G.openConsole(); G.cmdBuf = 'map';
+    G.consoleInput({ code: 'Enter', key: 'Enter' });
+    (G.cmdHistory[G.cmdHistory.length - 1].includes('devmode'))
+      ? ok('map refuses outside devmode') : fail('map worked without devmode');
+    G.devMode = true;
+    const u0 = G.MAP.u;
+    G.cmdBuf = 'map';
+    G.consoleInput({ code: 'Enter', key: 'Enter' });
+    (G.MAP.u !== u0 && G.MAP_ZOOM.includes(G.MAP.u))
+      ? ok(`map cycles the scale (${u0} -> ${G.MAP.u} units a cell)`)
+      : fail(`zoom did not cycle: ${u0} -> ${G.MAP.u}`);
+    G.cmdBuf = 'map 24';
+    G.consoleInput({ code: 'Enter', key: 'Enter' });
+    (G.MAP.u === 24) ? ok('and takes a scale outright') : fail(`map 24 gave ${G.MAP.u}`);
+    G.MAP.u = 12;
+    G.close();
+  }
+  G.devMode = false;
+}
+
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\ngame tests passed');

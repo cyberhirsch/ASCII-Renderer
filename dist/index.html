@@ -6340,6 +6340,25 @@ const Game = {
       this.cmdHistory.push('every world keeps its own digs, items and record');
       return;
     }
+    // the map's scale, since what you want to see changes with what you
+    // are looking for: a cave mouth is a walk away, a settlement is not
+    if (verb === 'map') {
+      if (!this.devMode) {
+        this.cmdHistory.push('the map is a devmode tool - run "devmode" first');
+        return;
+      }
+      const z = this.MAP_ZOOM;
+      if (arg.length > 1 && isFinite(parseFloat(arg[1]))) {
+        this.MAP.u = clamp(parseFloat(arg[1]), 1, 400);
+      } else {
+        this.MAP.u = z[(z.indexOf(this.MAP.u) + 1) % z.length];
+      }
+      this.mapKey = '';
+      this.uiDirty = true;
+      this.cmdHistory.push('map ' + this.MAP.u + ' units to a cell' +
+        '  (@ you, > cave mouth, HFMT standing, hfmt ruined)');
+      return;
+    }
     if (verb === 'quality') {
       if (typeof Quality === 'undefined') {
         this.cmdHistory.push('quality control is not loaded');
@@ -6401,7 +6420,7 @@ const Game = {
         break;
       case 'help':
         this.cmdHistory.push('commands: seed <n>, quality <low|medium|high|auto>,');
-        this.cmdHistory.push('copy, time <h>, freeze, daylen <s>, devmode,');
+        this.cmdHistory.push('copy, time <h>, freeze, daylen <s>, devmode, map,');
         this.cmdHistory.push('wipe, clear, help');
         break;
       default:
@@ -6659,6 +6678,10 @@ const Game = {
   // ---- per-frame ----
 
   tick(dt) {
+    // a map that lags behind where you are standing is worse than none
+    if (this.devMode && typeof Player !== 'undefined' && this.mapAt() !== this.mapKey) {
+      this.uiDirty = true;
+    }
     if (this.mode === 'myth') {
       this.mythT += dt;
       this.uiDirty = true;
@@ -6678,6 +6701,86 @@ const Game = {
     }
   },
 
+  // ---- the minimap (devmode) ----
+  //
+  // Drawn into the glyph grid like everything else, because a DOM overlay
+  // would be the one thing on screen that is not made of characters. North
+  // is up: the chronicle calls -y north, and the map has to agree with the
+  // bearings the inscriptions give.
+  //
+  // Cells are taller than they are wide, so a cell covers proportionally
+  // more world vertically - otherwise the map is squashed and a circle of
+  // ground reads as an ellipse.
+  MAP: { w: 31, h: 15, u: 12 },
+  MAP_ZOOM: [6, 12, 24, 48, 96],
+  MAP_RAMP: '.,:;=+*#',      // land, low to high; water has its own mark
+  MAP_KIND: { hold: 'H', farm: 'F', mine: 'M', fort: 'T' },
+  mapRows: null, mapKey: '',
+
+  // What the map is centred on, as a key: rebuilding only when this changes
+  // keeps 465 terrain samples off the frames where nothing moved.
+  mapAt() {
+    const uy = this.MAP.u * CFG.CELL_H / CFG.CELL_W;
+    return Math.round(Player.x / this.MAP.u) + ',' +
+           Math.round(Player.y / uy) + ',' + this.MAP.u;
+  },
+
+  buildMap() {
+    const key = this.mapAt();
+    if (this.mapRows && this.mapKey === key) return this.mapRows;
+    this.mapKey = key;
+    const M = this.MAP;
+    const ux = M.u, uy = M.u * CFG.CELL_H / CFG.CELL_W;
+    const cx = (M.w - 1) / 2, cy = (M.h - 1) / 2;
+    const px = Player.x, py = Player.y;
+    const g = [];
+    for (let j = 0; j < M.h; j++) {
+      const row = [];
+      for (let i = 0; i < M.w; i++) {
+        const h = terrainH(px + (i - cx) * ux, py + (j - cy) * uy);
+        row.push(h < CFG.SEA_LEVEL ? '~' : this.MAP_RAMP[
+          clamp(Math.floor(h / CFG.TERRAIN_MAX * this.MAP_RAMP.length),
+                0, this.MAP_RAMP.length - 1)]);
+      }
+      g.push(row);
+    }
+    const put = (wx, wy, ch) => {
+      const i = Math.round((wx - px) / ux + cx);
+      const j = Math.round((wy - py) / uy + cy);
+      if (i >= 0 && i < M.w && j >= 0 && j < M.h) g[j][i] = ch;
+    };
+    // Cave mouths, which is most of what this is for: they are the one
+    // thing in the world you have to find on foot and cannot see far.
+    const SE = CAVES.SHAFT_E;
+    for (let sy = Math.floor((py - cy * uy) / SE); sy <= Math.floor((py + cy * uy) / SE); sy++) {
+      for (let sx = Math.floor((px - cx * ux) / SE); sx <= Math.floor((px + cx * ux) / SE); sx++) {
+        const a = shaftAt(sx, sy, 0);
+        if (a) put(a.ax, a.ay, '>');
+      }
+    }
+    // Settlements: standing in capitals, gone in lower case, so a glance
+    // says which of them there is anybody left in.
+    if (typeof Lore !== 'undefined' && Lore.S) {
+      for (const st of Lore.S.sites) {
+        const ch = this.MAP_KIND[st.kind] || 'S';
+        put(st.x, st.y, st.abandoned < 0 ? ch : ch.toLowerCase());
+      }
+    }
+    g[Math.round(cy)][Math.round(cx)] = '@';
+    this.mapRows = g.map(r => r.join(''));
+    return this.mapRows;
+  },
+
+  drawMap() {
+    const M = this.MAP;
+    const x0 = Overlay.cols - M.w - 1;
+    if (x0 < 1 || Overlay.rows < M.h + 4) return;   // no room; say nothing
+    const rows = this.buildMap();
+    Overlay.write(x0, 1, ('map ' + M.u + 'u  ' +
+      Math.round(Player.x) + ',' + Math.round(Player.y)).slice(0, M.w));
+    for (let j = 0; j < rows.length; j++) Overlay.write(x0, 2 + j, rows[j]);
+  },
+
   // ---- panel rendering (into the Overlay glyph grid) ----
 
   // Panels are lines of text placed in the field, not boxes: nothing is
@@ -6693,6 +6796,7 @@ const Game = {
   },
 
   drawUI() {
+    if (this.devMode && typeof Player !== 'undefined') this.drawMap();
     if (this.toastMsg) {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
