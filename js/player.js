@@ -4,6 +4,11 @@ const Player = {
   x: 0, y: 0, z: 0, angle: 0.6,
   pitch: 0, // radians; ±90° is straight up/down
   keys: {},
+  // Vertical state. The camera used to ride the floor and nothing else, so
+  // there was no way to leave the ground and no way to be in water.
+  vz: 0,
+  onGround: true,
+  swimming: false,
 
   init() {
     // a saved game puts you back where you stopped, facing where you looked
@@ -25,6 +30,7 @@ const Player = {
       // the game's modal layer gets every key first; panels capture W/S/E/Q
       if (Game.key(e.code)) { e.preventDefault(); return; }
       this.keys[e.code] = true;
+      if (e.code === 'Space') e.preventDefault();   // or the page scrolls
       if (e.code === 'Enter') { Game.openConsole(); return; }
       // view toggles are debug tools, locked behind the "devmode" command
       if (e.code === 'KeyM' && Game.devMode) CFG.MONO = !CFG.MONO;
@@ -94,24 +100,58 @@ const Player = {
     return null;
   },
 
+  // What is under a point, and how much water is over it. The bed is the
+  // density field's floor, so this reads the same on a hillside, a cave
+  // floor and a lake bottom.
+  footing(x, y, z) {
+    const bed = World.walkZ(x, y, z);
+    const gz = World.groundZ(x, y);
+    const under = bed === null ? gz : bed;
+    return { bed, gz, depth: gz < CFG.SEA_LEVEL ? CFG.SEA_LEVEL - under : 0 };
+  },
+
+  // Props stop you whatever you are doing: a trunk is a trunk whether you
+  // are walking past it, swimming past it or falling past it.
+  propsBlock(x, y) {
+    const near = World.trunkNear(x, y, 1);
+    if (near && near.dist < near.tree.trunkR + 0.22) return true;
+    return !!World.rockNear(x, y);
+  },
+
   blocked(x, y) {
-    // floor via the density field: works on the surface and underground
+    const h = World.groundZ(x, y);
+    const underground = this.z < h - 1.5;
+
+    // Afloat: the water is not an obstacle and there is no step to measure,
+    // because you are not standing on anything. Only solid things stop you.
+    if (this.swimming) {
+      for (let dz = 0.1; dz <= 1.7; dz += 0.4) {
+        if (solidD(x, y, this.z + dz) >= 0) return true;
+      }
+      return this.propsBlock(x, y);
+    }
+
+    // In the air: the drop is not an obstacle either, or you could not jump
+    // a gap. Collide against solids at the height you are actually at.
+    if (!this.onGround) {
+      for (let dz = 0.1; dz <= 1.7; dz += 0.4) {
+        if (solidD(x, y, this.z + dz) >= 0) return true;
+      }
+      return underground ? false : this.propsBlock(x, y);
+    }
+
+    // On foot: the old rules, minus the wall that water used to be. Water
+    // you can stand up in is waded, and anything deeper is entered by
+    // swimming rather than refused.
     const fz = World.walkZ(x, y, this.z);
     if (fz === null) return true;
-    if (Math.abs(fz - this.z) > 1.0) return true;
+    const deep = h < CFG.SEA_LEVEL && CFG.SEA_LEVEL - fz > CFG.WADE;
+    if (!deep && Math.abs(fz - this.z) > CFG.STEP_UP) return true;
     // headroom: refuse pinched passages
     for (let dz = 0.5; dz <= 1.7; dz += 0.4) {
       if (solidD(x, y, fz + dz) >= 0) return true;
     }
-    const h = World.groundZ(x, y);
-    const underground = this.z < h - 1.5;
-    if (!underground) {
-      // water and tree trunks are surface concerns
-      if (h < CFG.SEA_LEVEL + 0.05) return true;
-      const near = World.trunkNear(x, y, 1);
-      if (near && near.dist < near.tree.trunkR + 0.22) return true;
-      if (World.rockNear(x, y)) return true;
-    }
+    if (!underground && this.propsBlock(x, y)) return true;
     return false;
   },
 
@@ -123,8 +163,15 @@ const Player = {
     if (k['ArrowLeft']) this.angle -= turn;
     if (k['ArrowRight']) this.angle += turn;
 
+    // where you are before anything moves: it decides how fast you go and
+    // whether your feet are on anything
+    const f0 = this.footing(this.x, this.y, this.z);
+    this.swimming = f0.depth > CFG.WADE && this.z < CFG.SEA_LEVEL;
+
     const run = (k['ShiftLeft'] || k['ShiftRight']) ? 2.0 : 1.0;
-    const spd = 4.2 * run * dt;
+    const drag = this.swimming ? CFG.SWIM_SPD
+               : f0.depth > 0.25 ? CFG.WADE_SPD : 1.0;
+    const spd = 4.2 * run * dt * drag;
     const dx = Math.cos(this.angle), dy = Math.sin(this.angle);
 
     let mx = 0, my = 0;
@@ -164,8 +211,55 @@ const Player = {
       }
     }
 
-    // ride the floor (terrain or cave), smoothed
-    const gz = World.walkZ(this.x, this.y, this.z);
-    if (gz !== null) this.z += (gz - this.z) * Math.min(1, dt * 10);
+    this.vertical(dt, k);
+  },
+
+  // Up and down. Three regimes that never overlap: afloat, in the air, and
+  // on foot. Only the last of them rides the floor, which is all the game
+  // used to do.
+  vertical(dt, k) {
+    const f = this.footing(this.x, this.y, this.z);
+    this.swimming = f.depth > CFG.WADE && this.z < CFG.SEA_LEVEL;
+
+    if (this.swimming) {
+      // You float. The body rides so the eye sits just clear of the
+      // surface, which is also why there is no diving: below the water
+      // plane the renderer has nothing to show you but sky.
+      const ride = CFG.SEA_LEVEL + CFG.SWIM_EYE - CFG.EYE;
+      this.z += (ride - this.z) * Math.min(1, dt * CFG.SWIM_RISE);
+      this.vz = 0;
+      this.onGround = false;
+      return;
+    }
+
+    // A jump only leaves ground you are standing on. Treading water gives
+    // nothing to push against.
+    if (k['Space'] && this.onGround) {
+      this.vz = CFG.JUMP;
+      this.onGround = false;
+    }
+
+    if (this.onGround) {
+      if (f.bed === null) { this.onGround = false; return; }
+      this.z += (f.bed - this.z) * Math.min(1, dt * 10);
+      // walked off the edge of something
+      if (this.z - f.bed > 0.3) { this.onGround = false; this.vz = 0; }
+      return;
+    }
+
+    this.vz -= CFG.GRAV * dt;
+    this.z += this.vz * dt;
+    // a ceiling stops a jump dead rather than letting it climb through
+    if (this.vz > 0 && solidD(this.x, this.y, this.z + 1.7) >= 0) this.vz = 0;
+    if (f.bed !== null && this.z <= f.bed) {
+      this.z = f.bed;
+      this.vz = 0;
+      this.onGround = true;
+    }
+    // came down in deep water: the fall ends in a splash, not a landing
+    if (!this.onGround && this.z < CFG.SEA_LEVEL && f.depth > CFG.WADE) {
+      this.swimming = true;
+      this.vz = 0;
+    }
   },
 };

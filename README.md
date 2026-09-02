@@ -31,11 +31,18 @@ on the clipboard as plain text, `time <hour>` jumps the clock, `freeze` stops
 it, `daylen <seconds>` sets the cycle length, and `devmode` unlocks the M/X
 debug views. Escape or an empty Enter closes it.
 
-**Controls:** WASD move · Shift run · click for mouse-look · **LMB** dig ·
+**Controls:** WASD move · **Space** jump · Shift run · click for mouse-look · **LMB** dig ·
 **RMB** fill · **Tab** inventory · **C** craft · **E** examine what you're
 looking at (**W/S** choose an action, **E** do it, **Q** close) · **G** hop
 into the cave below (debug) · **M** mono/color · **V** glyph set · **X** raw
 shading · **F** fullscreen.
+
+Water is swum rather than walked around. Anything you can stand up in you
+wade through, slowly; deeper than that your feet leave the bed and you float
+with your eyes just clear of the surface. There is no diving — below the
+water plane the renderer has nothing to show you but sky — and no drowning.
+The heightfield never goes below zero, so the sea is nowhere deeper than
+2.4 units and the bed is always in sight under you.
 
 You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
 

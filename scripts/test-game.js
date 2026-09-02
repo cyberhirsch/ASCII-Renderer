@@ -11,13 +11,13 @@ const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
-             'removed', 'chronicle', 'lore', 'items', 'game']
+             'removed', 'chronicle', 'lore', 'items', 'game', 'player']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
-   'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt']
+   'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt', 'Player']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -1224,6 +1224,131 @@ if (c.saveKey) {
     ? ok('another seed keeps its digs and its record apart')
     : fail('seed namespacing broken: ' + c.saveKey(base));
   c.CFG.SEED = was;
+}
+
+// ---- 19. moving: jumping, falling, wading and swimming ----
+// player.js has never been exercised by a test before. It has no DOM in it
+// until init() runs, so the physics can be driven straight from here.
+if (c.Player) {
+  const P = c.Player, G = c.Game, W = c.World;
+  P.mouse = {};            // normally made by init(), which needs a canvas
+  G.mode = 'play';
+
+  // dry, gentle ground to stand on, and deep water to fall into
+  let dry = null, deep = null, shallow = null;
+  for (let r = 20; r < 4000 && !(dry && deep && shallow); r += 7) {
+    for (let a = 0; a < 6.28 && !(dry && deep && shallow); a += 0.5) {
+      const x = Math.cos(a) * r, y = Math.sin(a) * r;
+      const h = c.terrainH(x, y);
+      const slope = Math.abs(c.terrainH(x + 1, y) - h) + Math.abs(c.terrainH(x, y + 1) - h);
+      if (!dry && h > c.CFG.SEA_LEVEL + 3 && slope < 0.4) dry = [x, y, h];
+      // The heightfield never goes below zero, so the sea is at most
+      // SEA_LEVEL deep - there is no abyss to look for, only water over
+      // your head, which is anything deeper than you can wade.
+      if (!deep && h < c.CFG.SEA_LEVEL - c.CFG.WADE - 0.4) deep = [x, y, h];
+      if (!shallow && h < c.CFG.SEA_LEVEL - 0.35 && h > c.CFG.SEA_LEVEL - c.CFG.WADE + 0.2) {
+        shallow = [x, y, h];
+      }
+    }
+  }
+  (dry && deep && shallow)
+    ? ok('found dry ground, shallows and deep water to test in')
+    : fail(`missing test ground: dry=${!!dry} shallow=${!!shallow} deep=${!!deep}`);
+
+  const stand = p => { P.x = p[0]; P.y = p[1]; P.z = p[2];
+                       P.vz = 0; P.onGround = true; P.swimming = false; P.keys = {}; };
+  const step = (n, dt) => { for (let i = 0; i < n; i++) P.update(dt); };
+
+  if (dry) {
+    // standing still stays still
+    stand(dry);
+    step(20, 1 / 60);
+    (Math.abs(P.z - dry[2]) < 0.05 && P.onGround)
+      ? ok('standing on the ground stays on the ground')
+      : fail(`drifted while standing: z ${dry[2].toFixed(2)} -> ${P.z.toFixed(2)}`);
+
+    // a jump leaves the ground, peaks, and comes back to it
+    stand(dry);
+    P.keys = { Space: true };
+    P.update(1 / 60);
+    P.keys = {};
+    (!P.onGround && P.vz > 0) ? ok('space leaves the ground')
+                              : fail(`jump did not launch: vz=${P.vz.toFixed(2)}`);
+    let peak = P.z;
+    for (let i = 0; i < 240; i++) { P.update(1 / 60); if (P.z > peak) peak = P.z; }
+    const rise = peak - dry[2];
+    (rise > 0.6 && rise < 2.2)
+      ? ok(`a jump clears ${rise.toFixed(2)} units`)
+      : fail(`jump height wrong: ${rise.toFixed(2)}`);
+    (P.onGround && Math.abs(P.z - dry[2]) < 0.06)
+      ? ok('and lands back on the ground it left')
+      : fail(`did not land: onGround=${P.onGround} z=${P.z.toFixed(2)} floor=${dry[2].toFixed(2)}`);
+
+    // no second jump in mid-air
+    stand(dry);
+    P.keys = { Space: true };
+    step(6, 1 / 60);
+    const vzAir = P.vz;
+    step(1, 1 / 60);
+    (P.vz < vzAir) ? ok('holding space does not jump again in the air')
+                   : fail('double jump in mid-air');
+    P.keys = {};
+  }
+
+  if (deep) {
+    // deep water is enterable, and it floats you at the surface
+    stand([deep[0], deep[1], c.CFG.SEA_LEVEL]);
+    step(90, 1 / 60);
+    const ride = c.CFG.SEA_LEVEL + c.CFG.SWIM_EYE - c.CFG.EYE;
+    (P.swimming) ? ok('deep water is swum, not walked')
+                 : fail('did not start swimming in deep water');
+    (Math.abs(P.z - ride) < 0.05)
+      ? ok(`floats with the eye ${c.CFG.SWIM_EYE} above the surface`)
+      : fail(`floating at ${P.z.toFixed(2)}, wanted ${ride.toFixed(2)}`);
+    (P.z + c.CFG.EYE > c.CFG.SEA_LEVEL)
+      ? ok('and the eye never goes under, so the water is drawn from above')
+      : fail('the camera sank below the water plane');
+
+    // you cannot jump off water
+    const z0 = P.z;
+    P.keys = { Space: true };
+    step(10, 1 / 60);
+    P.keys = {};
+    (Math.abs(P.z - z0) < 0.05 && P.vz === 0)
+      ? ok('there is nothing to jump off in open water')
+      : fail(`jumped while swimming: ${z0.toFixed(2)} -> ${P.z.toFixed(2)}`);
+
+    // and the shore is not a wall any more
+    stand([deep[0], deep[1], c.CFG.SEA_LEVEL]);
+    P.update(1 / 60);
+    (!P.blocked(deep[0] + 0.2, deep[1]))
+      ? ok('water can be swum through rather than refused')
+      : fail('water is still a wall');
+  }
+
+  if (shallow) {
+    // shallow water is waded: feet on the bed, and slower
+    stand([shallow[0], shallow[1], shallow[2]]);
+    step(30, 1 / 60);
+    (!P.swimming && P.onGround)
+      ? ok('shallow water is waded, standing on the bed')
+      : fail(`wading wrong: swimming=${P.swimming} onGround=${P.onGround}`);
+    (Math.abs(P.z - shallow[2]) < 0.15)
+      ? ok('and the bed is what you stand on')
+      : fail(`wading z ${P.z.toFixed(2)} vs bed ${shallow[2].toFixed(2)}`);
+  }
+
+  // a fall ends on the ground rather than continuing forever
+  if (dry) {
+    stand(dry);
+    P.z = dry[2] + 14;
+    P.onGround = false;
+    step(400, 1 / 60);
+    (P.onGround && Math.abs(P.z - dry[2]) < 0.06)
+      ? ok('a long fall lands, once')
+      : fail(`fall never landed: z=${P.z.toFixed(2)} onGround=${P.onGround}`);
+  }
+  G.close();
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

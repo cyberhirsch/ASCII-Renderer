@@ -242,6 +242,19 @@ const CFG = {
   CAVE_SUN: 8,
   CAVE_AO: 16,
   SEA_LEVEL: 2.4,     // water plane; terrain below this is sea/lake
+  // Moving through the world. Until now the camera simply rode the floor:
+  // there was no vertical velocity at all, and water was a wall you could
+  // not walk into. Both of those are now real.
+  GRAV: 18,           // world units per second squared
+  JUMP: 6.2,          // launch speed; clears a little over a metre
+  STEP_UP: 1.0,       // the tallest lip you can walk up without jumping
+  // Wading and swimming are different things. Anything shallower than this
+  // you walk through, standing on the bed; deeper and your feet leave it.
+  WADE: 1.1,
+  WADE_SPD: 0.62,     // water drags, even when you can still stand up in it
+  SWIM_SPD: 0.48,
+  SWIM_EYE: 0.35,     // how far the eye rides above the surface when afloat
+  SWIM_RISE: 3.5,     // how fast you bob back up to the surface
   // entities (future creatures); buffer capacity fixed, live count per frame
   MAX_ENTS: 64,
   // digging: resident edit-chunk capacity on the GPU, reach and scoop size
