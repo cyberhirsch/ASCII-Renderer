@@ -1029,6 +1029,14 @@ const World = {
           }
         }
       }
+      // somebody standing here. Checked before the ground so that talking
+      // to a person beats examining the dirt they are stood on.
+      if (typeof NPC !== 'undefined') {
+        const who = NPC.near(px, py, 0.75);
+        if (who && pz > who.z - 0.2 && pz < who.z + 2.0) {
+          return { kind: 'npc', npc: who.id, point: [px, py, pz] };
+        }
+      }
       // open water
       if (pz < CFG.SEA_LEVEL && terrainH(px, py) < CFG.SEA_LEVEL) {
         return { kind: 'water', point: [px, py, pz] };
@@ -5889,6 +5897,27 @@ const Steading = {
         nh++;
         for (const q of parts) np = this.writePrim(prim, np, q, b);
       }
+      // and whoever is standing among them, on the same footing: their own
+      // header, so a ray rejects a person with one sphere like anything else
+      if (typeof NPC !== 'undefined') {
+        for (const who of NPC.atSite(s.id)) {
+          if (nh >= maxHead) break;
+          const fig = NPC.parts(who);
+          if (np + fig.length > maxPrim) break;
+          const B = partsBounds(fig);
+          const h = nh * this.HEAD_F;
+          head[h] = B.c[0]; head[h + 1] = B.c[1]; head[h + 2] = B.c[2];
+          head[h + 3] = B.r;
+          head[h + 4] = np; head[h + 5] = fig.length; head[h + 6] = s.id;
+          head[h + 7] = 1;                     // 1 marks a person, not a wall
+          for (let d = 0; d < 3; d++) {
+            if (B.c[d] - B.r < lo[d]) lo[d] = B.c[d] - B.r;
+            if (B.c[d] + B.r > hi[d]) hi[d] = B.c[d] + B.r;
+          }
+          nh++;
+          for (const q of fig) np = this.writePrim(prim, np, q, who);
+        }
+      }
     }
     return { heads: nh, prims: np, all: this.overall(lo, hi) };
   },
@@ -6157,6 +6186,285 @@ const Lore = {
 };
 </script>
 <script>
+// ---- js/npc.js ----
+// The people who are still here.
+//
+// Every chronicle but the last one ends. The people who have not ended yet
+// are living in settlements the record can name, and this puts somebody in
+// them - so the world has a voice in it that is not cut into a wall.
+//
+// Nothing is stored. Who stands where is a function of the site and the
+// seed, the same way the buildings on that site are, so two visits find the
+// same person in the same doorway. What they SAY comes out of their own
+// people's event log: they are not given lines, they are asked questions
+// about a history that happened.
+const NPC = {
+  PER_400: 1,        // another soul on the ground per this much population
+  MAX_AT: 3,         // and never more than a village's worth to talk to
+  RING: 6.0,         // how far out from the middle of a place they stand
+  REACH: 3.2,        // how close you must be to speak to one
+  WIDTH: 52,         // the widest anything said here may be, panel included
+
+  // A role is what the ground is for, not a job title: a mine has somebody
+  // who works metal, a farm somebody who works ground, a hold somebody who
+  // keeps the record. It decides what they want and what they can spare.
+  ROLE: {
+    hold: ['keeper', 'the one who keeps the record'],
+    farm: ['grower', 'who works this ground'],
+    mine: ['smith', 'who works the metal out of it'],
+    fort: ['warden', 'who watches the road'],
+  },
+
+  _all: null,
+
+  // Everybody alive in the world, in one list. Small - a dozen settlements
+  // and at most three to a settlement - so it is built once and kept.
+  all() {
+    if (this._all) return this._all;
+    const S = Lore.init();
+    const out = [];
+    for (const site of S.sites) {
+      if (site.abandoned >= 0) continue;      // nobody lives in a ruin
+      const p = S.peoples[site.people];
+      // A people can fall while one of its places is never formally
+      // abandoned, so a site being un-ruined is not enough: somebody has to
+      // still be standing behind it, or the last of the Anuaya would be out
+      // here telling you they have held this ground since the 162nd year.
+      if (!p || p.fell >= 0) continue;
+      const n = clamp(1 + Math.floor(site.pop / (400 / this.PER_400)), 1, this.MAX_AT);
+      for (let i = 0; i < n; i++) {
+        const a = (i / n + hash01(site.id, i, CFG.SEED >>> 0) * 0.3) * Math.PI * 2;
+        const r = this.RING * (0.7 + hash01(site.id + 31, i, CFG.SEED >>> 0) * 0.6);
+        const x = site.x + Math.cos(a) * r;
+        const y = site.y + Math.sin(a) * r;
+        const [role, doing] = this.ROLE[site.kind] || this.ROLE.farm;
+        out.push({
+          id: out.length,
+          name: Chronicle.nameFor(site.people, 700 + out.length, site.id * 13 + i),
+          role, doing,
+          people: site.people, peopleName: p ? p.name : '?',
+          site: site.id, siteName: site.name,
+          x, y, z: terrainH(x, y),
+          // facing the middle of their own settlement, which is where
+          // anyone standing in a village stands looking
+          facing: Math.atan2(site.y - y, site.x - x),
+        });
+      }
+    }
+    this._all = out;
+    return out;
+  },
+
+  // The nearest person within reach, or null.
+  near(x, y, maxD) {
+    const r = maxD === undefined ? this.REACH : maxD;
+    let best = null, bd = r * r;
+    for (const n of this.all()) {
+      const d = (n.x - x) ** 2 + (n.y - y) ** 2;
+      if (d < bd) { bd = d; best = n; }
+    }
+    return best;
+  },
+
+  byId(id) { const a = this.all(); return id >= 0 && id < a.length ? a[id] : null; },
+
+  // Everyone standing at one site, for the renderer to pack alongside it.
+  atSite(siteId) { return this.all().filter(n => n.site === siteId); },
+
+  // A figure, in world space. The catalogue already draws a person for
+  // scale; this is that same body with materials that read as somebody
+  // rather than as an instrument left in the scene.
+  parts(n) {
+    const P = transformParts(figureParts(0, 0, n.facing), { pos: [n.x, n.y, n.z] });
+    // Pale, deliberately. The first try dressed them in timber, and a
+    // timber-brown figure standing in tree shade against dark ground is
+    // invisible at five paces - the shape was right and could not be seen.
+    // Somebody has to read against the world they are standing in.
+    for (const p of P) p.mat = p.k === 'sph' ? 'bone' : 'daub';
+    return P;
+  },
+
+  // What they say when you come up to them. Their own people, their own
+  // place, and one thing that actually happened to them.
+  greet(n) {
+    const S = Lore.init();
+    const p = S.peoples[n.people];
+    const out = [(n.name + ', ' + n.doing).toUpperCase().slice(0, this.WIDTH), ''];
+    out.push('"We are ' + n.peopleName + '. My people have held this');
+    out.push('ground since the ' + Lore.ord(p.rise) + ' year.');
+    // one real event from their own record, so nobody says anything that
+    // did not happen
+    const mine = [];
+    for (const e of S.events) {
+      if (e.actor !== n.people) continue;
+      const l = Lore.line(S, e, p);
+      if (!l) continue;
+      const said = String(e.t).padStart(4) + '  ' + l;
+      if (said.length <= this.WIDTH) mine.push(said);
+    }
+    if (mine.length) {
+      const i = jsUhash((n.id * 977) >>> 0, (CFG.SEED >>> 0)) % mine.length;
+      out.push('');
+      out.push(mine[i]);
+    }
+    return out;
+  },
+};
+</script>
+<script>
+// ---- js/quest.js ----
+// What somebody wants from you.
+//
+// Nothing here is written down as a quest. A person's want is a function of
+// who they are and what the sim already did: a smith at a mine has no
+// timber and asks for some; somebody at a hold knows a place their own
+// record names and cannot go there themselves. Two runs of a seed ask the
+// same two things of the same two people.
+//
+// Only what the game can actually check is asked for. A quest to recover a
+// named object would be better than either of these and is not here,
+// because relics are not carryable yet - there is no item that holds an
+// artifact and no way to dig one out of a deposit. Asking for one would be
+// a quest that cannot be finished.
+const Quest = {
+  // What each kind of place is short of, and what it has to spare. Both
+  // sides come from what the place does, so a mine trades metal for wood
+  // and a farm trades food for the tools it cannot make.
+  WANT: {
+    mine: ['wood', 'wood'],
+    farm: ['stone', 'wood'],
+    hold: ['iron', 'stone'],
+    fort: ['stone', 'wood'],
+  },
+  PAY: {
+    mine: ['copper', 'iron', 'tin'],
+    farm: ['fruit', 'wood', 'sap'],
+    hold: ['gem', 'copper'],
+    fort: ['iron', 'stone'],
+  },
+  BRING_MIN: 2, BRING_MAX: 5,
+  PAY_MIN: 1, PAY_MAX: 3,
+  ARRIVE: 14,        // how near a place you must get for it to count
+  // How far a person will send you. Walking is 4.2 units a second, so the
+  // far end of this is a couple of minutes out and the same back - far
+  // enough to be a journey, near enough to be one you finish.
+  SEEK_MIN: 120,
+  SEEK_MAX: 900,
+
+  // ---- what one person wants, decided once and for all by the seed ----
+  forNpc(n) {
+    if (!n) return null;
+    const S = Lore.init();
+    const site = S.sites[n.site];
+    const kind = site ? site.kind : 'farm';
+    const r = hash01(n.id * 71, 5, CFG.SEED >>> 0);
+    // A keeper is the one who knows where things are, so a keeper sends
+    // you somewhere. Everybody else works, and wants materials.
+    if (n.role === 'keeper' || r < 0.34) {
+      const place = this.aPlace(S, n);
+      if (place) return this.seek(n, place);
+    }
+    return this.bring(n, kind);
+  },
+
+  bring(n, kind) {
+    const want = this.WANT[kind] || this.WANT.farm;
+    const pay = this.PAY[kind] || this.PAY.farm;
+    const item = want[jsUhash(n.id >>> 0, 11) % want.length];
+    const give = pay[jsUhash(n.id >>> 0, 12) % pay.length];
+    const need = this.BRING_MIN +
+      jsUhash(n.id >>> 0, 13) % (this.BRING_MAX - this.BRING_MIN + 1);
+    const paid = this.PAY_MIN +
+      jsUhash(n.id >>> 0, 14) % (this.PAY_MAX - this.PAY_MIN + 1);
+    return {
+      id: 'b' + n.id, kind: 'bring', npc: n.id,
+      item, need, give, paid,
+      ask: ['"We are short of ' + ITEMS[item].name + ' here. Bring me ' + need,
+            'and I will not send you away empty."'],
+      task: ('bring ' + need + ' ' + ITEMS[item].name + ' to ' + n.name +
+             ' at ' + n.siteName).slice(0, NPC.WIDTH),
+    };
+  },
+
+  // Somewhere the record actually names: a place of theirs that ended, or
+  // a field their people fought on. The bearing is the only direction you
+  // are given, because there is no map to put a marker on.
+  aPlace(S, n) {
+    const opts = [];
+    const take = (x, y, name, why) => {
+      const d = Math.hypot(x - n.x, y - n.y);
+      if (d < this.SEEK_MIN || d > this.SEEK_MAX) return;
+      if (name.length > 30) return;          // it has to fit on a wall of text
+      opts.push({ x, y, name, why, d });
+    };
+    // their own dead places first: a person sends you where their people
+    // actually were, not to a stranger's ruin
+    for (const s of S.sites) {
+      if (s.abandoned < 0 || s.people !== n.people) continue;
+      take(s.x, s.y, s.name, 'ours once, until the ' + Lore.ord(s.abandoned) + ' year');
+    }
+    for (const b of S.battles) {
+      if (b.a !== n.people && b.b !== n.people) continue;
+      take(b.x, b.y, b.name, 'we fought there in the ' + Lore.ord(b.t) + ' year');
+    }
+    // and any ruin near enough to walk to, if their own are all too far
+    if (!opts.length) {
+      for (const s of S.sites) {
+        if (s.abandoned < 0) continue;
+        take(s.x, s.y, s.name, 'nobody has lived there since the ' +
+             Lore.ord(s.abandoned) + ' year');
+      }
+    }
+    if (!opts.length) return null;
+    return opts[jsUhash(n.id >>> 0, 21) % opts.length];
+  },
+
+  seek(n, place) {
+    const dx = place.x - n.x, dy = place.y - n.y;
+    return {
+      id: 's' + n.id, kind: 'seek', npc: n.id,
+      x: place.x, y: place.y, name: place.name,
+      ask: ['"There is a place out there. ' + place.name + ',',
+            place.why + '.',
+            'It lies ' + this.bearing(dx, dy) + ' of here, ' +
+            Math.round(Math.hypot(dx, dy) / 10) + ' leagues.',
+            'Go and see what is left of it, and tell me."'],
+      task: ('find ' + place.name + ', ' + this.bearing(dx, dy) +
+             ' of ' + n.siteName).slice(0, NPC.WIDTH),
+    };
+  },
+
+  // Eight points, by comparison rather than by angle - the same reckoning
+  // the chronicle's myth uses, so a bearing means one thing in this world.
+  bearing(dx, dy) {
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    const ns = dy < 0 ? 'north' : 'south', ew = dx < 0 ? 'west' : 'east';
+    if (ax < ay * 0.45) return ns;
+    if (ay < ax * 0.45) return ew;
+    return ns + '-' + ew;
+  },
+
+  // ---- can it be finished, and what happens when it is ----
+  done(q) {
+    if (!q) return false;
+    if (q.kind === 'bring') return Game.count(q.item) >= q.need;
+    // a place is found by standing in it; nothing is marked, so arriving
+    // is the whole of the proof
+    return Math.hypot(Player.x - q.x, Player.y - q.y) < this.ARRIVE;
+  },
+
+  hand(q, n) {
+    if (q.kind === 'bring') {
+      Game.take(q.item, q.need);
+      Game.give(q.give, q.paid);
+      return '"That is what we needed." (+' + q.paid + ' ' + ITEMS[q.give].name + ')';
+    }
+    Game.give('gem', 1);
+    return '"So it is still standing." (+1 ' + ITEMS.gem.name + ')';
+  },
+};
+</script>
+<script>
 // ---- js/items.js ----
 // Item, recipe, and tree-species definitions. Data only - the logic that
 // gives, takes, crafts, and examines lives in js/game.js.
@@ -6230,6 +6538,7 @@ const Game = {
   cmdBuf: '',
   cmdHistory: [],
   read: [],             // inscription keys already read, in the order found
+  quests: {},           // quest id -> 'open' | 'done'; the only quest state
   done: false,          // the record has been pieced together
   spawnAt: null,        // where a saved game left the player standing
 
@@ -6565,6 +6874,7 @@ const Game = {
   },
 
   confirm() {
+    if (this.mode === 'talk') { this.talkAct(); return; }
     if (this.mode === 'menu') {
       const n = this.MENU.length;
       this.menuDo(this.MENU[((this.cursor % n) + n) % n][0]);
@@ -6699,10 +7009,89 @@ const Game = {
         acts.push({ label: seen ? 'read again' : 'read the inscription',
           fn: () => this.readInscription(ins) });
       }
+    } else if (t.kind === 'npc') {
+      const who = NPC.byId(t.npc);
+      if (who) acts.push({ label: 'speak to ' + who.name, fn: () => this.talkTo(who) });
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
     return acts;
+  },
+
+  // ---- people, and what they want ----
+
+  talking: null, talkQ: null, talkSay: '',
+
+  talkTo(who) {
+    this.talking = who;
+    this.talkQ = Quest.forNpc(who);
+    this.talkSay = '';
+    this.open('talk');
+  },
+
+  questState(q) { return q ? (this.quests[q.id] || 'none') : 'none'; },
+
+  // One button does the whole conversation, because there is only ever one
+  // thing to do next: take the work, hand it in, or nothing.
+  talkAct() {
+    const q = this.talkQ;
+    if (!q) { this.close(); return; }
+    const st = this.questState(q);
+    if (st === 'none') {
+      this.quests[q.id] = 'open';
+      this.needSave = true;
+      this.talkSay = '"Then we have an understanding."';
+      this.uiDirty = true;
+      return;
+    }
+    if (st === 'open' && Quest.done(q)) {
+      this.quests[q.id] = 'done';
+      this.needSave = true;
+      this.talkSay = Quest.hand(q, this.talking);
+      this.uiDirty = true;
+      return;
+    }
+    this.close();
+  },
+
+  drawTalk() {
+    const who = this.talking;
+    if (!who) return;
+    const lines = NPC.greet(who);
+    const q = this.talkQ;
+    const st = this.questState(q);
+    lines.push('');
+    if (q && st === 'none') {
+      for (const l of q.ask) lines.push(l);
+      lines.push('');
+      lines.push('[E] take it on   [Q] walk away');
+    } else if (q && st === 'open') {
+      lines.push(Quest.done(q) ? '"You have it. Give it here."'
+                               : '"' + q.task + '."');
+      lines.push('');
+      lines.push(Quest.done(q) ? '[E] hand it over   [Q] not yet'
+                               : '[Q] leave');
+    } else if (q) {
+      lines.push('"That is settled between us."');
+      lines.push('');
+      lines.push('[Q] leave');
+    } else {
+      lines.push('[Q] leave');
+    }
+    if (this.talkSay) { lines.push(''); lines.push(this.talkSay); }
+    this.panel(lines);
+  },
+
+  // What is owed and to whom, on the journal's back page.
+  questLines() {
+    const out = [];
+    for (const id of Object.keys(this.quests)) {
+      if (this.quests[id] !== 'open') continue;
+      const n = NPC.byId(Number(id.slice(1)));
+      const q = n ? Quest.forNpc(n) : null;
+      if (q) out.push('  ' + q.task + (Quest.done(q) ? '   - go back' : ''));
+    }
+    return out;
   },
 
   // ---- the record ----
@@ -6755,6 +7144,11 @@ const Game = {
                                 'pocket without complaint.'];
       case 'boulder':   return ['BOULDER', 'Half-buried and going nowhere.',
                                 'It would take a pickaxe.'];
+      case 'npc': {
+        const who = NPC.byId(t.npc);
+        return who ? [who.name.toUpperCase(), who.doing + ', of ' + who.peopleName + '.']
+                   : ['SOMEBODY', ''];
+      }
       case 'water':     return ['WATER', 'Still, dark, patient.'];
       case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
       case 'ore':       return [ITEMS[oreItem(...t.point)].name.toUpperCase() + ' VEIN',
@@ -7107,6 +7501,7 @@ const Game = {
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
     if (this.mode === 'console') this.drawConsole();
+    if (this.mode === 'talk') this.drawTalk();
     if (this.mode === 'reading') this.drawReading();
     if (this.mode === 'journal') this.drawJournal();
     if (this.mode === 'title') this.drawTitle();
@@ -7188,6 +7583,12 @@ const Game = {
       lines.push(this.done
         ? 'That is as deep as anyone cut. Nobody came back up.'
         : this.objective());
+    }
+    const owed = typeof NPC === 'undefined' ? [] : this.questLines();
+    if (owed.length) {
+      lines.push('');
+      lines.push('ASKED OF YOU');
+      for (const l of owed) lines.push(l);
     }
     lines.push('[Q] close');
     this.panel(lines);
@@ -7276,7 +7677,7 @@ const Game = {
     const inv = {};
     for (const [k, v] of this.inv) inv[k] = v;
     return {
-      inv, read: this.read, done: this.done,
+      inv, read: this.read, done: this.done, quests: this.quests,
       at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
                                            Player.pitch, Player.z] : null,
       t: typeof Sky !== 'undefined' ? Sky.t : null,
@@ -7288,6 +7689,7 @@ const Game = {
     this.inv.clear();
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
+    this.quests = (s.quests && typeof s.quests === 'object') ? s.quests : {};
     this.done = !!s.done;
     this.used = new Set((s.used || []).slice(-this.USED_MAX));
     this.spawnAt = Array.isArray(s.at) ? s.at : null;

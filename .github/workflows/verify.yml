@@ -32,6 +32,8 @@ jobs:
         run: node scripts/test-assets.js
       - name: steadings
         run: node scripts/test-steading.js
+      - name: people
+        run: node scripts/test-npc.js
 
       - name: dist/ is in step with the sources
         run: |

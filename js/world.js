@@ -122,6 +122,14 @@ const World = {
           }
         }
       }
+      // somebody standing here. Checked before the ground so that talking
+      // to a person beats examining the dirt they are stood on.
+      if (typeof NPC !== 'undefined') {
+        const who = NPC.near(px, py, 0.75);
+        if (who && pz > who.z - 0.2 && pz < who.z + 2.0) {
+          return { kind: 'npc', npc: who.id, point: [px, py, pz] };
+        }
+      }
       // open water
       if (pz < CFG.SEA_LEVEL && terrainH(px, py) < CFG.SEA_LEVEL) {
         return { kind: 'water', point: [px, py, pz] };

@@ -13,6 +13,7 @@ const Game = {
   cmdBuf: '',
   cmdHistory: [],
   read: [],             // inscription keys already read, in the order found
+  quests: {},           // quest id -> 'open' | 'done'; the only quest state
   done: false,          // the record has been pieced together
   spawnAt: null,        // where a saved game left the player standing
 
@@ -348,6 +349,7 @@ const Game = {
   },
 
   confirm() {
+    if (this.mode === 'talk') { this.talkAct(); return; }
     if (this.mode === 'menu') {
       const n = this.MENU.length;
       this.menuDo(this.MENU[((this.cursor % n) + n) % n][0]);
@@ -482,10 +484,89 @@ const Game = {
         acts.push({ label: seen ? 'read again' : 'read the inscription',
           fn: () => this.readInscription(ins) });
       }
+    } else if (t.kind === 'npc') {
+      const who = NPC.byId(t.npc);
+      if (who) acts.push({ label: 'speak to ' + who.name, fn: () => this.talkTo(who) });
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
     return acts;
+  },
+
+  // ---- people, and what they want ----
+
+  talking: null, talkQ: null, talkSay: '',
+
+  talkTo(who) {
+    this.talking = who;
+    this.talkQ = Quest.forNpc(who);
+    this.talkSay = '';
+    this.open('talk');
+  },
+
+  questState(q) { return q ? (this.quests[q.id] || 'none') : 'none'; },
+
+  // One button does the whole conversation, because there is only ever one
+  // thing to do next: take the work, hand it in, or nothing.
+  talkAct() {
+    const q = this.talkQ;
+    if (!q) { this.close(); return; }
+    const st = this.questState(q);
+    if (st === 'none') {
+      this.quests[q.id] = 'open';
+      this.needSave = true;
+      this.talkSay = '"Then we have an understanding."';
+      this.uiDirty = true;
+      return;
+    }
+    if (st === 'open' && Quest.done(q)) {
+      this.quests[q.id] = 'done';
+      this.needSave = true;
+      this.talkSay = Quest.hand(q, this.talking);
+      this.uiDirty = true;
+      return;
+    }
+    this.close();
+  },
+
+  drawTalk() {
+    const who = this.talking;
+    if (!who) return;
+    const lines = NPC.greet(who);
+    const q = this.talkQ;
+    const st = this.questState(q);
+    lines.push('');
+    if (q && st === 'none') {
+      for (const l of q.ask) lines.push(l);
+      lines.push('');
+      lines.push('[E] take it on   [Q] walk away');
+    } else if (q && st === 'open') {
+      lines.push(Quest.done(q) ? '"You have it. Give it here."'
+                               : '"' + q.task + '."');
+      lines.push('');
+      lines.push(Quest.done(q) ? '[E] hand it over   [Q] not yet'
+                               : '[Q] leave');
+    } else if (q) {
+      lines.push('"That is settled between us."');
+      lines.push('');
+      lines.push('[Q] leave');
+    } else {
+      lines.push('[Q] leave');
+    }
+    if (this.talkSay) { lines.push(''); lines.push(this.talkSay); }
+    this.panel(lines);
+  },
+
+  // What is owed and to whom, on the journal's back page.
+  questLines() {
+    const out = [];
+    for (const id of Object.keys(this.quests)) {
+      if (this.quests[id] !== 'open') continue;
+      const n = NPC.byId(Number(id.slice(1)));
+      const q = n ? Quest.forNpc(n) : null;
+      if (q) out.push('  ' + q.task + (Quest.done(q) ? '   - go back' : ''));
+    }
+    return out;
   },
 
   // ---- the record ----
@@ -538,6 +619,11 @@ const Game = {
                                 'pocket without complaint.'];
       case 'boulder':   return ['BOULDER', 'Half-buried and going nowhere.',
                                 'It would take a pickaxe.'];
+      case 'npc': {
+        const who = NPC.byId(t.npc);
+        return who ? [who.name.toUpperCase(), who.doing + ', of ' + who.peopleName + '.']
+                   : ['SOMEBODY', ''];
+      }
       case 'water':     return ['WATER', 'Still, dark, patient.'];
       case 'lichen':    return ['GLOW LICHEN', ITEMS.lichen.desc];
       case 'ore':       return [ITEMS[oreItem(...t.point)].name.toUpperCase() + ' VEIN',
@@ -890,6 +976,7 @@ const Game = {
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
     if (this.mode === 'console') this.drawConsole();
+    if (this.mode === 'talk') this.drawTalk();
     if (this.mode === 'reading') this.drawReading();
     if (this.mode === 'journal') this.drawJournal();
     if (this.mode === 'title') this.drawTitle();
@@ -971,6 +1058,12 @@ const Game = {
       lines.push(this.done
         ? 'That is as deep as anyone cut. Nobody came back up.'
         : this.objective());
+    }
+    const owed = typeof NPC === 'undefined' ? [] : this.questLines();
+    if (owed.length) {
+      lines.push('');
+      lines.push('ASKED OF YOU');
+      for (const l of owed) lines.push(l);
     }
     lines.push('[Q] close');
     this.panel(lines);
@@ -1059,7 +1152,7 @@ const Game = {
     const inv = {};
     for (const [k, v] of this.inv) inv[k] = v;
     return {
-      inv, read: this.read, done: this.done,
+      inv, read: this.read, done: this.done, quests: this.quests,
       at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
                                            Player.pitch, Player.z] : null,
       t: typeof Sky !== 'undefined' ? Sky.t : null,
@@ -1071,6 +1164,7 @@ const Game = {
     this.inv.clear();
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
+    this.quests = (s.quests && typeof s.quests === 'object') ? s.quests : {};
     this.done = !!s.done;
     this.used = new Set((s.used || []).slice(-this.USED_MAX));
     this.spawnAt = Array.isArray(s.at) ? s.at : null;

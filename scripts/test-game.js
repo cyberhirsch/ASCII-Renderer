@@ -12,14 +12,14 @@ const root = path.join(__dirname, '..');
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
              'removed', 'chronicle', 'assets', 'steading', 'entities',
-             'lore', 'items', 'game', 'player']
+             'lore', 'npc', 'quest', 'items', 'game', 'player']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
    'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt', 'Player',
-   'Steading', 'Entities']
+   'Steading', 'Entities', 'NPC', 'Quest']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -1797,6 +1797,104 @@ if (c.Player && c.Lore && c.Steading) {
     c.Entities.list = [];
   }
   G.devMode = false;
+  G.close();
+}
+
+// ---- 27. talking to somebody, and doing what they ask ----
+if (c.NPC && c.Quest) {
+  const G = c.Game, P = c.Player, NPC = c.NPC, Quest = c.Quest;
+  const S = c.Lore.init();
+  const who = NPC.all().find(n => Quest.forNpc(n) && Quest.forNpc(n).kind === 'bring');
+  const seeker = NPC.all().find(n => Quest.forNpc(n) && Quest.forNpc(n).kind === 'seek');
+  (who && seeker) ? ok('the world has somebody who wants a thing and somebody who wants a place')
+                  : fail('missing one of the two quest kinds');
+
+  const text = () => {
+    let t = '';
+    for (let i = 0; i < c.Overlay.data.length; i++) {
+      const ch = c.Overlay.data[i] & 0xff;
+      if (ch > 32 && ch < 127) t += String.fromCharCode(ch);
+    }
+    return t;
+  };
+  c.Overlay.resize(120, 44);
+
+  if (who) {
+    const q = Quest.forNpc(who);
+    G.quests = {}; G.inv.clear(); G.close();
+
+    // examine finds a person standing there
+    P.x = who.x - 1.2; P.y = who.y; P.z = who.z;
+    P.angle = 0; P.pitch = 0;
+    const t = c.World.examineRay(P.x, P.y, P.z + c.CFG.EYE, 1, 0, 0);
+    (t && t.kind === 'npc' && t.npc === who.id)
+      ? ok('examine finds a person before the ground they stand on')
+      : fail('examine missed the person: ' + JSON.stringify(t && t.kind));
+
+    G.talkTo(who);
+    (G.mode === 'talk') ? ok('and speaking to them opens the conversation')
+                        : fail('talk did not open');
+    c.Overlay.clear(); G.drawUI();
+    (text().includes(who.name.toUpperCase().slice(0, 4)))
+      ? ok('who they are is on the screen') : fail('the talk panel is empty');
+
+    // taking it on
+    G.confirm();
+    (G.quests[q.id] === 'open') ? ok('taking work on records it as owed')
+                                : fail('quest was not accepted');
+    (G.questLines().length === 1) ? ok('and the journal says what is owed')
+                                  : fail('journal does not list the task');
+
+    // handing in without the goods does nothing
+    G.confirm();
+    (G.quests[q.id] === 'open' && G.count(q.give) === 0)
+      ? ok('and nothing is paid for work not done')
+      : fail('paid out early');
+
+    // with the goods, it completes and pays
+    G.talkTo(who);
+    G.give(q.item, q.need);
+    (Quest.done(q)) ? ok('having the goods finishes it') : fail('quest not satisfied');
+    G.confirm();
+    (G.quests[q.id] === 'done') ? ok('handing over closes it') : fail('did not close');
+    (G.count(q.item) === 0) ? ok('the goods change hands') : fail('goods not taken');
+    (G.count(q.give) === q.paid) ? ok(`and you are paid ${q.paid} ${q.give}`)
+                                 : fail(`paid ${G.count(q.give)}, wanted ${q.paid}`);
+    (G.questLines().length === 0) ? ok('and it leaves the journal')
+                                  : fail('finished work still listed');
+    // and it cannot be handed in twice
+    const had = G.count(q.give);
+    G.talkTo(who); G.confirm();
+    (G.count(q.give) === had) ? ok('and cannot be claimed a second time')
+                              : fail('quest paid out twice');
+  }
+
+  if (seeker) {
+    const q = Quest.forNpc(seeker);
+    G.quests = {}; G.close();
+    G.talkTo(seeker); G.confirm();
+    P.x = seeker.x; P.y = seeker.y;
+    (!Quest.done(q)) ? ok('a place is not found from where you were told about it')
+                     : fail('the seek quest completed without going anywhere');
+    P.x = q.x + 4; P.y = q.y - 3;
+    (Quest.done(q)) ? ok('and is found by standing in it')
+                    : fail('standing in the place did not count');
+    G.talkTo(seeker); G.confirm();
+    (G.quests[q.id] === 'done') ? ok('reporting back closes it') : fail('seek did not close');
+  }
+
+  // quests survive a save
+  {
+    G.quests = { b0: 'open', s1: 'done' };
+    const snap = JSON.parse(JSON.stringify(G.snapshot()));
+    G.quests = {};
+    G.restore(snap);
+    (G.quests.b0 === 'open' && G.quests.s1 === 'done')
+      ? ok('what is owed survives the save') : fail('quests lost on save');
+    G.restore({});
+    (Object.keys(G.quests).length === 0) ? ok('and a new world owes nothing')
+                                         : fail('quests carried into a fresh world');
+  }
   G.close();
 }
 

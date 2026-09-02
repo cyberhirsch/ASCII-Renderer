@@ -50,6 +50,13 @@ water plane the renderer has nothing to show you but sky — and no drowning.
 The heightfield never goes below zero, so the sea is nowhere deeper than
 2.4 units and the bed is always in sight under you.
 
+The last of the six peoples has not ended. You can walk into one of their
+settlements and speak to somebody — **E** on a person. What they say is
+their own people's record, and what they ask of you comes out of it too:
+materials their place is short of, or a ruin or a battlefield the record
+names, given as a bearing and a distance and nothing else. **J** lists what
+is owed.
+
 You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
 
 **There is something to find down there.** Someone cut those halls, and they

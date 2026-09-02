@@ -208,6 +208,27 @@ const Steading = {
         nh++;
         for (const q of parts) np = this.writePrim(prim, np, q, b);
       }
+      // and whoever is standing among them, on the same footing: their own
+      // header, so a ray rejects a person with one sphere like anything else
+      if (typeof NPC !== 'undefined') {
+        for (const who of NPC.atSite(s.id)) {
+          if (nh >= maxHead) break;
+          const fig = NPC.parts(who);
+          if (np + fig.length > maxPrim) break;
+          const B = partsBounds(fig);
+          const h = nh * this.HEAD_F;
+          head[h] = B.c[0]; head[h + 1] = B.c[1]; head[h + 2] = B.c[2];
+          head[h + 3] = B.r;
+          head[h + 4] = np; head[h + 5] = fig.length; head[h + 6] = s.id;
+          head[h + 7] = 1;                     // 1 marks a person, not a wall
+          for (let d = 0; d < 3; d++) {
+            if (B.c[d] - B.r < lo[d]) lo[d] = B.c[d] - B.r;
+            if (B.c[d] + B.r > hi[d]) hi[d] = B.c[d] + B.r;
+          }
+          nh++;
+          for (const q of fig) np = this.writePrim(prim, np, q, who);
+        }
+      }
     }
     return { heads: nh, prims: np, all: this.overall(lo, hi) };
   },
