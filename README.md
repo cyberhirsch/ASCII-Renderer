@@ -30,7 +30,8 @@ slow, and gives the rays back after a sustained good patch.
 on the clipboard as plain text, `map` sizes the devmode minimap, `time <hour>`
 jumps the clock, `freeze` stops
 it, `daylen <seconds>` sets the cycle length, and `devmode` unlocks the M/X
-debug views, a compass across the top row, and a minimap in the top right —
+debug views, `teleport building` (or `npc`), a compass across the top row,
+and a minimap in the top right —
 green land, blue water, red settlements, `@` you in white and `>` a cave
 mouth in amber; `HFMT` a settlement still lived in, `hfmt` one that is not.
 Escape or an empty Enter closes the console.

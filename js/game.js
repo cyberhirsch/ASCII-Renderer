@@ -226,6 +226,20 @@ const Game = {
         '  (@ you, > cave mouth, HFMT standing, hfmt ruined)');
       return;
     }
+    // Getting to the thing you are working on. Walking to the nearest
+    // settlement is four hundred units, and doing that by hand every time
+    // you change a line of the asset code is most of a debugging session.
+    if (verb === 'teleport' || verb === 'tp') {
+      if (!this.devMode) {
+        this.cmdHistory.push('teleport is a devmode tool - run "devmode" first');
+        return;
+      }
+      const what = (arg[1] || '').toLowerCase();
+      if (what === 'building') { this.tpBuilding(); return; }
+      if (what === 'npc') { this.tpNpc(); return; }
+      this.cmdHistory.push('teleport building | npc');
+      return;
+    }
     if (verb === 'quality') {
       if (typeof Quality === 'undefined') {
         this.cmdHistory.push('quality control is not loaded');
@@ -288,6 +302,7 @@ const Game = {
       case 'help':
         this.cmdHistory.push('commands: seed <n>, quality <low|medium|high|auto>,');
         this.cmdHistory.push('copy, time <h>, freeze, daylen <s>, devmode, map,');
+        this.cmdHistory.push('teleport <building|npc>,');
         this.cmdHistory.push('wipe, clear, help');
         break;
       default:
@@ -572,6 +587,86 @@ const Game = {
       this.saveTimer += dt;
       if (this.saveTimer > 2) { this.saveTimer = 0; this.save(); }
     }
+  },
+
+  // ---- devmode: getting to the thing you are looking at ----
+
+  // Put the player down NEXT to something rather than on top of it. A
+  // teleport that lands inside a building shows you the inside of a wall
+  // and reads as the renderer being broken - which cost a real half hour
+  // once already.
+  standBy(x, y, clear, face) {
+    const step = 0.6;
+    let z = null;
+    // walk outwards from the target until there is somewhere to stand
+    for (let r = clear; r < clear + 14 && z === null; r += step) {
+      for (let a = 0; a < Math.PI * 2 - 0.01; a += Math.PI / 8) {
+        const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+        if (World.groundZ(px, py) < CFG.SEA_LEVEL) continue;   // not into the sea
+        const fz = World.walkZ(px, py, World.groundZ(px, py));
+        if (fz === null) continue;
+        Player.x = px; Player.y = py; Player.z = fz;
+        z = fz;
+        break;
+      }
+    }
+    if (z === null) { Player.x = x; Player.y = y; Player.z = World.groundZ(x, y); }
+    Player.vz = 0; Player.onGround = true; Player.swimming = false;
+    if (face) Player.angle = Math.atan2(y - Player.y, x - Player.x);
+    Player.pitch = 0;
+    // the resident set was packed somewhere else entirely
+    if (typeof GPURenderer !== 'undefined') GPURenderer.steadAt = null;
+    this.needSave = true;
+    this.close();
+  },
+
+  tpBuilding() {
+    if (typeof Steading === 'undefined' || typeof Lore === 'undefined' || !Lore.S) {
+      this.cmdHistory.push('no chronicle loaded, so nothing has been built');
+      return;
+    }
+    const S = Lore.S;
+    let site = null, sd = Infinity;
+    for (const st of S.sites) {
+      const d = (st.x - Player.x) ** 2 + (st.y - Player.y) ** 2;
+      if (d < sd) { sd = d; site = st; }
+    }
+    if (!site) { this.cmdHistory.push('no settlements in this world'); return; }
+    // Sites sit at least a couple of hundred units apart, so the nearest
+    // building is always in the nearest place - no need to open them all.
+    let best = null, bd = Infinity;
+    for (const b of Steading.plan(S, site, S.now)) {
+      const d = (b.pos[0] - Player.x) ** 2 + (b.pos[1] - Player.y) ** 2;
+      if (d < bd) { bd = d; best = b; }
+    }
+    if (!best) { this.cmdHistory.push('nothing stands at ' + site.name); return; }
+    const away = Math.round(Math.sqrt(bd));
+    this.standBy(best.pos[0], best.pos[1], 11, true);
+    const p = S.peoples[site.people];
+    this.toast(best.build + ' at ' + site.name +
+      (site.abandoned < 0 ? ', still lived in' : ', lost ' + site.abandoned) +
+      '  (' + away + 'u)');
+    console.info('[teleport] ' + best.build + ' of ' + (p ? p.name : '?') +
+                 ' at ' + site.name);
+  },
+
+  tpNpc() {
+    const live = (typeof Entities !== 'undefined' && Entities.list) ? Entities.list : [];
+    if (!live.length) {
+      // Said plainly rather than failing silently: there is no creature
+      // system yet, so this is not a bug in the command.
+      this.cmdHistory.push('nobody is alive in this world yet - Entities.list is');
+      this.cmdHistory.push('empty until the creature phase lands');
+      return;
+    }
+    let best = null, bd = Infinity;
+    for (const e of live) {
+      const d = (e.x - Player.x) ** 2 + (e.y - Player.y) ** 2;
+      if (d < bd) { bd = d; best = e; }
+    }
+    this.standBy(best.x, best.y, 3, true);
+    this.toast('nearest ' + (best.kind === undefined ? 'creature' : 'kind ' + best.kind) +
+               '  (' + Math.round(Math.sqrt(bd)) + 'u)');
   },
 
   // ---- the menu ----

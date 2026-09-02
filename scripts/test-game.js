@@ -11,13 +11,15 @@ const root = path.join(__dirname, '..');
 
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
-             'removed', 'chronicle', 'lore', 'items', 'game', 'player']
+             'removed', 'chronicle', 'assets', 'steading', 'entities',
+             'lore', 'items', 'game', 'player']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
-   'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt', 'Player']
+   'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt', 'Player',
+   'Steading', 'Entities']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -1696,6 +1698,106 @@ if (c.Lore) {
                          : fail('the prologue never ended by itself');
   }
   G.mode = 'play';
+}
+
+// ---- 26. devmode teleports ----
+if (c.Player && c.Lore && c.Steading) {
+  const G = c.Game, P = c.Player, S = c.Lore.init();
+  P.mouse = P.mouse || {};
+  const run = cmd => { G.openConsole(); G.cmdBuf = cmd;
+                       G.consoleInput({ code: 'Enter', key: 'Enter' }); };
+  const last = () => G.cmdHistory[G.cmdHistory.length - 1];
+
+  G.devMode = false;
+  run('teleport building');
+  last().includes('devmode') ? ok('teleport refuses outside devmode')
+                             : fail('teleport worked without devmode');
+  G.devMode = true;
+  run('teleport');
+  last().includes('building') ? ok('teleport on its own says what it takes')
+                              : fail('no usage line: ' + last());
+
+  // ---- building ----
+  P.x = 0; P.y = 0; P.z = c.terrainH(0, 0);
+  run('teleport building');
+  (G.mode === 'play') ? ok('teleporting closes the console so you can see')
+                      : fail('console stayed open, mode ' + G.mode);
+
+  // it landed near a real building of the nearest settlement
+  let site = null, sd = Infinity;
+  for (const st of S.sites) {
+    const d = (st.x - P.x) ** 2 + (st.y - P.y) ** 2;
+    if (d < sd) { sd = d; site = st; }
+  }
+  const plan = c.Steading.plan(S, site, S.now);
+  let near = Infinity;
+  for (const b of plan) {
+    near = Math.min(near, Math.hypot(b.pos[0] - P.x, b.pos[1] - P.y));
+  }
+  (near < 26) ? ok(`lands beside a building (${near.toFixed(1)}u from one)`)
+              : fail(`landed ${near.toFixed(0)}u from the nearest building`);
+
+  // ...and NOT inside one, which is the mistake this exists to avoid
+  {
+    const MH = 64, MP = 4096;
+    const head = new Float32Array(MH * 8), prim = new Float32Array(MP * 20);
+    const r = c.Steading.pack(S, P.x, P.y, S.now, head, prim, MH, MP);
+    const eye = [P.x, P.y, P.z + CFG_EYE()];
+    function CFG_EYE() { return c.CFG.EYE; }
+    let inside = 0;
+    for (let i = 0; i < r.heads; i++) {
+      const h = i * 8;
+      const d = Math.hypot(head[h] - eye[0], head[h + 1] - eye[1], head[h + 2] - eye[2]);
+      if (d < head[h + 3]) inside++;
+    }
+    (inside === 0) ? ok('and outside every one of them, not in a wall')
+                   : fail(`teleported inside ${inside} buildings`);
+  }
+
+  // it stands you on the ground, on your feet, out of the water
+  (P.onGround && !P.swimming && P.vz === 0)
+    ? ok('and on your feet rather than mid-fall')
+    : fail(`landed airborne: ground=${P.onGround} swim=${P.swimming} vz=${P.vz}`);
+  (Math.abs(P.z - c.World.walkZ(P.x, P.y, P.z)) < 0.2)
+    ? ok('at the height the ground actually is')
+    : fail(`z ${P.z.toFixed(2)} vs floor ${c.World.walkZ(P.x, P.y, P.z)}`);
+  (c.terrainH(P.x, P.y) >= c.CFG.SEA_LEVEL)
+    ? ok('and never into the sea') : fail('teleported into the water');
+
+  // and looking at the thing it took you to
+  {
+    let bd = Infinity, at = null;
+    for (const b of plan) {
+      const d = Math.hypot(b.pos[0] - P.x, b.pos[1] - P.y);
+      if (d < bd) { bd = d; at = b; }
+    }
+    const want = Math.atan2(at.pos[1] - P.y, at.pos[0] - P.x);
+    let off = Math.abs(((P.angle - want + Math.PI) % (Math.PI * 2) + Math.PI * 2)
+                       % (Math.PI * 2) - Math.PI);
+    (off < 0.2) ? ok('facing what it brought you to') : fail(`facing ${off.toFixed(2)} rad off`);
+  }
+
+  // ---- npc ----
+  // There is no creature system yet, so this has to say so rather than
+  // fail quietly - and it has to start working on its own once there is.
+  c.Entities && (c.Entities.list = []);
+  run('teleport npc');
+  (last().includes('empty') || last().includes('nobody'))
+    ? ok('teleport npc says plainly that nobody is alive yet')
+    : fail('npc teleport gave: ' + last());
+
+  if (c.Entities) {
+    const gx = 900, gy = -400;
+    c.Entities.list = [{ x: gx, y: gy, heading: 0, kind: 0 }];
+    P.x = 0; P.y = 0; P.z = c.terrainH(0, 0);
+    run('teleport npc');
+    const d = Math.hypot(P.x - gx, P.y - gy);
+    (d < 20) ? ok(`and takes you to one the moment there is one (${d.toFixed(1)}u)`)
+             : fail(`npc teleport landed ${d.toFixed(0)}u away`);
+    c.Entities.list = [];
+  }
+  G.devMode = false;
+  G.close();
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
