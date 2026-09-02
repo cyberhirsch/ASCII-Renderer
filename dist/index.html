@@ -1277,11 +1277,21 @@ const Overlay = {
     this.dirty = true;
   },
 
-  write(x, y, str) {
+  // Colours a cell can carry. The character lives in the low byte and the
+  // colour above it, so a tinted cell costs nothing extra - 0 means "take
+  // the scene's own colour", which is what every line of text does.
+  C: { none: 0, land: 1, water: 2, site: 3, self: 4, cave: 5 },
+
+  write(x, y, str, tint) {
     if (!this.data || y < 0 || y >= this.rows) return;
     const row = y * this.cols;
+    const hue = (tint || 0) << 8;
     const put = (cx, code) => {
-      if (cx >= 0 && cx < this.cols) this.data[row + cx] = code;
+      if (cx >= 0 && cx < this.cols) {
+        // the clear-air cells either side of a word are not tinted: there
+        // is no ink in them to colour
+        this.data[row + cx] = code === this.BLANK ? code : (code | hue);
+      }
     };
     // Every gap in UI text is cleared, not just the ends: a space between
     // two words has to read as a space, and letting the glyph field show
@@ -1296,8 +1306,17 @@ const Overlay = {
     this.dirty = true;
   },
 
-  writeRight(y, str) { this.write(this.cols - 1 - str.length, y, str); },
-  writeCentre(y, str) { this.write((this.cols - str.length) >> 1, y, str); },
+  writeRight(y, str, t) { this.write(this.cols - 1 - str.length, y, str, t); },
+  writeCentre(y, str, t) { this.write((this.cols - str.length) >> 1, y, str, t); },
+
+  // One cell, one colour: what the map is drawn with.
+  put(x, y, ch, tint) {
+    if (!this.data || y < 0 || y >= this.rows || x < 0 || x >= this.cols) return;
+    const code = ch.charCodeAt(0);
+    this.data[y * this.cols + x] =
+      (code > 32 && code < 127) ? (code | ((tint || 0) << 8)) : this.BLANK;
+    this.dirty = true;
+  },
 };
 </script>
 <script>
@@ -6279,7 +6298,7 @@ const Game = {
   },
 
   open(mode) { this.mode = mode; this.cursor = 0; this.uiDirty = true; },
-  close() { this.mode = 'play'; this.uiDirty = true; },
+  close() { this.mode = 'play'; this.menuAsk = false; this.uiDirty = true; },
 
   // ---- console: text commands, "devmode" gates the debug view toggles ----
 
@@ -6457,6 +6476,7 @@ const Game = {
       return true;
     }
     if (this.mode === 'play') {
+      if (code === 'Escape') { this.openMenu(); return true; }
       if (code === 'Tab') { this.open('inventory'); return true; }
       if (code === 'KeyC') { this.open('craft'); return true; }
       if (code === 'KeyJ') { this.open('journal'); return true; }
@@ -6484,6 +6504,11 @@ const Game = {
   },
 
   confirm() {
+    if (this.mode === 'menu') {
+      const n = this.MENU.length;
+      this.menuDo(this.MENU[((this.cursor % n) + n) % n][0]);
+      return;
+    }
     if (this.mode === 'craft') {
       const n = RECIPES.length;
       const r = RECIPES[((this.cursor % n) + n) % n];
@@ -6720,6 +6745,85 @@ const Game = {
     }
   },
 
+  // ---- the menu ----
+  //
+  // Escape opens it, and so does losing the mouse: a browser takes the
+  // pointer back on Escape and eats the key that did it, so a menu bound
+  // only to the key would sometimes not arrive. Coming up when you click
+  // away is the right behaviour anyway.
+  MENU: [
+    ['save',    'save now'],
+    ['load',    'go back to the last save'],
+    ['restart', 'start this world over'],
+    ['quit',    'save and stop'],
+  ],
+  menuAsk: false,     // restart throws away a world, so it is asked twice
+
+  openMenu() {
+    this.menuAsk = false;
+    this.open('menu');
+  },
+
+  // Everything owed to disk, in one place: the three stores save on their
+  // own clocks and a menu that only wrote one of them would be a lie.
+  saveAll() {
+    this.save();
+    if (typeof Edits !== 'undefined') Edits.save();
+    if (typeof Removed !== 'undefined') Removed.save();
+  },
+
+  menuDo(act) {
+    if (act === 'save') {
+      this.saveAll();
+      this.close();
+      this.toast('saved');
+      return;
+    }
+    if (act === 'load') {
+      // The save IS the file on disk, so going back to it is a reload -
+      // half a dozen modules cache something derived from it and would
+      // each need unpicking otherwise.
+      if (typeof location !== 'undefined') location.reload();
+      return;
+    }
+    if (act === 'restart') {
+      if (!this.menuAsk) { this.menuAsk = true; this.uiDirty = true; return; }
+      this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(saveKey('ascii-save-v1'));
+        localStorage.removeItem(saveKey('ascii-caves-v1'));
+        localStorage.removeItem(saveKey('ascii-removed-v1'));
+      }
+      if (typeof location !== 'undefined') location.reload();
+      return;
+    }
+    if (act === 'quit') {
+      this.saveAll();
+      // A page cannot close a tab it did not open, so this stops rather
+      // than pretending to exit: saved, back to the title, safe to close.
+      this.close();
+      this.mode = 'title';
+      this.uiDirty = true;
+    }
+  },
+
+  drawMenu() {
+    const lines = ['ASCII WORLD', ''];
+    const n = this.MENU.length;
+    const cur = ((this.cursor % n) + n) % n;
+    for (let i = 0; i < n; i++) {
+      lines.push((i === cur ? '> ' : '  ') + this.MENU[i][1]);
+    }
+    lines.push('');
+    if (this.menuAsk) {
+      lines.push('This throws away this world\'s digs, items and');
+      lines.push('record. [E] again to do it, [Q] to think better.');
+    } else {
+      lines.push('[W/S] choose  [E] do  [Q] back to the world');
+    }
+    this.panel(lines);
+  },
+
   // ---- the minimap (devmode) ----
   //
   // Drawn into the glyph grid like everything else, because a DOM overlay
@@ -6734,7 +6838,7 @@ const Game = {
   MAP_ZOOM: [6, 12, 24, 48, 96],
   MAP_RAMP: '.,:;=+*#',      // land, low to high; water has its own mark
   MAP_KIND: { hold: 'H', farm: 'F', mine: 'M', fort: 'T' },
-  mapRows: null, mapKey: '',
+  mapRows: null, mapTint: null, mapKey: '',
 
   // What the map is centred on, as a key: rebuilding only when this changes
   // keeps 465 terrain samples off the frames where nothing moved.
@@ -6752,21 +6856,24 @@ const Game = {
     const ux = M.u, uy = M.u * CFG.CELL_H / CFG.CELL_W;
     const cx = (M.w - 1) / 2, cy = (M.h - 1) / 2;
     const px = Player.x, py = Player.y;
-    const g = [];
+    const g = [], t = [];
     for (let j = 0; j < M.h; j++) {
-      const row = [];
+      const row = [], trow = [];
       for (let i = 0; i < M.w; i++) {
         const h = terrainH(px + (i - cx) * ux, py + (j - cy) * uy);
-        row.push(h < CFG.SEA_LEVEL ? '~' : this.MAP_RAMP[
+        const wet = h < CFG.SEA_LEVEL;
+        row.push(wet ? '~' : this.MAP_RAMP[
           clamp(Math.floor(h / CFG.TERRAIN_MAX * this.MAP_RAMP.length),
                 0, this.MAP_RAMP.length - 1)]);
+        trow.push(wet ? Overlay.C.water : Overlay.C.land);
       }
       g.push(row);
+      t.push(trow);
     }
-    const put = (wx, wy, ch) => {
+    const put = (wx, wy, ch, tint) => {
       const i = Math.round((wx - px) / ux + cx);
       const j = Math.round((wy - py) / uy + cy);
-      if (i >= 0 && i < M.w && j >= 0 && j < M.h) g[j][i] = ch;
+      if (i >= 0 && i < M.w && j >= 0 && j < M.h) { g[j][i] = ch; t[j][i] = tint; }
     };
     // Cave mouths, which is most of what this is for: they are the one
     // thing in the world you have to find on foot and cannot see far.
@@ -6774,7 +6881,7 @@ const Game = {
     for (let sy = Math.floor((py - cy * uy) / SE); sy <= Math.floor((py + cy * uy) / SE); sy++) {
       for (let sx = Math.floor((px - cx * ux) / SE); sx <= Math.floor((px + cx * ux) / SE); sx++) {
         const a = shaftAt(sx, sy, 0);
-        if (a) put(a.ax, a.ay, '>');
+        if (a) put(a.ax, a.ay, '>', Overlay.C.cave);
       }
     }
     // Settlements: standing in capitals, gone in lower case, so a glance
@@ -6782,12 +6889,41 @@ const Game = {
     if (typeof Lore !== 'undefined' && Lore.S) {
       for (const st of Lore.S.sites) {
         const ch = this.MAP_KIND[st.kind] || 'S';
-        put(st.x, st.y, st.abandoned < 0 ? ch : ch.toLowerCase());
+        put(st.x, st.y, st.abandoned < 0 ? ch : ch.toLowerCase(), Overlay.C.site);
       }
     }
     g[Math.round(cy)][Math.round(cx)] = '@';
+    t[Math.round(cy)][Math.round(cx)] = Overlay.C.self;
     this.mapRows = g.map(r => r.join(''));
+    this.mapTint = t;
     return this.mapRows;
+  },
+
+  // ---- the compass (devmode) ----
+  //
+  // Placed where the direction actually is, not spaced evenly: a label sits
+  // at the column its bearing projects to, using the same tangent the
+  // camera does. So walking turns the strip at the rate the world turns,
+  // and a word sits over the thing it names.
+  //
+  // East is +x and north is -y, which is what the chronicle's bearings and
+  // the minimap already mean.
+  COMPASS: [
+    [0, 'east'], [1, 'south-east'], [2, 'south'], [3, 'south-west'],
+    [4, 'west'], [5, 'north-west'], [6, 'north'], [7, 'north-east'],
+  ],
+
+  drawCompass() {
+    const half = Math.atan(CFG.PLANE_LEN);      // half the horizontal field
+    for (const [oct, name] of this.COMPASS) {
+      let d = oct * Math.PI / 4 - Player.angle;
+      d = ((d + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      if (Math.abs(d) >= half - 0.02) continue;
+      const ndc = Math.tan(d) / CFG.PLANE_LEN;
+      const at = Math.round((ndc + 1) / 2 * Overlay.cols - name.length / 2);
+      if (at < 0 || at + name.length > Overlay.cols) continue;
+      Overlay.write(at, 0, name);
+    }
   },
 
   drawMap() {
@@ -6797,7 +6933,12 @@ const Game = {
     const rows = this.buildMap();
     Overlay.write(x0, 1, ('map ' + M.u + 'u  ' +
       Math.round(Player.x) + ',' + Math.round(Player.y)).slice(0, M.w));
-    for (let j = 0; j < rows.length; j++) Overlay.write(x0, 2 + j, rows[j]);
+    // cell by cell, because every one carries its own colour
+    for (let j = 0; j < rows.length; j++) {
+      for (let i = 0; i < rows[j].length; i++) {
+        Overlay.put(x0 + i, 2 + j, rows[j][i], this.mapTint[j][i]);
+      }
+    }
   },
 
   // ---- panel rendering (into the Overlay glyph grid) ----
@@ -6815,11 +6956,12 @@ const Game = {
   },
 
   drawUI() {
-    if (this.devMode && typeof Player !== 'undefined') this.drawMap();
+    if (this.devMode && typeof Player !== 'undefined') { this.drawCompass(); this.drawMap(); }
     if (this.toastMsg) {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
     if (this.mode === 'myth') this.drawMyth();
+    if (this.mode === 'menu') this.drawMenu();
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
@@ -6863,6 +7005,7 @@ const Game = {
       'WASD walk    Space jump    LMB dig',
       'Tab  your things',
       'C    craft   J record   Enter console',
+      'Esc  save, load, restart, stop',
       '',
       'press any key',
     ]);
@@ -7106,7 +7249,13 @@ const Player = {
     addEventListener('mousedown', e => { if (locked()) this.mouse[e.button] = true; });
     addEventListener('mouseup', e => { this.mouse[e.button] = false; });
     let skipEvents = 0;
-    document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
+    document.addEventListener('pointerlockchange', () => {
+      skipEvents = 2;
+      // The browser takes the pointer back on Escape and swallows the key
+      // that did it, so the menu cannot rely on the keypress alone. Coming
+      // up when the mouse is released is what a player expects regardless.
+      if (!locked() && Game.mode === 'play') Game.openMenu();
+    });
     addEventListener('mousemove', e => {
       if (!locked() || Game.mode !== 'play') return;
       if (skipEvents > 0) { skipEvents--; return; }
@@ -9188,6 +9337,19 @@ struct RParams {
 // 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
 // step count, which shows as banding across smooth gradients; offsetting by
 // under one step turns each band edge into a stipple instead.
+// The overlay palette. Deliberately short: a map that needs a legend of
+// twenty colours is not readable at this size.
+fn uiTint(i : u32) -> vec3f {
+  switch (i) {
+    case 1u: { return vec3f(0.42, 0.78, 0.36); }   // land
+    case 2u: { return vec3f(0.34, 0.56, 0.95); }   // water
+    case 3u: { return vec3f(0.92, 0.32, 0.28); }   // a settlement
+    case 4u: { return vec3f(1.00, 1.00, 1.00); }   // you
+    case 5u: { return vec3f(0.95, 0.74, 0.30); }   // a cave mouth
+    default: { return vec3f(1.0); }
+  }
+}
+
 fn bayer4(p : vec2i) -> f32 {
   var m = array<f32, 16>(
      0.0,  8.0,  2.0, 10.0,
@@ -9241,7 +9403,12 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     cov = textureSampleLevel(textAtlas, samp, vec2f(aus, inCell.y), 0.0).r;
   }
 
-  let code = overlay[ci];
+  // An overlay cell carries its character in the low byte and, above that,
+  // a colour. Nothing needed the upper bits, and a second buffer for a
+  // handful of tinted cells would cost the whole grid.
+  let word = overlay[ci];
+  let code = word & 0xffu;
+  let tint = (word >> 8u) & 0xffu;
   if (code == ${CFG.UI_BLANK}u) {
     cov = 0.0;          // clear air: the gap that sets a word off from the field
   } else if (code > 32u && code < 127u) {
@@ -9260,6 +9427,10 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
     ink = texel.rgb / m;
   }
+  // A tinted cell states its own hue instead of borrowing the scene's.
+  // Brightness still comes from how much ink the character puts down, which
+  // is what keeps a map drawn this way looking like the rest of the field.
+  if (tint > 0u && R.mono < 0.5) { ink = uiTint(tint); }
   let col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
   return vec4f(col, 1.0);
 }
@@ -9850,8 +10021,11 @@ const GPURenderer = {
     }
     if (Game.uiDirty) {
       Overlay.clear();
-      Overlay.writeRight(0, fpsLine);
-      Overlay.write(1, 0, Game.objective());
+      // devmode owns the top row for the compass, so everything else on it
+      // steps down rather than being written over
+      const hud = Game.devMode ? 1 : 0;
+      Overlay.writeRight(hud, fpsLine);
+      Overlay.write(1, hud, Game.objective());
       Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       Game.drawUI();
       Game.uiDirty = false;

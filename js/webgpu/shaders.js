@@ -1762,6 +1762,19 @@ struct RParams {
 // 4x4 ordered dither. Choosing a glyph quantises brightness to the ramp's
 // step count, which shows as banding across smooth gradients; offsetting by
 // under one step turns each band edge into a stipple instead.
+// The overlay palette. Deliberately short: a map that needs a legend of
+// twenty colours is not readable at this size.
+fn uiTint(i : u32) -> vec3f {
+  switch (i) {
+    case 1u: { return vec3f(0.42, 0.78, 0.36); }   // land
+    case 2u: { return vec3f(0.34, 0.56, 0.95); }   // water
+    case 3u: { return vec3f(0.92, 0.32, 0.28); }   // a settlement
+    case 4u: { return vec3f(1.00, 1.00, 1.00); }   // you
+    case 5u: { return vec3f(0.95, 0.74, 0.30); }   // a cave mouth
+    default: { return vec3f(1.0); }
+  }
+}
+
 fn bayer4(p : vec2i) -> f32 {
   var m = array<f32, 16>(
      0.0,  8.0,  2.0, 10.0,
@@ -1815,7 +1828,12 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     cov = textureSampleLevel(textAtlas, samp, vec2f(aus, inCell.y), 0.0).r;
   }
 
-  let code = overlay[ci];
+  // An overlay cell carries its character in the low byte and, above that,
+  // a colour. Nothing needed the upper bits, and a second buffer for a
+  // handful of tinted cells would cost the whole grid.
+  let word = overlay[ci];
+  let code = word & 0xffu;
+  let tint = (word >> 8u) & 0xffu;
   if (code == ${CFG.UI_BLANK}u) {
     cov = 0.0;          // clear air: the gap that sets a word off from the field
   } else if (code > 32u && code < 127u) {
@@ -1834,6 +1852,10 @@ fn fs(in : VSOut) -> @location(0) vec4f {
     let m = max(max(texel.r, texel.g), max(texel.b, 0.001));
     ink = texel.rgb / m;
   }
+  // A tinted cell states its own hue instead of borrowing the scene's.
+  // Brightness still comes from how much ink the character puts down, which
+  // is what keeps a map drawn this way looking like the rest of the field.
+  if (tint > 0u && R.mono < 0.5) { ink = uiTint(tint); }
   let col = clamp(ink, vec3f(0.0), vec3f(1.0)) * cov;
   return vec4f(col, 1.0);
 }

@@ -30,11 +30,13 @@ slow, and gives the rays back after a sustained good patch.
 on the clipboard as plain text, `map` sizes the devmode minimap, `time <hour>`
 jumps the clock, `freeze` stops
 it, `daylen <seconds>` sets the cycle length, and `devmode` unlocks the M/X
-debug views and a minimap in the top right — `@` you, `>` a cave mouth,
-`HFMT` a settlement still lived in, `hfmt` one that is not. Escape or an
-empty Enter closes the console.
+debug views, a compass across the top row, and a minimap in the top right —
+green land, blue water, red settlements, `@` you in white and `>` a cave
+mouth in amber; `HFMT` a settlement still lived in, `hfmt` one that is not.
+Escape or an empty Enter closes the console.
 
-**Controls:** WASD move · **Space** jump · Shift run · click for mouse-look · **LMB** dig ·
+**Controls:** WASD move · **Space** jump · Shift run · click for mouse-look ·
+**Esc** menu (save, load, restart, stop) · **LMB** dig ·
 **RMB** fill · **Tab** inventory · **C** craft · **E** examine what you're
 looking at (**W/S** choose an action, **E** do it, **Q** close) · **G** hop
 into the cave below (debug) · **M** mono/color · **V** glyph set · **X** raw

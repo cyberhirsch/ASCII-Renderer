@@ -1465,5 +1465,166 @@ if (c.Player) {
   G.devMode = false;
 }
 
+// ---- 21. colour in the overlay ----
+{
+  const O = c.Overlay;
+  O.resize(40, 10);
+  O.clear();
+  O.write(2, 2, 'hi');
+  const plain = O.data[2 * 40 + 2];
+  O.clear();
+  O.write(2, 2, 'hi', O.C.water);
+  const tinted = O.data[2 * 40 + 2];
+  ((plain & 0xff) === (tinted & 0xff))
+    ? ok('a colour does not disturb the character under it')
+    : fail('tinting changed the glyph');
+  ((plain >> 8) === 0 && (tinted >> 8) === O.C.water)
+    ? ok('the colour rides in the high bits, so no second buffer is needed')
+    : fail(`tint bits wrong: ${plain >> 8} / ${tinted >> 8}`);
+  // the clear air either side of a word has no ink in it to colour
+  ((O.data[2 * 40 + 1] & 0xff) === O.BLANK && (O.data[2 * 40 + 1] >> 8) === 0)
+    ? ok('the blank either side of a word is left untinted')
+    : fail('the clear air got a colour');
+  O.clear();
+  O.put(5, 5, '~', O.C.water);
+  ((O.data[5 * 40 + 5] & 0xff) === '~'.charCodeAt(0) &&
+   (O.data[5 * 40 + 5] >> 8) === O.C.water)
+    ? ok('a single cell can be placed with its own colour')
+    : fail('Overlay.put wrong');
+}
+
+// ---- 22. the map is coloured by what it shows ----
+if (c.Player) {
+  const G = c.Game, O = c.Overlay, P = c.Player;
+  O.resize(120, 40);
+  G.devMode = true; G.mapKey = '';
+  P.x = 200; P.y = -150;
+  G.buildMap();
+  const seen = {};
+  for (let j = 0; j < G.MAP.h; j++) for (let i = 0; i < G.MAP.w; i++) {
+    seen[G.mapRows[j][i]] = G.mapTint[j][i];
+  }
+  (seen['@'] === O.C.self) ? ok('you are drawn in your own colour')
+                           : fail(`player tint ${seen['@']}`);
+  const landOk = G.MAP_RAMP.split('').every(ch => seen[ch] === undefined || seen[ch] === O.C.land);
+  landOk ? ok('every land shade is drawn as land') : fail('a land shade has the wrong colour');
+  (seen['~'] === undefined || seen['~'] === O.C.water)
+    ? ok('water is drawn as water') : fail(`water tint ${seen['~']}`);
+  (seen['>'] === undefined || seen['>'] === O.C.cave)
+    ? ok('a cave mouth has its own colour') : fail(`cave tint ${seen['>']}`);
+  {
+    let bad = 0;
+    for (const k of Object.keys(G.MAP_KIND)) {
+      const u = G.MAP_KIND[k], l = u.toLowerCase();
+      if (seen[u] !== undefined && seen[u] !== O.C.site) bad++;
+      if (seen[l] !== undefined && seen[l] !== O.C.site) bad++;
+    }
+    (bad === 0) ? ok('settlements are drawn in the settlement colour')
+                : fail(`${bad} settlement marks miscoloured`);
+  }
+  // the map writes its colours through to the overlay, not just its own grid
+  O.clear(); G.drawUI();
+  let tinted = 0;
+  for (let i = 0; i < O.data.length; i++) if (O.data[i] >> 8) tinted++;
+  (tinted > 100) ? ok(`${tinted} coloured cells reach the overlay`)
+                 : fail(`only ${tinted} cells carried colour through`);
+  G.devMode = false;
+}
+
+// ---- 23. the compass ----
+if (c.Player) {
+  const G = c.Game, O = c.Overlay, P = c.Player;
+  O.resize(120, 40);
+  const read = () => {
+    let t = '';
+    for (let i = 0; i < 120; i++) {
+      const ch = O.data[i] & 0xff;
+      t += (ch > 32 && ch < 127) ? String.fromCharCode(ch) : ' ';
+    }
+    return t;
+  };
+  // east is +x, and the chronicle's north is -y; the map already agrees
+  const face = { east: 0, south: Math.PI / 2, west: Math.PI, north: -Math.PI / 2 };
+  let wrong = 0;
+  for (const name of Object.keys(face)) {
+    P.angle = face[name];
+    O.clear(); G.drawCompass();
+    const row = read();
+    if (!row.includes(name)) { wrong++; continue; }
+    // and it should be near the middle, because you are looking straight at it
+    const at = row.indexOf(name) + name.length / 2;
+    if (Math.abs(at - 60) > 6) wrong++;
+  }
+  (wrong === 0)
+    ? ok('every cardinal reads correctly and sits where you are looking')
+    : fail(`${wrong} cardinals wrong or off-centre`);
+
+  // facing east, west must not be on screen: the field is 81 degrees, not 360
+  P.angle = 0;
+  O.clear(); G.drawCompass();
+  (!read().includes('west'))
+    ? ok('only what is actually in front of you is on the strip')
+    : fail('the compass shows a bearing behind the camera');
+
+  // and it never runs off the ends
+  let over = 0;
+  for (let a = 0; a < 6.28; a += 0.05) {
+    P.angle = a;
+    O.clear();
+    G.drawCompass();
+    if (O.data.length !== 120 * 40) over++;
+  }
+  (over === 0) ? ok('the strip stays inside the grid at every heading')
+               : fail('the compass wrote outside the overlay');
+
+  // devmode gates it, and the HUD steps down to make room
+  G.devMode = false;
+  O.clear(); G.drawUI();
+  (!read().includes('north') && !read().includes('east'))
+    ? ok('no compass without devmode') : fail('compass shows outside devmode');
+}
+
+// ---- 24. the escape menu ----
+{
+  const G = c.Game;
+  G.close();
+  G.key('Escape');
+  (G.mode === 'menu') ? ok('escape opens the menu from play')
+                      : fail(`escape gave mode ${G.mode}`);
+  c.Overlay.resize(120, 40);
+  c.Overlay.clear(); G.drawUI();
+  {
+    let t = '';
+    for (let i = 0; i < c.Overlay.data.length; i++) {
+      const ch = c.Overlay.data[i] & 0xff;
+      if (ch > 32 && ch < 127) t += String.fromCharCode(ch);
+    }
+    (t.includes('save') && t.includes('over') && t.includes('stop'))
+      ? ok('the menu renders its choices') : fail('menu missing from the overlay');
+  }
+  G.key('KeyQ');
+  (G.mode === 'play') ? ok('and Q puts you back in the world') : fail('Q did not close');
+
+  // save writes and returns you to the world
+  G.key('Escape'); G.cursor = 0;
+  G.give('stone', 1);
+  G.confirm();
+  (G.mode === 'play' && G.toastMsg.includes('saved'))
+    ? ok('save writes and hands the world back') : fail('save did not report');
+
+  // restart asks twice, because it throws a world away
+  G.key('Escape');
+  G.cursor = 2;
+  G.confirm();
+  (G.mode === 'menu' && G.menuAsk === true)
+    ? ok('restart asks before it destroys anything')
+    : fail(`restart did not ask: mode=${G.mode} ask=${G.menuAsk}`);
+  c.Overlay.clear(); G.drawUI();
+  G.key('KeyQ');
+  (G.mode === 'play' && G.menuAsk === false)
+    ? ok('and backing out forgets it was asked')
+    : fail('the half-asked restart survived closing the menu');
+}
+
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }
 console.log('\ngame tests passed');

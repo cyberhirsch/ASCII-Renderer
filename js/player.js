@@ -76,7 +76,13 @@ const Player = {
     addEventListener('mousedown', e => { if (locked()) this.mouse[e.button] = true; });
     addEventListener('mouseup', e => { this.mouse[e.button] = false; });
     let skipEvents = 0;
-    document.addEventListener('pointerlockchange', () => { skipEvents = 2; });
+    document.addEventListener('pointerlockchange', () => {
+      skipEvents = 2;
+      // The browser takes the pointer back on Escape and swallows the key
+      // that did it, so the menu cannot rely on the keypress alone. Coming
+      // up when the mouse is released is what a player expects regardless.
+      if (!locked() && Game.mode === 'play') Game.openMenu();
+    });
     addEventListener('mousemove', e => {
       if (!locked() || Game.mode !== 'play') return;
       if (skipEvents > 0) { skipEvents--; return; }

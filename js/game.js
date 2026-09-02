@@ -106,7 +106,7 @@ const Game = {
   },
 
   open(mode) { this.mode = mode; this.cursor = 0; this.uiDirty = true; },
-  close() { this.mode = 'play'; this.uiDirty = true; },
+  close() { this.mode = 'play'; this.menuAsk = false; this.uiDirty = true; },
 
   // ---- console: text commands, "devmode" gates the debug view toggles ----
 
@@ -284,6 +284,7 @@ const Game = {
       return true;
     }
     if (this.mode === 'play') {
+      if (code === 'Escape') { this.openMenu(); return true; }
       if (code === 'Tab') { this.open('inventory'); return true; }
       if (code === 'KeyC') { this.open('craft'); return true; }
       if (code === 'KeyJ') { this.open('journal'); return true; }
@@ -311,6 +312,11 @@ const Game = {
   },
 
   confirm() {
+    if (this.mode === 'menu') {
+      const n = this.MENU.length;
+      this.menuDo(this.MENU[((this.cursor % n) + n) % n][0]);
+      return;
+    }
     if (this.mode === 'craft') {
       const n = RECIPES.length;
       const r = RECIPES[((this.cursor % n) + n) % n];
@@ -547,6 +553,85 @@ const Game = {
     }
   },
 
+  // ---- the menu ----
+  //
+  // Escape opens it, and so does losing the mouse: a browser takes the
+  // pointer back on Escape and eats the key that did it, so a menu bound
+  // only to the key would sometimes not arrive. Coming up when you click
+  // away is the right behaviour anyway.
+  MENU: [
+    ['save',    'save now'],
+    ['load',    'go back to the last save'],
+    ['restart', 'start this world over'],
+    ['quit',    'save and stop'],
+  ],
+  menuAsk: false,     // restart throws away a world, so it is asked twice
+
+  openMenu() {
+    this.menuAsk = false;
+    this.open('menu');
+  },
+
+  // Everything owed to disk, in one place: the three stores save on their
+  // own clocks and a menu that only wrote one of them would be a lie.
+  saveAll() {
+    this.save();
+    if (typeof Edits !== 'undefined') Edits.save();
+    if (typeof Removed !== 'undefined') Removed.save();
+  },
+
+  menuDo(act) {
+    if (act === 'save') {
+      this.saveAll();
+      this.close();
+      this.toast('saved');
+      return;
+    }
+    if (act === 'load') {
+      // The save IS the file on disk, so going back to it is a reload -
+      // half a dozen modules cache something derived from it and would
+      // each need unpicking otherwise.
+      if (typeof location !== 'undefined') location.reload();
+      return;
+    }
+    if (act === 'restart') {
+      if (!this.menuAsk) { this.menuAsk = true; this.uiDirty = true; return; }
+      this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(saveKey('ascii-save-v1'));
+        localStorage.removeItem(saveKey('ascii-caves-v1'));
+        localStorage.removeItem(saveKey('ascii-removed-v1'));
+      }
+      if (typeof location !== 'undefined') location.reload();
+      return;
+    }
+    if (act === 'quit') {
+      this.saveAll();
+      // A page cannot close a tab it did not open, so this stops rather
+      // than pretending to exit: saved, back to the title, safe to close.
+      this.close();
+      this.mode = 'title';
+      this.uiDirty = true;
+    }
+  },
+
+  drawMenu() {
+    const lines = ['ASCII WORLD', ''];
+    const n = this.MENU.length;
+    const cur = ((this.cursor % n) + n) % n;
+    for (let i = 0; i < n; i++) {
+      lines.push((i === cur ? '> ' : '  ') + this.MENU[i][1]);
+    }
+    lines.push('');
+    if (this.menuAsk) {
+      lines.push('This throws away this world\'s digs, items and');
+      lines.push('record. [E] again to do it, [Q] to think better.');
+    } else {
+      lines.push('[W/S] choose  [E] do  [Q] back to the world');
+    }
+    this.panel(lines);
+  },
+
   // ---- the minimap (devmode) ----
   //
   // Drawn into the glyph grid like everything else, because a DOM overlay
@@ -561,7 +646,7 @@ const Game = {
   MAP_ZOOM: [6, 12, 24, 48, 96],
   MAP_RAMP: '.,:;=+*#',      // land, low to high; water has its own mark
   MAP_KIND: { hold: 'H', farm: 'F', mine: 'M', fort: 'T' },
-  mapRows: null, mapKey: '',
+  mapRows: null, mapTint: null, mapKey: '',
 
   // What the map is centred on, as a key: rebuilding only when this changes
   // keeps 465 terrain samples off the frames where nothing moved.
@@ -579,21 +664,24 @@ const Game = {
     const ux = M.u, uy = M.u * CFG.CELL_H / CFG.CELL_W;
     const cx = (M.w - 1) / 2, cy = (M.h - 1) / 2;
     const px = Player.x, py = Player.y;
-    const g = [];
+    const g = [], t = [];
     for (let j = 0; j < M.h; j++) {
-      const row = [];
+      const row = [], trow = [];
       for (let i = 0; i < M.w; i++) {
         const h = terrainH(px + (i - cx) * ux, py + (j - cy) * uy);
-        row.push(h < CFG.SEA_LEVEL ? '~' : this.MAP_RAMP[
+        const wet = h < CFG.SEA_LEVEL;
+        row.push(wet ? '~' : this.MAP_RAMP[
           clamp(Math.floor(h / CFG.TERRAIN_MAX * this.MAP_RAMP.length),
                 0, this.MAP_RAMP.length - 1)]);
+        trow.push(wet ? Overlay.C.water : Overlay.C.land);
       }
       g.push(row);
+      t.push(trow);
     }
-    const put = (wx, wy, ch) => {
+    const put = (wx, wy, ch, tint) => {
       const i = Math.round((wx - px) / ux + cx);
       const j = Math.round((wy - py) / uy + cy);
-      if (i >= 0 && i < M.w && j >= 0 && j < M.h) g[j][i] = ch;
+      if (i >= 0 && i < M.w && j >= 0 && j < M.h) { g[j][i] = ch; t[j][i] = tint; }
     };
     // Cave mouths, which is most of what this is for: they are the one
     // thing in the world you have to find on foot and cannot see far.
@@ -601,7 +689,7 @@ const Game = {
     for (let sy = Math.floor((py - cy * uy) / SE); sy <= Math.floor((py + cy * uy) / SE); sy++) {
       for (let sx = Math.floor((px - cx * ux) / SE); sx <= Math.floor((px + cx * ux) / SE); sx++) {
         const a = shaftAt(sx, sy, 0);
-        if (a) put(a.ax, a.ay, '>');
+        if (a) put(a.ax, a.ay, '>', Overlay.C.cave);
       }
     }
     // Settlements: standing in capitals, gone in lower case, so a glance
@@ -609,12 +697,41 @@ const Game = {
     if (typeof Lore !== 'undefined' && Lore.S) {
       for (const st of Lore.S.sites) {
         const ch = this.MAP_KIND[st.kind] || 'S';
-        put(st.x, st.y, st.abandoned < 0 ? ch : ch.toLowerCase());
+        put(st.x, st.y, st.abandoned < 0 ? ch : ch.toLowerCase(), Overlay.C.site);
       }
     }
     g[Math.round(cy)][Math.round(cx)] = '@';
+    t[Math.round(cy)][Math.round(cx)] = Overlay.C.self;
     this.mapRows = g.map(r => r.join(''));
+    this.mapTint = t;
     return this.mapRows;
+  },
+
+  // ---- the compass (devmode) ----
+  //
+  // Placed where the direction actually is, not spaced evenly: a label sits
+  // at the column its bearing projects to, using the same tangent the
+  // camera does. So walking turns the strip at the rate the world turns,
+  // and a word sits over the thing it names.
+  //
+  // East is +x and north is -y, which is what the chronicle's bearings and
+  // the minimap already mean.
+  COMPASS: [
+    [0, 'east'], [1, 'south-east'], [2, 'south'], [3, 'south-west'],
+    [4, 'west'], [5, 'north-west'], [6, 'north'], [7, 'north-east'],
+  ],
+
+  drawCompass() {
+    const half = Math.atan(CFG.PLANE_LEN);      // half the horizontal field
+    for (const [oct, name] of this.COMPASS) {
+      let d = oct * Math.PI / 4 - Player.angle;
+      d = ((d + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      if (Math.abs(d) >= half - 0.02) continue;
+      const ndc = Math.tan(d) / CFG.PLANE_LEN;
+      const at = Math.round((ndc + 1) / 2 * Overlay.cols - name.length / 2);
+      if (at < 0 || at + name.length > Overlay.cols) continue;
+      Overlay.write(at, 0, name);
+    }
   },
 
   drawMap() {
@@ -624,7 +741,12 @@ const Game = {
     const rows = this.buildMap();
     Overlay.write(x0, 1, ('map ' + M.u + 'u  ' +
       Math.round(Player.x) + ',' + Math.round(Player.y)).slice(0, M.w));
-    for (let j = 0; j < rows.length; j++) Overlay.write(x0, 2 + j, rows[j]);
+    // cell by cell, because every one carries its own colour
+    for (let j = 0; j < rows.length; j++) {
+      for (let i = 0; i < rows[j].length; i++) {
+        Overlay.put(x0 + i, 2 + j, rows[j][i], this.mapTint[j][i]);
+      }
+    }
   },
 
   // ---- panel rendering (into the Overlay glyph grid) ----
@@ -642,11 +764,12 @@ const Game = {
   },
 
   drawUI() {
-    if (this.devMode && typeof Player !== 'undefined') this.drawMap();
+    if (this.devMode && typeof Player !== 'undefined') { this.drawCompass(); this.drawMap(); }
     if (this.toastMsg) {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
     if (this.mode === 'myth') this.drawMyth();
+    if (this.mode === 'menu') this.drawMenu();
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
     if (this.mode === 'craft') this.drawCraft();
@@ -690,6 +813,7 @@ const Game = {
       'WASD walk    Space jump    LMB dig',
       'Tab  your things',
       'C    craft   J record   Enter console',
+      'Esc  save, load, restart, stop',
       '',
       'press any key',
     ]);
