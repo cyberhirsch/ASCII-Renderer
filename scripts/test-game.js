@@ -1080,9 +1080,11 @@ if (c.Lore) {
   const pick = k => found.find(f => f.k === k);
   const one = pick(-1), two = pick(-2), three = pick(-3);
   if (one && two && three) {
-    G.read = []; G.done = false; G.used.clear();
-    (G.objective().includes('find')) ? ok('the goal starts by pointing at the halls')
-                                     : fail('opening objective wrong: ' + G.objective());
+    G.read = []; G.done = false; G.used.clear(); G.quests = {};
+    // Nothing is asked of you until something in the world asks it, so the
+    // top line starts empty rather than handing out a goal.
+    (G.objective() === '') ? ok('nothing is asked of you to begin with')
+                           : fail('opening objective is not empty: ' + G.objective());
     G.readInscription(one.ins); G.close();
     (!G.done && G.bandsRead().size === 1)
       ? ok('one depth read is not the whole story') : fail('completed too early');
@@ -1092,6 +1094,14 @@ if (c.Lore) {
                       : fail('never completed');
     (G.objective().includes('whole')) ? ok('the objective reports it is finished')
                                       : fail('objective wrong at the end');
+    {
+      // one depth read is a reason for the line to exist
+      const keep = G.done; G.done = false;
+      (G.objective().includes('depths read'))
+        ? ok('and it tracks the depths once there is something to track')
+        : fail('objective wrong mid-record: ' + G.objective());
+      G.done = keep;
+    }
     G.close();
     const before = G.read.length;
     G.readInscription(three.ins); G.close();
@@ -1537,9 +1547,13 @@ if (c.Player) {
 if (c.Player) {
   const G = c.Game, O = c.Overlay, P = c.Player;
   O.resize(120, 40);
+  // read the row the compass actually claims - the top one is the frame
+  // statistics and whatever is being asked of you, and the compass sits
+  // under it rather than sliding across it
   const read = () => {
     let t = '';
-    for (let i = 0; i < 120; i++) {
+    const base = G.COMPASS_ROW * 120;
+    for (let i = base; i < base + 120; i++) {
       const ch = O.data[i] & 0xff;
       t += (ch > 32 && ch < 127) ? String.fromCharCode(ch) : ' ';
     }
@@ -1688,15 +1702,15 @@ if (c.Lore) {
       ? ok('and the second part starts the record at year zero')
       : fail(`second part opened at year ${G.tlYear()}`);
     G.key('KeyW');
-    (G.mode === 'title') ? ok('a second keypress hands over to the title')
-                         : fail(`second key gave ${G.mode}`);
+    (G.mode === 'play') ? ok('a second keypress hands over to the world')
+                        : fail(`second key gave ${G.mode}`);
 
     // and it plays through on its own if nobody touches anything
     G.mythPart = 0; G.mode = 'myth'; G.mythT = 0;
     let ticks = 0;
     for (; ticks < 2000 && G.mode === 'myth'; ticks++) G.tick(0.1);
-    (G.mode === 'title') ? ok(`left alone, it plays through in ${(ticks / 10) | 0}s`)
-                         : fail('the prologue never ended by itself');
+    (G.mode === 'play') ? ok(`left alone, it plays through in ${(ticks / 10) | 0}s`)
+                        : fail('the prologue never ended by itself');
   }
 
   // ---- the timelapse: the clock, and what it counts ----

@@ -80,11 +80,10 @@
     }
     if (Game.uiDirty) {
       Overlay.clear();
-      // devmode owns the top row for the compass, so everything else on it
-      // steps down rather than being written over
-      const hud = Game.devMode ? 1 : 0;
-      Overlay.writeRight(hud, fpsLine);
-      Overlay.write(1, hud, Game.objective());
+      // The top row is the statistics and whatever is being asked of you;
+      // devmode's compass goes under it, not over it.
+      Overlay.writeRight(0, fpsLine);
+      Overlay.write(1, 0, Game.objective());
       Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       Game.drawUI();
       Game.uiDirty = false;

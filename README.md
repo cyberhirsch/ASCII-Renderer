@@ -30,8 +30,9 @@ slow, and gives the rays back after a sustained good patch.
 on the clipboard as plain text, `map` sizes the devmode minimap, `time <hour>`
 jumps the clock, `freeze` stops
 it, `daylen <seconds>` sets the cycle length, and `devmode` unlocks the M/X
-debug views, `teleport building` (or `npc`), a compass across the top row,
-and a minimap in the top right —
+debug views, `teleport building` (or `npc`), a compass across the second row
+— under the frame statistics, which own the top one — and a minimap in the
+top right —
 green land, blue water, red settlements, `@` you in white and `>` a cave
 mouth in amber; `HFMT` a settlement still lived in, `hfmt` one that is not.
 Escape or an empty Enter closes the console.
@@ -59,14 +60,18 @@ materials their place is short of, or a ruin or a battlefield the record
 names, given as a bearing and a distance and nothing else. **J** lists what
 is owed.
 
+Nothing tells you what to do. The top line is empty until you have read
+something off a wall or somebody has asked you for something, and there is
+no screen between the opening and the world that sets you a goal.
+
 A new game opens on black. First the myth — what they say came before
 anybody was counting, generated from the seed like everything else — and then
 the record itself, run as a timelapse rather than listed: the survey grid the
 simulation ran on, with settlements appearing, roads knitting them together
 and going dark again, six thousand years in about twelve seconds. The
 captions come off the peoples' own logs, and the roll of the six lands over
-the finished map at the end. Any key skips it, and a saved game never sees
-it. The map is deliberately flat, no relief: the survey samples the ground
+the finished map at the end. Any key skips it, it hands straight over to the
+world, and a saved game never sees it. The map is deliberately flat, no relief: the survey samples the ground
 every 128 units and this terrain varies at about forty, so neighbouring
 samples are uncorrelated (measured at r = 0.002) and a height ramp drawn from
 them would be noise rather than hills.

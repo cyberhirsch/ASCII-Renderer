@@ -6636,13 +6636,16 @@ const Game = {
     return (L.myth || { lines: [] }).lines;
   },
 
-  // Anything at all moves it on: the record, then the world.
+  // Anything at all moves it on: the record, then the world. Nothing in
+  // between - the record IS the introduction, and a panel after it telling
+  // you what the game is and what to go and do undoes the whole point of
+  // having shown you six thousand years instead of saying them.
   mythNext() {
     if (this.mythPart === 0) {
       this.mythPart = 1;
       this.mythT = 0;
     } else {
-      this.mode = 'title';
+      this.mode = 'play';
     }
     this.uiDirty = true;
   },
@@ -7161,6 +7164,7 @@ const Game = {
   // What is owed and to whom, on the journal's back page.
   questLines() {
     const out = [];
+    if (typeof NPC === 'undefined' || typeof Quest === 'undefined') return out;
     for (const id of Object.keys(this.quests)) {
       if (this.quests[id] !== 'open') continue;
       const n = NPC.byId(Number(id.slice(1)));
@@ -7181,11 +7185,19 @@ const Game = {
     return b;
   },
 
+  // The top line, and only when there is something true to put on it.
+  //
+  // It used to open with 'find the carved halls, and read what they cut',
+  // which is the game handing you a quest nobody in it ever gave you. You
+  // are not told what to do here: until you have read something off a wall
+  // or somebody has asked you for something, there is nothing owed and the
+  // line stays empty.
   objective() {
     if (this.done) return 'the record is whole';
-    const n = this.bandsRead().size;
-    if (this.read.length === 0) return 'find the carved halls, and read what they cut';
-    return 'the record runs deeper: ' + n + ' of 3 depths read';
+    if (this.read.length === 0) {
+      return this.questLines().length ? 'somebody has asked something of you  [J]' : '';
+    }
+    return 'the record runs deeper: ' + this.bandsRead().size + ' of 3 depths read';
   },
 
   readInscription(ins) {
@@ -7523,10 +7535,16 @@ const Game = {
   //
   // East is +x and north is -y, which is what the chronicle's bearings and
   // the minimap already mean.
+  //
+  // Second row, not the first: the top one carries the frame statistics and
+  // whatever has been asked of you, and a compass word sliding along it as
+  // you turn would walk straight over both.
   COMPASS: [
     [0, 'east'], [1, 'south-east'], [2, 'south'], [3, 'south-west'],
     [4, 'west'], [5, 'north-west'], [6, 'north'], [7, 'north-east'],
   ],
+
+  COMPASS_ROW: 1,
 
   drawCompass() {
     const half = Math.atan(CFG.PLANE_LEN);      // half the horizontal field
@@ -7537,21 +7555,23 @@ const Game = {
       const ndc = Math.tan(d) / CFG.PLANE_LEN;
       const at = Math.round((ndc + 1) / 2 * Overlay.cols - name.length / 2);
       if (at < 0 || at + name.length > Overlay.cols) continue;
-      Overlay.write(at, 0, name);
+      Overlay.write(at, this.COMPASS_ROW, name);
     }
   },
 
   drawMap() {
     const M = this.MAP;
     const x0 = Overlay.cols - M.w - 1;
-    if (x0 < 1 || Overlay.rows < M.h + 4) return;   // no room; say nothing
+    // one row under the compass, which is itself one under the statistics
+    const y0 = this.COMPASS_ROW + 1;
+    if (x0 < 1 || Overlay.rows < M.h + y0 + 3) return;   // no room; say nothing
     const rows = this.buildMap();
-    Overlay.write(x0, 1, ('map ' + M.u + 'u  ' +
+    Overlay.write(x0, y0, ('map ' + M.u + 'u  ' +
       Math.round(Player.x) + ',' + Math.round(Player.y)).slice(0, M.w));
     // cell by cell, because every one carries its own colour
     for (let j = 0; j < rows.length; j++) {
       for (let i = 0; i < rows[j].length; i++) {
-        Overlay.put(x0 + i, 2 + j, rows[j][i], this.mapTint[j][i]);
+        Overlay.put(x0 + i, y0 + 1 + j, rows[j][i], this.mapTint[j][i]);
       }
     }
   },
@@ -7600,7 +7620,7 @@ const Game = {
   // first line, so the text does not walk up the screen as more arrives.
   drawMyth() {
     const all = this.prologue();
-    if (!all.length) { this.mode = 'title'; return; }
+    if (!all.length) { this.mythNext(); return; }
     const shown = Math.min(all.length, Math.floor(this.mythT / this.MYTH_LINE));
     const w = Math.max(...all.map(l => l.length));
     const x0 = Math.max(1, (Overlay.cols - w) >> 1);
@@ -7798,28 +7818,18 @@ const Game = {
                   Overlay.C.white);
   },
 
+  // The stop screen, and nothing else now. It used to be the panel that
+  // came up after the prologue, explaining the game and setting a goal;
+  // the timelapse says all of that better, and the keys are on the bottom
+  // line of every frame anyway. This is what is left: the one thing a
+  // player who picked "stop" from the menu actually needs to know.
   drawTitle() {
     this.panel([
       'A S C I I   W O R L D',
       '',
-      'Every hill, cave and stone here is a',
-      'number, worked out the moment you look',
-      'at it. Nothing is stored. It goes on as',
-      'far as you care to walk.',
+      'Saved. Safe to close the tab.',
       '',
-      'You are standing at a cave mouth. Someone',
-      'cut the stair below you, a long time ago,',
-      'and left their record on the walls.',
-      '',
-      'Find out who they were.',
-      '',
-      'E    look at what is in front of you',
-      'WASD walk    Space jump    LMB dig',
-      'Tab  your things',
-      'C    craft   J record   Enter console',
-      'Esc  save, load, restart, stop',
-      '',
-      'press any key',
+      'press any key to carry on',
     ]);
   },
 
@@ -7860,7 +7870,7 @@ const Game = {
         ? 'That is as deep as anyone cut. Nobody came back up.'
         : this.objective());
     }
-    const owed = typeof NPC === 'undefined' ? [] : this.questLines();
+    const owed = this.questLines();
     if (owed.length) {
       lines.push('');
       lines.push('ASKED OF YOU');
@@ -10856,11 +10866,10 @@ const GPURenderer = {
     }
     if (Game.uiDirty) {
       Overlay.clear();
-      // devmode owns the top row for the compass, so everything else on it
-      // steps down rather than being written over
-      const hud = Game.devMode ? 1 : 0;
-      Overlay.writeRight(hud, fpsLine);
-      Overlay.write(1, hud, Game.objective());
+      // The top row is the statistics and whatever is being asked of you;
+      // devmode's compass goes under it, not over it.
+      Overlay.writeRight(0, fpsLine);
+      Overlay.write(1, 0, Game.objective());
       Overlay.write(1, Overlay.rows - 1, HUD_LINE);
       Game.drawUI();
       Game.uiDirty = false;
