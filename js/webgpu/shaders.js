@@ -496,7 +496,8 @@ fn terrainT(ro : vec3f, rd : vec3f, tMax : f32, startCave : bool) -> f32 {
 
 // -------- trees: hash-placed per integer cell. KEEP IN SYNC with js/util.js --------
 
-struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32 };
+struct Tree { present : bool, cx : f32, cy : f32, r : f32, trunkH : f32,
+              g : f32 };
 
 // Props the player has taken away are listed in a small cleared-cell set.
 // Checked only
@@ -522,6 +523,13 @@ fn treeAt(ix : i32, iy : i32) -> Tree {
   let h2 = hash2i(ix, iy, s ^ 0xA11Cu);
   tr.cx = f32(ix) + ${TREE.OFF} + h2.x * ${TREE.OFF_VAR};
   tr.cy = f32(iy) + ${TREE.OFF} + h2.y * ${TREE.OFF_VAR};
+  // Nothing grows out of a lake. Sampled at the ANCHOR, where the trunk
+  // stands, not at the cell - a cell straddling a shoreline would keep or
+  // drop its tree by the wrong half. Both callers below want this height
+  // to sit the trunk on, so it rides along in the struct and the gate
+  // costs no extra terrain samples. KEEP IN SYNC with js/util.js.
+  tr.g = terrainH(vec2f(tr.cx, tr.cy));
+  if (tr.g < U.seaLevel) { return tr; }
   tr.r = ${TREE.R_MIN} + h2.x * ${TREE.R_VAR};
   tr.trunkH = ${TREE.TRUNK_H} + h2.y * ${TREE.TRUNK_H_VAR};
   tr.present = true;
@@ -1052,7 +1060,7 @@ fn traceTrees(ro : vec3f, rd : vec3f, tMax : f32) -> Obj {
       if (!tr.present) { continue; }
       if (isRemoved(tx, ty)) { continue; }
       let cen = vec2f(tr.cx, tr.cy);
-      let g = terrainH(cen);
+      let g = tr.g;
       let canZ = g + tr.trunkH + tr.r * ${TREE.CAN_Z};
       let trunkR = ${TREE.TRUNK_R} + tr.r * ${TREE.TRUNK_R_K};
 
@@ -1325,7 +1333,7 @@ fn transmit(ro : vec3f, rd : vec3f, maxT : f32) -> f32 {
         h3 = h2; h2 = h1; h1 = h0; h0 = tc;
         if (isRemoved(tx, ty)) { continue; }
 
-        let g = terrainH(vec2f(tr.cx, tr.cy));
+        let g = tr.g;
         let canZ = g + tr.trunkH + tr.r * ${TREE.CAN_Z};
         let tTrunk = hitCylinder(ro, rd, vec2f(tr.cx, tr.cy),
                                  ${TREE.TRUNK_R} + tr.r * ${TREE.TRUNK_R_K},
@@ -1769,8 +1777,10 @@ fn uiTint(i : u32) -> vec3f {
     case 1u: { return vec3f(0.42, 0.78, 0.36); }   // land
     case 2u: { return vec3f(0.34, 0.56, 0.95); }   // water
     case 3u: { return vec3f(0.92, 0.32, 0.28); }   // a settlement
-    case 4u: { return vec3f(1.00, 1.00, 1.00); }   // you
+    case 4u: { return vec3f(1.00, 1.00, 1.00); }   // you, and plain text
     case 5u: { return vec3f(0.95, 0.74, 0.30); }   // a cave mouth
+    case 6u: { return vec3f(0.46, 0.42, 0.38); }   // a ruin: gone grey
+    case 7u: { return vec3f(0.66, 0.58, 0.42); }   // a road that is walked
     default: { return vec3f(1.0); }
   }
 }

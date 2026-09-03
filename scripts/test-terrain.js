@@ -75,6 +75,27 @@ for (let ix = -50; ix < 50; ix++) for (let iy = -50; iy < 50; iy++) {
 }
 badTree === 0 ? ok('tree params in range') : fail(`${badTree} trees out of range`);
 
+// Nothing grows out of a lake. Checked at the ANCHOR, which is what the
+// gate uses and what the trunk is drawn from - a cell can be under water
+// while the anchor a third of a cell away is not, and the tree is real.
+// The shoreline count is the other half of it: refusing the water must not
+// also shave the coast bald.
+let wet = 0, shore = 0, wrongG = 0, found = 0;
+for (let ix = -400; ix < 400; ix++) for (let iy = -400; iy < 400; iy++) {
+  const t = c.treeAt(ix, iy);
+  if (!t) continue;
+  found++;
+  if (t.g < c.CFG.SEA_LEVEL) wet++;
+  if (t.g < c.CFG.SEA_LEVEL + 0.6) shore++;
+  if (t.g !== c.terrainH(t.cx, t.cy)) wrongG++;
+}
+wet === 0 ? ok(`no trees in the water (${found} checked)`)
+          : fail(`${wet} trees stand in water`);
+wrongG === 0 ? ok('tree.g is the ground at the anchor')
+             : fail(`${wrongG} trees carry the wrong ground height`);
+shore > 100 ? ok(`${shore} trees still stand within 0.6 of the waterline`)
+            : fail(`the coast went bald: only ${shore} shoreline trees`);
+
 // spawn: dry, gentle, reachable
 const [sx, sy] = c.World.findSpawn();
 const sh = c.terrainH(sx, sy);

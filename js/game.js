@@ -21,9 +21,12 @@ const Game = {
   // somebody who has never been here - a returning player is dropped
   // straight back in where they stopped, and does not sit through the
   // creation of the world a second time.
-  // Two parts: what they say came before the record, and then the record
-  // itself. Seeing the myth without the history is being told a world is
-  // old without being shown any of it.
+  //
+  // Two parts, both on a black field. First the myth, which is what they
+  // say came before anybody was counting. Then the record itself, run as a
+  // timelapse rather than listed: seeing the myth without the history is
+  // being told a world is old, and being shown six thousand years of it
+  // arriving and going out is being shown that it is.
   mythT: 0,
   mythPart: 0,
   MYTH_LINE: 0.38,   // seconds before the next line of it arrives
@@ -31,11 +34,10 @@ const Game = {
 
   prologue() {
     const L = Lore.init();
-    if (this.mythPart === 0) return (L.myth || { lines: [] }).lines;
-    return Lore.chronology();
+    return (L.myth || { lines: [] }).lines;
   },
 
-  // Anything at all moves it on: the second part, then the world.
+  // Anything at all moves it on: the record, then the world.
   mythNext() {
     if (this.mythPart === 0) {
       this.mythPart = 1;
@@ -659,9 +661,13 @@ const Game = {
     if (this.mode === 'myth') {
       this.mythT += dt;
       this.uiDirty = true;
-      const all = this.prologue();
-      // once it has all been said, hold it a moment and then move on
-      if (this.mythT > all.length * this.MYTH_LINE + this.MYTH_HOLD * 4) {
+      if (this.mythPart === 0) {
+        const all = this.prologue();
+        // once it has all been said, hold it a moment and then move on
+        if (this.mythT > all.length * this.MYTH_LINE + this.MYTH_HOLD * 4) {
+          this.mythNext();
+        }
+      } else if (this.mythT > this.tlLen()) {
         this.mythNext();
       }
     }
@@ -966,11 +972,20 @@ const Game = {
   },
 
   drawUI() {
+    // The opening owns the whole screen. Blacking the field out first is
+    // the point of it: the world behind a text that is meant to be read is
+    // a distraction, and a map of the centuries drawn over a forest cannot
+    // be read at all. Nothing else on the HUD belongs here either, so this
+    // returns rather than falling through to it.
+    if (this.mode === 'myth') {
+      Overlay.blackout();
+      if (this.mythPart === 0) this.drawMyth(); else this.drawTimelapse();
+      return;
+    }
     if (this.devMode && typeof Player !== 'undefined') { this.drawCompass(); this.drawMap(); }
     if (this.toastMsg) {
       Overlay.writeCentre(Overlay.rows - 3, ' ' + this.toastMsg + ' ');
     }
-    if (this.mode === 'myth') this.drawMyth();
     if (this.mode === 'menu') this.drawMenu();
     if (this.mode === 'inventory') this.drawInventory();
     if (this.mode === 'examine') this.drawExamine();
@@ -991,10 +1006,197 @@ const Game = {
     const w = Math.max(...all.map(l => l.length));
     const x0 = Math.max(1, (Overlay.cols - w) >> 1);
     const y0 = Math.max(1, (Overlay.rows - (all.length + 2)) >> 1);
-    for (let i = 0; i < shown; i++) if (all[i]) Overlay.write(x0, y0 + i, all[i]);
-    if (shown >= all.length) {
-      Overlay.write(x0, y0 + all.length + 1, 'press any key');
+    for (let i = 0; i < shown; i++) {
+      if (all[i]) Overlay.write(x0, y0 + i, all[i], Overlay.C.white);
     }
+    if (shown >= all.length) {
+      Overlay.write(x0, y0 + all.length + 1, 'press any key', Overlay.C.white);
+    }
+  },
+
+
+  // ---- the opening timelapse: the chronicle, drawn ----
+  //
+  // The map is the survey the simulation itself ran on - the same 64x64
+  // grid of heights and water that decided where anybody could live - so
+  // this is not an illustration of the history, it is the history, at one
+  // character to a couple of hundred metres.
+  //
+  // The clock runs at a constant rate and the captions arrive when their
+  // year does. History clusters, so sometimes two land together and the
+  // oldest scrolls off quickly; that is what a timelapse is. The map is
+  // the part you are meant to watch.
+  TL_SPEED: 500,     // years per second: the whole span in about twelve
+  TL_HOLD: 3.2,      // seconds the finished map stands before the title
+  TL_LOG: 4,         // captions kept on screen at once
+  TL_MAX_H: 30,      // rows the map may take, however big the window is
+  tlBg: null, tlBgKey: '', tlWide: 0,
+
+  // how long the whole thing takes, so tick() knows when it is over
+  tlLen() { return Lore.init().now / this.TL_SPEED + this.TL_HOLD; },
+
+  // The year on screen. Derived from elapsed time rather than integrated,
+  // so a dropped frame loses no years and the run is the same length on
+  // every machine.
+  tlYear() {
+    const S = Lore.init();
+    return Math.min(S.now, Math.floor(this.mythT * this.TL_SPEED));
+  },
+
+  // Where the map goes. A square region wants cells as wide as they are
+  // tall and character cells are not, so the column count is the row count
+  // scaled by the cell aspect - otherwise the region reads as an ellipse.
+  //
+  // Counted from the bottom line up, not guessed: header, gap, map, gap,
+  // the captions, gap, "press any key". Getting that budget wrong does not
+  // look wrong, it just drops the last line off the screen, which is how
+  // the footer went missing on every window under fifty rows.
+  tlLayout() {
+    const chrome = this.TL_LOG + 6;
+    const h = Math.min(this.TL_MAX_H, Overlay.rows - chrome);
+    if (h < 8) return null;                       // no room: skip the map
+    const w = Math.min(Overlay.cols - 2,
+                       Math.round(h * CFG.CELL_H / CFG.CELL_W));
+    if (w < 12) return null;
+    const y0 = Math.max(1, (Overlay.rows - (h + this.TL_LOG + 5)) >> 1);
+    return { w, h, x: Math.max(0, (Overlay.cols - w) >> 1), y: y0 + 2 };
+  },
+
+  // Where the captions start. The map is narrower than a sentence, so the
+  // band is pushed left until the longest line of the whole run fits -
+  // measured once, over every beat, so it does not shuffle sideways as the
+  // captions change.
+  tlTextX(L) {
+    if (!this.tlWide) {
+      for (const b of Lore.timeline()) {
+        this.tlWide = Math.max(this.tlWide, b.text.length + 6);
+      }
+    }
+    return Math.max(1, Math.min(L.x, Overlay.cols - 1 - this.tlWide));
+  },
+
+  // Ground and water, once. This never changes - six thousand years of
+  // people do not move a coastline - so it is built for a given size and
+  // then copied every frame.
+  //
+  // Deliberately flat: no relief. The survey samples the ground every 128
+  // units and this terrain varies at about forty, so neighbouring survey
+  // cells are statistically independent - measured at r = 0.002 across the
+  // whole region. A height ramp drawn from them is not hills, it is noise,
+  // and it buries the settlements the map exists to show. Water is a fact
+  // the simulation actually used, so that stays.
+  TL_LAND: '.', TL_WATER: '~',
+
+  tlBackground(L) {
+    const key = L.w + 'x' + L.h;
+    if (this.tlBg && this.tlBgKey === key) return this.tlBg;
+    const g = Lore.init().grid, N = HIST.N;
+    const ch = [], tint = [];
+    for (let sy = 0; sy < L.h; sy++) {
+      const row = [], trow = [];
+      for (let sx = 0; sx < L.w; sx++) {
+        // a screen cell can cover more than one survey cell; the majority
+        // decides whether it is under water
+        const i0 = Math.floor(sx * N / L.w), i1 = Math.max(i0 + 1, Math.floor((sx + 1) * N / L.w));
+        const j0 = Math.floor(sy * N / L.h), j1 = Math.max(j0 + 1, Math.floor((sy + 1) * N / L.h));
+        let n = 0, wet = 0;
+        for (let j = j0; j < j1 && j < N; j++) {
+          for (let i = i0; i < i1 && i < N; i++) { wet += g.water[j * N + i]; n++; }
+        }
+        const under = wet * 2 >= n;
+        row.push(under ? this.TL_WATER : this.TL_LAND);
+        trow.push(under ? Overlay.C.water : Overlay.C.land);
+      }
+      ch.push(row); tint.push(trow);
+    }
+    this.tlBg = { ch, tint };
+    this.tlBgKey = key;
+    return this.tlBg;
+  },
+
+  drawTimelapse() {
+    const S = Lore.init();
+    const y = this.tlYear();
+    const L = this.tlLayout();
+    // Too small a window to draw a map in: say the record in words rather
+    // than showing nothing, and let it stand for the same length of time.
+    if (!L) { this.panel(Lore.chronology()); return; }
+
+    const bg = this.tlBackground(L);
+    const ch = bg.ch.map(r => r.slice());
+    const tint = bg.tint.map(r => r.slice());
+    const N = HIST.N;
+    const sxOf = i => Math.min(L.w - 1, Math.floor(i * L.w / N));
+    const syOf = j => Math.min(L.h - 1, Math.floor(j * L.h / N));
+    const standing = s => s.founded <= y && (s.abandoned < 0 || s.abandoned > y);
+
+    // Roads, but only those with somebody at both ends. A road nobody
+    // walks is gone inside a century, and letting six thousand years of
+    // everybody's roads accumulate buries the map - so the network grows
+    // and dies back with each people, which is what actually happened.
+    for (const l of S.links) {
+      if (l.built > y) continue;
+      if (!standing(S.sites[l.a]) || !standing(S.sites[l.b])) continue;
+      for (const k of l.path) {
+        const sx = sxOf(k % N), sy = syOf((k / N) | 0);
+        ch[sy][sx] = '-';
+        tint[sy][sx] = Overlay.C.road;
+      }
+    }
+    // Ruins before the living, so ground settled twice reads as settled:
+    // a later people often builds on an older people's ruin field, and the
+    // standing place is the news.
+    for (const st of S.sites) {
+      if (st.founded > y || standing(st)) continue;
+      const sx = sxOf(st.i), sy = syOf(st.j);
+      ch[sy][sx] = (this.MAP_KIND[st.kind] || 'S').toLowerCase();
+      tint[sy][sx] = Overlay.C.ruin;
+    }
+    for (const st of S.sites) {
+      if (!standing(st)) continue;
+      const sx = sxOf(st.i), sy = syOf(st.j);
+      ch[sy][sx] = this.MAP_KIND[st.kind] || 'S';
+      tint[sy][sx] = Overlay.C.site;
+    }
+    for (let j = 0; j < L.h; j++) {
+      for (let i = 0; i < L.w; i++) Overlay.put(L.x + i, L.y + j, ch[j][i], tint[j][i]);
+    }
+
+    // The clock, over the map's left shoulder, and what it is counting.
+    const head = 'THE YEARS BEFORE YOU';
+    Overlay.write(L.x, L.y - 2, head, Overlay.C.white);
+    const yr = y >= S.now ? 'and then you' : 'year ' + y;
+    Overlay.write(L.x + Math.max(head.length + 2, L.w - yr.length), L.y - 2,
+                  yr, Overlay.C.white);
+
+    // The captions stay up at the end too: the last of them is the last
+    // people but one going out, which is what the empty map is saying.
+    const beats = Lore.timeline();
+    const shown = [];
+    for (const b of beats) if (b.t <= y) shown.push(b);
+    const last = shown.slice(-this.TL_LOG);
+    const tx = this.tlTextX(L);
+    const room = Overlay.cols - 1 - tx;
+    for (let i = 0; i < last.length; i++) {
+      const line = String(last[i].t).padStart(4) + '  ' + last[i].text;
+      Overlay.write(tx, L.y + L.h + 1 + i, line.slice(0, room), Overlay.C.white);
+    }
+
+    if (y >= S.now) {
+      // The map has filled with ruins. Say who they all were, on a plate
+      // cleared out of the middle of it - padding a line with spaces
+      // blanks those cells, so the table gets its own ground to sit on.
+      const rows = Lore.chronology();
+      const w = Math.min(Overlay.cols - 2,
+                         Math.max(L.w, Math.max(...rows.map(r => r.length)) + 4));
+      const bx = Math.max(0, L.x + ((L.w - w) >> 1));
+      const by = Math.max(1, L.y + ((L.h - rows.length) >> 1));
+      for (let i = 0; i < rows.length; i++) {
+        Overlay.write(bx, by + i, ('  ' + rows[i]).padEnd(w), Overlay.C.white);
+      }
+    }
+    Overlay.write(tx, L.y + L.h + 1 + this.TL_LOG + 1, 'press any key',
+                  Overlay.C.white);
   },
 
   drawTitle() {

@@ -1684,20 +1684,68 @@ if (c.Lore) {
     (G.mode === 'myth' && G.mythPart === 1)
       ? ok('a keypress moves it on to the record rather than skipping both')
       : fail(`first key gave mode=${G.mode} part=${G.mythPart}`);
-    (G.prologue().length === chron.length)
-      ? ok('and the second part is the record')
-      : fail('second part is not the chronology');
+    (G.mythT === 0 && G.tlYear() === 0)
+      ? ok('and the second part starts the record at year zero')
+      : fail(`second part opened at year ${G.tlYear()}`);
     G.key('KeyW');
     (G.mode === 'title') ? ok('a second keypress hands over to the title')
                          : fail(`second key gave ${G.mode}`);
 
     // and it plays through on its own if nobody touches anything
     G.mythPart = 0; G.mode = 'myth'; G.mythT = 0;
-    for (let i = 0; i < 400 && G.mode === 'myth'; i++) G.tick(0.1);
-    (G.mode === 'title') ? ok('left alone, it plays through and steps aside')
+    let ticks = 0;
+    for (; ticks < 2000 && G.mode === 'myth'; ticks++) G.tick(0.1);
+    (G.mode === 'title') ? ok(`left alone, it plays through in ${(ticks / 10) | 0}s`)
                          : fail('the prologue never ended by itself');
   }
-  G.mode = 'play';
+
+  // ---- the timelapse: the clock, and what it counts ----
+  {
+    const beats = Lore.timeline();
+    (beats.length > 8 && beats.length <= Lore.BEATS)
+      ? ok(`the record runs to ${beats.length} beats`)
+      : fail(`timeline has ${beats.length} beats`);
+    let unsorted = 0, outside = 0, wide = 0;
+    for (let i = 0; i < beats.length; i++) {
+      if (i && beats[i].t < beats[i - 1].t) unsorted++;
+      if (beats[i].t < 0 || beats[i].t > S.now) outside++;
+      if (beats[i].text.length > 66) wide++;
+    }
+    unsorted === 0 ? ok('and it runs forwards') : fail(`${unsorted} beats out of order`);
+    outside === 0 ? ok('every beat inside the span')
+                  : fail(`${outside} beats outside 0..${S.now}`);
+    wide === 0 ? ok('and every caption fits a line')
+               : fail(`${wide} captions too long`);
+
+    // Every people who stood here arrives on it and, if they ended, ends
+    // on it: the spine is not something the sampling may drop.
+    let missing = 0;
+    for (const p of S.peoples) {
+      if (!p.founded) continue;
+      if (!beats.some(b => b.text.startsWith(p.name + ' come'))) missing++;
+      if (p.fell >= 0 && !beats.some(b => b.text.startsWith(p.name + ' are finished'))) missing++;
+    }
+    missing === 0 ? ok('every people arrives and ends on it')
+                  : fail(`${missing} arrivals or endings missing`);
+
+    // and the clock covers the whole span rather than stopping short
+    G.mythPart = 1; G.mode = 'myth'; G.mythT = 0;
+    (G.tlYear() === 0) ? ok('the clock starts at nothing')
+                       : fail(`clock starts at ${G.tlYear()}`);
+    G.mythT = S.now / G.TL_SPEED;
+    (G.tlYear() === S.now) ? ok(`and reaches ${S.now} before the hold`)
+                           : fail(`clock reached ${G.tlYear()}`);
+    G.mythT = G.tlLen() * 2;
+    (G.tlYear() === S.now) ? ok('and never runs past it')
+                           : fail(`clock overran to ${G.tlYear()}`);
+    (G.tlLen() > S.now / G.TL_SPEED)
+      ? ok(`the finished map stands for ${G.TL_HOLD}s`)
+      : fail('no hold at the end');
+    (JSON.stringify(beats) === JSON.stringify(Lore.timeline()))
+      ? ok('and it is the same record twice')
+      : fail('timeline is not deterministic');
+  }
+  G.mode = 'play'; G.mythPart = 0; G.mythT = 0;
 }
 
 // ---- 26. devmode teleports ----

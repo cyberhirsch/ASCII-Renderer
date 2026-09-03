@@ -66,7 +66,10 @@ const Player = {
 
     const canvas = document.getElementById('screen');
     canvas.addEventListener('click', () => {
-      if (Game.mode === 'myth') { Game.mode = 'title'; Game.uiDirty = true; return; }
+      // A click is "anything at all" too, and it moves the opening on one
+      // step rather than skipping the rest of it: jumping straight to the
+      // title from the myth threw the record away without showing it.
+      if (Game.mode === 'myth') { Game.mythNext(); return; }
       if (Game.mode === 'title') Game.close();
       canvas.requestPointerLock();
     });

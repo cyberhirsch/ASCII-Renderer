@@ -155,6 +155,58 @@ const Lore = {
     return { band: k, key, people: p.id, lines };
   },
 
+  // ---- the opening timelapse: six thousand years, as they happened ----
+  //
+  // Which moments the clock stops for. A run logs about sixteen hundred
+  // events and no speed shows them all, so this keeps the spine: a people
+  // arriving, the wars between them, a people ending. Everything else the
+  // centuries did shows on the map instead - places appearing, roads
+  // knitting them together, and the whole of it going dark again.
+  //
+  // The peoples' own records carry the rises and falls, so those come off
+  // the people rather than the log: an event can be missing, a rise cannot.
+  BEATS: 24,
+
+  timeline() {
+    const S = this.init();
+    if (this.tl && this.tlOf === S) return this.tl;
+    const spine = [], lost = [];
+    for (const e of S.events) {
+      if (e.action === 'founded') {
+        spine.push({ t: e.t,
+          text: S.peoples[e.actor].name + ' come into the region.' });
+      } else if (e.action === 'declared war on' && S.peoples[e.target]) {
+        spine.push({ t: e.t, text: S.peoples[e.actor].name +
+          ' take up arms against ' + S.peoples[e.target].name +
+          (e.cause ? ', over ' + e.cause + '.' : '.') });
+      } else if (e.action === 'ended' && e.cause !== 'left' &&
+                 e.place !== null && S.sites[e.place]) {
+        // a place destroyed rather than merely walked away from
+        lost.push({ t: e.t, text: S.sites[e.place].name + ' was lost: ' +
+          (this.CAUSE[e.cause] || e.cause) + '.' });
+      }
+    }
+    for (const p of S.peoples) {
+      if (!p.founded || p.fell < 0) continue;
+      spine.push({ t: p.fell,
+        text: p.name + ' are finished - ' + (p.cause || 'decline') + '.' });
+    }
+    // Whatever budget the spine leaves goes to an even sample of the
+    // destroyed places, so the long stretches between one people and the
+    // next are not silent. Evenly by index rather than at random: the
+    // disasters are already spread across the span, and picking every nth
+    // keeps that spread without needing a second pass over the years.
+    const room = Math.max(0, this.BEATS - spine.length);
+    const step = lost.length / Math.max(1, room);
+    for (let i = 0; i < room && lost.length; i++) {
+      spine.push(lost[Math.min(lost.length - 1, Math.floor(i * step))]);
+    }
+    spine.sort((a, b) => a.t - b.t);
+    this.tl = spine;
+    this.tlOf = S;
+    return spine;
+  },
+
   // 1st, 2nd, 3rd, 4th - and 11th through 13th, which break the pattern
   ord(n) {
     const t = n % 100;

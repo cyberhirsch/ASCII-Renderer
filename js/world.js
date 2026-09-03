@@ -86,9 +86,9 @@ const World = {
           const tr = treeAt(cx + ox, cy + oy);
           if (!tr) continue;
           if (typeof Removed !== 'undefined' && Removed.has(cx + ox, cy + oy)) continue;
-          const g = terrainH(tr.cx, tr.cy);
+          const g = tr.g;              // the anchor's ground, already measured
           const d2 = (px - tr.cx) ** 2 + (py - tr.cy) ** 2;
-          const canZ = g + tr.trunkH + tr.r * 0.55;
+          const canZ = g + tr.trunkH + tr.r * TREE.CAN_Z;
           const inTrunk = d2 < (tr.trunkR + 0.15) ** 2 &&
                           pz > g && pz < g + tr.trunkH;
           const inCanopy = d2 + (pz - canZ) ** 2 < tr.r * tr.r;

@@ -852,11 +852,19 @@ function treeAt(ix, iy) {
                   TREE.DENS_MIN;
   if (hash01(ix, iy, (s ^ 0x7EE7) >>> 0) >= density) return null;
   const h2 = hash2i(ix, iy, (s ^ 0xA11C) >>> 0);
+  const cx = ix + TREE.OFF + h2[0] * TREE.OFF_VAR;
+  const cy = iy + TREE.OFF + h2[1] * TREE.OFF_VAR;
+  // Nothing grows out of a lake. The ground at the ANCHOR decides it, not
+  // the ground at the cell: the anchor is where the trunk actually stands,
+  // and a cell straddling a shoreline would otherwise keep or drop a tree
+  // by up to half a cell's worth of the wrong ground. The height is handed
+  // back because every caller wants it anyway - the trunk is drawn from it
+  // - so the gate costs no extra terrain samples.
+  const g = terrainH(cx, cy);
+  if (g < CFG.SEA_LEVEL) return null;
   const r = TREE.R_MIN + h2[0] * TREE.R_VAR;
   return {
-    cx: ix + TREE.OFF + h2[0] * TREE.OFF_VAR,
-    cy: iy + TREE.OFF + h2[1] * TREE.OFF_VAR,
-    r,
+    cx, cy, g, r,
     trunkH: TREE.TRUNK_H + h2[1] * TREE.TRUNK_H_VAR,
     trunkR: TREE.TRUNK_R + r * TREE.TRUNK_R_K,
   };

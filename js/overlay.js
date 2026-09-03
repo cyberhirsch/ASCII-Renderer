@@ -17,10 +17,24 @@ const Overlay = {
     this.dirty = true;
   },
 
+  // A black screen, made of the same cells as everything else. 0 means
+  // "the scene's own glyph" and BLANK means "no ink at all", so filling
+  // with BLANK puts the field out without the renderer needing a mode for
+  // it - the opening then writes its text into the dark like any panel.
+  blackout() {
+    if (this.data) this.data.fill(this.BLANK);
+    this.dirty = true;
+  },
+
   // Colours a cell can carry. The character lives in the low byte and the
   // colour above it, so a tinted cell costs nothing extra - 0 means "take
   // the scene's own colour", which is what every line of text does.
-  C: { none: 0, land: 1, water: 2, site: 3, self: 4, cave: 5 },
+  // 4 is plain white under both its names: the player's mark on the map,
+  // and text that must not borrow its colour from whatever is behind it.
+  // 6 and 7 are the opening timelapse's, which is the one screen that
+  // draws a road and a ruin as distinct things.
+  C: { none: 0, land: 1, water: 2, site: 3, self: 4, white: 4, cave: 5,
+       ruin: 6, road: 7 },
 
   write(x, y, str, tint) {
     if (!this.data || y < 0 || y >= this.rows) return;

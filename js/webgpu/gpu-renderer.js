@@ -449,7 +449,10 @@ const GPURenderer = {
         const i = y * cols + x;
         // the overlay wins over a star, and a star over the ramp - the same
         // precedence the fragment shader applies to the coverage sample
-        const code = ui ? ui[i] : 0;
+        // mask the tint off first: a coloured cell carries its hue in the
+        // bits above the character, and comparing the whole word against
+        // the printable range drops every tinted cell out of the capture
+        const code = ui ? (ui[i] & 0xff) : 0;
         if (code === CFG.UI_BLANK) { line += ' '; continue; }
         if (code > 32 && code < 127) { line += String.fromCharCode(code); continue; }
         const st = star[i];
