@@ -53,12 +53,19 @@ The heightfield never goes below zero, so the sea is nowhere deeper than
 either: a tree is placed only if the ground under its own anchor is dry, so
 the woods stop at the waterline instead of wading in.
 
-The last of the six peoples has not ended. You can walk into one of their
-settlements and speak to somebody — **E** on a person. What they say is
-their own people's record, and what they ask of you comes out of it too:
-materials their place is short of, or a ruin or a battlefield the record
-names, given as a bearing and a distance and nothing else. **J** lists what
-is owed.
+The last of the six peoples has not ended, and **you start beside the oldest
+of them**. One person in the world remembers what nobody wrote down: talk to
+the elder — **E** on a person — and they tell you one thing at a time, out of
+the same chronicle the walls carry. Where the record is cut and which way the
+nearest way down lies. A thing somebody made four thousand years ago, who
+made it, who carried it, and the ground it is lying under now. A person, what
+they did, and where they were buried. A field, who met on it and who had the
+day. Twelve of them, and **J** keeps every one you have heard.
+
+Everybody else works, and what they ask is a journey: a ruin or a battlefield
+their own record names, given as a bearing and a distance and nothing else.
+Nobody asks you to fetch materials — there was a fetch-quest kind and it is
+gone, because it asked nothing of the history the world is made of.
 
 Nothing tells you what to do. The top line is empty until you have read
 something off a wall or somebody has asked you for something, and there is
@@ -76,7 +83,8 @@ every 128 units and this terrain varies at about forty, so neighbouring
 samples are uncorrelated (measured at r = 0.002) and a height ramp drawn from
 them would be noise rather than hills.
 
-You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
+**There is something to find under the ground**, and the elder is the one who
+tells you so. Cave entrances are round pits with a spiral stair. Walk in.
 
 **There is something to find down there.** Someone cut those halls, and they
 left their record on the pillars. Examine one to read it. The story is laid

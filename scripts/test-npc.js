@@ -12,11 +12,14 @@ const path = require('path');
 const vm = require('vm');
 const root = path.join(__dirname, '..');
 
-const src = ['config', 'util', 'items', 'chronicle', 'assets', 'lore', 'npc', 'quest']
+const src = ['config', 'util', 'world', 'items', 'chronicle', 'assets', 'lore',
+             'npc', 'quest', 'tales']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
-  .join('\n') + '\n({ CFG, HIST, Chronicle, Lore, NPC, Quest, ITEMS, terrainH });';
+  .join('\n') +
+  '\n({ CFG, CAVES, HIST, Chronicle, Lore, NPC, Quest, Tales, World, ITEMS, ' +
+  'terrainH, shaftAt });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
-const { CFG, NPC, Quest, Lore, ITEMS } = c;
+const { CFG, NPC, Quest, Tales, Lore, ITEMS } = c;
 
 let failures = 0;
 const fail = m => { failures++; console.error('FAIL  ' + m); };
@@ -101,27 +104,126 @@ const all = NPC.all();
 }
 
 // ---- 5. what they want ----
+// One kind, and it is a journey. The fetch-me-five-wood quest is gone on
+// purpose: it asked nothing of the history the chronicle built, and this
+// checks it has not crept back.
 {
-  let none = 0, badItem = 0, wide = 0;
+  let none = 0, wide = 0, wrongKind = 0;
   const kinds = {};
   for (const n of all) {
     const q = Quest.forNpc(n);
     if (!q) { none++; continue; }
     kinds[q.kind] = (kinds[q.kind] || 0) + 1;
-    if (q.kind === 'bring') {
-      if (!ITEMS[q.item] || !ITEMS[q.give]) badItem++;
-      if (q.need < 1 || q.paid < 1) badItem++;
-    }
+    if (q.kind !== 'seek') wrongKind++;
     for (const l of q.ask.concat([q.task])) if (l.length > NPC.WIDTH) wide++;
   }
-  (none === 0) ? ok(`everybody wants something (${JSON.stringify(kinds)})`)
-               : fail(`${none} people want nothing`);
-  (badItem === 0) ? ok('and every trade names real items in real amounts')
-                  : fail(`${badItem} trades are malformed`);
+  (wrongKind === 0) ? ok(`every ask is a journey (${JSON.stringify(kinds)})`)
+                    : fail(`${wrongKind} asks are not 'seek'`);
+  (typeof Quest.bring === 'undefined' && typeof Quest.WANT === 'undefined')
+    ? ok('and there is no fetch-quest machinery left to fall back on')
+    : fail('Quest still carries bring/WANT');
   (wide === 0) ? ok('and every word of it fits the panel')
                : fail(`${wide} quest lines are too wide`);
-  (Object.keys(kinds).length > 1) ? ok('more than one kind of thing is asked')
-                                  : fail('every quest is the same kind');
+  // The elder is the one who asks nothing: they deal in what is remembered.
+  const askless = all.filter(n => !Quest.forNpc(n));
+  (askless.length >= 1 && askless.every(n => n.elder || !Quest.aPlace(S, n)))
+    ? ok(`${askless.length} ask nothing, and each has a reason to`)
+    : fail(`${none} people want nothing and should`);
+}
+
+// ---- 5b. the elder, and what they remember ----
+{
+  const e = NPC.elder();
+  e ? ok(`the world has an elder: ${e.name}, ${e.age}`)
+    : fail('no elder in a world with people in it');
+  if (e) {
+    (NPC.all().every(n => n.id === e.id || n.age <= e.age))
+      ? ok('and nobody living is older') : fail('somebody is older than the elder');
+    (NPC.all().filter(n => n.elder).length === 1)
+      ? ok('and there is exactly one of them') : fail('more than one elder');
+    (Quest.forNpc(e) === null)
+      ? ok('the elder asks nothing of you') : fail('the elder is handing out errands');
+
+    const tales = Tales.forNpc(e);
+    (tales.length >= 6) ? ok(`and holds ${tales.length} tales`)
+                        : fail(`the elder only holds ${tales.length} tales`);
+    (tales[0] && tales[0].id === 'halls')
+      ? ok('the first of them is what is under the ground')
+      : fail('the elder does not start with the halls');
+    // every line of every tale has to fit the panel it is spoken in
+    let wide = 0, empty = 0, dup = 0;
+    const seen = new Set();
+    for (const t of tales) {
+      if (!t.body.length) empty++;
+      if (seen.has(t.id)) dup++;
+      seen.add(t.id);
+      for (const l of [t.head].concat(t.body)) if (l.length > NPC.WIDTH) wide++;
+    }
+    wide === 0 ? ok('and every line of every one of them fits')
+               : fail(`${wide} spoken lines are too wide`);
+    empty === 0 ? ok('and none of them is an empty tale')
+                : fail(`${empty} tales say nothing`);
+    dup === 0 ? ok('and none is told twice') : fail(`${dup} tales repeat`);
+    // more than one kind of thing is remembered
+    const kinds = new Set(tales.map(t => t.kind));
+    (kinds.size >= 3) ? ok(`and they are not all of a kind (${[...kinds].join(', ')})`)
+                      : fail(`only ${kinds.size} kinds of tale`);
+    // told once, they run out rather than repeating for ever
+    const heard = [];
+    let guard = 0;
+    while (guard++ < 100) {
+      const t = Tales.next(e, heard);
+      if (!t) break;
+      heard.push(t.id);
+    }
+    (heard.length === tales.length)
+      ? ok(`hearing them all takes ${heard.length} askings and then stops`)
+      : fail(`ran out after ${heard.length} of ${tales.length}`);
+    // and the same tales in the same order on a second run
+    (JSON.stringify(Tales.forNpc(e).map(t => t.id)) === JSON.stringify(tales.map(t => t.id)))
+      ? ok('and it is the same memory twice') : fail('the elder remembers differently');
+    // Nobody else tells tales. Compared by id, not by identity: section 2
+    // rebuilds the list to check determinism, so `all` and `NPC.all()` hold
+    // equal-but-different objects and the old elder would slip through.
+    (NPC.all().filter(n => n.id !== e.id).every(n => Tales.forNpc(n).length === 0))
+      ? ok('and nobody else claims to remember any of it')
+      : fail('somebody who is not the elder is telling tales');
+  }
+}
+
+// ---- 5c. every tale points somewhere real ----
+{
+  const e = NPC.elder();
+  if (e) {
+    let ghosts = 0, placed = 0;
+    for (const t of Tales.forNpc(e)) {
+      if (t.x === null || t.y === null) continue;
+      placed++;
+      // inside the region the chronicle actually simulated, with a cell of
+      // slack: a grave is recorded to its survey cell, not to the metre
+      const half = c.HIST.N * c.HIST.CELL / 2 + c.HIST.CELL;
+      if (Math.abs(t.x) > half || Math.abs(t.y) > half) ghosts++;
+    }
+    (ghosts === 0) ? ok(`${placed} of the tales name a place, all inside the region`)
+                   : fail(`${ghosts} tales point outside the world`);
+    (placed >= 4) ? ok('and enough of them do to be worth walking for')
+                  : fail(`only ${placed} tales name a place`);
+  }
+}
+
+// ---- 5d. a new game starts beside the one who remembers ----
+{
+  const e = NPC.elder();
+  if (e && c.World) {
+    const [sx, sy] = c.World.findSpawn();
+    const d = Math.hypot(sx - e.x, sy - e.y);
+    (d <= 9.5) ? ok(`you start ${d.toFixed(1)}u from ${e.name} - inside talking range`)
+               : fail(`you start ${Math.round(d)}u from the elder`);
+    (d > 1.0) ? ok('and beside them, not inside them')
+              : fail(`spawn is ${d.toFixed(2)}u away - on top of the person`);
+    (c.terrainH(sx, sy) >= CFG.SEA_LEVEL)
+      ? ok('and on dry ground') : fail('spawn is in the water');
+  }
 }
 
 // ---- 6. asking twice gets the same answer ----

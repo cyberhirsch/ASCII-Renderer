@@ -1,34 +1,23 @@
 // What somebody wants from you.
 //
 // Nothing here is written down as a quest. A person's want is a function of
-// who they are and what the sim already did: a smith at a mine has no
-// timber and asks for some; somebody at a hold knows a place their own
-// record names and cannot go there themselves. Two runs of a seed ask the
-// same two things of the same two people.
+// who they are and what the sim already did: somebody knows a place their
+// own record names and cannot go there themselves. Two runs of a seed ask
+// the same thing of the same people.
 //
-// Only what the game can actually check is asked for. A quest to recover a
-// named object would be better than either of these and is not here,
+// There is exactly one kind, and it is a journey. There used to be a
+// second - fetch me five wood - and it is gone: it asked nothing of the
+// world the chronicle built, it could have been written for any game, and
+// a person who has six thousand years behind them deserves better than to
+// stand in a doorway wanting timber. What is left is the mechanic the whole
+// design rests on: a place named out loud, a bearing, a distance, and
+// nothing marked on anything.
+//
+// A quest to recover a NAMED object would be better still and is not here,
 // because relics are not carryable yet - there is no item that holds an
-// artifact and no way to dig one out of a deposit. Asking for one would be
-// a quest that cannot be finished.
+// artifact and no way to dig one out of a deposit. The elder can now tell
+// you where they lie (see js/tales.js); lifting one is the next thing.
 const Quest = {
-  // What each kind of place is short of, and what it has to spare. Both
-  // sides come from what the place does, so a mine trades metal for wood
-  // and a farm trades food for the tools it cannot make.
-  WANT: {
-    mine: ['wood', 'wood'],
-    farm: ['stone', 'wood'],
-    hold: ['iron', 'stone'],
-    fort: ['stone', 'wood'],
-  },
-  PAY: {
-    mine: ['copper', 'iron', 'tin'],
-    farm: ['fruit', 'wood', 'sap'],
-    hold: ['gem', 'copper'],
-    fort: ['iron', 'stone'],
-  },
-  BRING_MIN: 2, BRING_MAX: 5,
-  PAY_MIN: 1, PAY_MAX: 3,
   ARRIVE: 14,        // how near a place you must get for it to count
   // How far a person will send you. Walking is 4.2 units a second, so the
   // far end of this is a couple of minutes out and the same back - far
@@ -37,38 +26,14 @@ const Quest = {
   SEEK_MAX: 900,
 
   // ---- what one person wants, decided once and for all by the seed ----
+  //
+  // The elder is not one of them. They deal in what is remembered, not in
+  // errands, and what they have to give is in js/tales.js.
   forNpc(n) {
-    if (!n) return null;
+    if (!n || n.elder) return null;
     const S = Lore.init();
-    const site = S.sites[n.site];
-    const kind = site ? site.kind : 'farm';
-    const r = hash01(n.id * 71, 5, CFG.SEED >>> 0);
-    // A keeper is the one who knows where things are, so a keeper sends
-    // you somewhere. Everybody else works, and wants materials.
-    if (n.role === 'keeper' || r < 0.34) {
-      const place = this.aPlace(S, n);
-      if (place) return this.seek(n, place);
-    }
-    return this.bring(n, kind);
-  },
-
-  bring(n, kind) {
-    const want = this.WANT[kind] || this.WANT.farm;
-    const pay = this.PAY[kind] || this.PAY.farm;
-    const item = want[jsUhash(n.id >>> 0, 11) % want.length];
-    const give = pay[jsUhash(n.id >>> 0, 12) % pay.length];
-    const need = this.BRING_MIN +
-      jsUhash(n.id >>> 0, 13) % (this.BRING_MAX - this.BRING_MIN + 1);
-    const paid = this.PAY_MIN +
-      jsUhash(n.id >>> 0, 14) % (this.PAY_MAX - this.PAY_MIN + 1);
-    return {
-      id: 'b' + n.id, kind: 'bring', npc: n.id,
-      item, need, give, paid,
-      ask: ['"We are short of ' + ITEMS[item].name + ' here. Bring me ' + need,
-            'and I will not send you away empty."'],
-      task: ('bring ' + need + ' ' + ITEMS[item].name + ' to ' + n.name +
-             ' at ' + n.siteName).slice(0, NPC.WIDTH),
-    };
+    const place = this.aPlace(S, n);
+    return place ? this.seek(n, place) : null;
   },
 
   // Somewhere the record actually names: a place of theirs that ended, or
@@ -130,21 +95,15 @@ const Quest = {
   },
 
   // ---- can it be finished, and what happens when it is ----
+  // A place is found by standing in it. Nothing is marked, so arriving is
+  // the whole of the proof.
   done(q) {
     if (!q) return false;
-    if (q.kind === 'bring') return Game.count(q.item) >= q.need;
-    // a place is found by standing in it; nothing is marked, so arriving
-    // is the whole of the proof
     return Math.hypot(Player.x - q.x, Player.y - q.y) < this.ARRIVE;
   },
 
   hand(q, n) {
-    if (q.kind === 'bring') {
-      Game.take(q.item, q.need);
-      Game.give(q.give, q.paid);
-      return '"That is what we needed." (+' + q.paid + ' ' + ITEMS[q.give].name + ')';
-    }
     Game.give('gem', 1);
-    return '"So it is still standing." (+1 ' + ITEMS.gem.name + ')';
+    return '"So that is what is left of it." (+1 ' + ITEMS.gem.name + ')';
   },
 };

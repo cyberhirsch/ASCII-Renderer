@@ -1096,7 +1096,42 @@ const World = {
   // Spawn beside a cave entrance when one exists nearby: scan shaft
   // placement cells ring by ring from the origin, then stand on dry, gentle
   // ground at the rim of the first entrance found.
+  // Where a new game starts.
+  //
+  // Beside the one person in the world who remembers anything. Standing
+  // alone at a hole in the ground told you nothing and asked nothing; an
+  // elder three paces away is the whole of the introduction, and it is an
+  // introduction the chronicle wrote rather than one anybody typed.
   findSpawn() {
+    const e = (typeof NPC === 'undefined') ? null : NPC.elder();
+    if (e) {
+      const at = this.standNear(e.x, e.y, 2.2, 9);
+      if (at) return at;
+    }
+    return this.findShaftSpawn();
+  },
+
+  // Dry, gentle, walkable ground in a ring around a point - near enough to
+  // speak across, far enough not to be standing inside anybody.
+  standNear(x, y, from, to) {
+    for (let r = from; r <= to; r += 0.5) {
+      for (let a = 0; a < Math.PI * 2 - 0.01; a += Math.PI / 12) {
+        const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+        const h = terrainH(px, py);
+        if (h < CFG.SEA_LEVEL + 0.6) continue;
+        if (this.walkZ(px, py, h) === null) continue;
+        const sl = Math.abs(terrainH(px + 1, py) - h) +
+                   Math.abs(terrainH(px, py + 1) - h);
+        if (sl < 1.2) return [px, py];
+      }
+    }
+    return null;
+  },
+
+  // The old spawn, kept as the fallback: a world whose peoples have all
+  // ended has nobody to stand next to, and then a cave mouth is the best
+  // place to be put down.
+  findShaftSpawn() {
     for (let ring = 0; ring < 40; ring++) {
       for (let cy = -ring; cy <= ring; cy++) {
         for (let cx = -ring; cx <= ring; cx++) {
@@ -6289,7 +6324,16 @@ const NPC = {
     fort: ['warden', 'who watches the road'],
   },
 
-  _all: null,
+  // How old they are. This is the one thing about a living person that is
+  // invented rather than remembered - the chronicle only tracks figures,
+  // and every figure it names is dead - and it is invented for a reason.
+  // The oldest person in a world is the one who was told things by people
+  // who were told them, and word of mouth is the only way anything from
+  // before the living gets to you out loud.
+  AGE_MIN: 23, AGE_MAX: 79,
+  ELDER: ['elder', 'who remembers what nobody wrote down'],
+
+  _all: null, _elder: null,
 
   // Everybody alive in the world, in one list. Small - a dozen settlements
   // and at most three to a settlement - so it is built once and kept.
@@ -6312,10 +6356,13 @@ const NPC = {
         const x = site.x + Math.cos(a) * r;
         const y = site.y + Math.sin(a) * r;
         const [role, doing] = this.ROLE[site.kind] || this.ROLE.farm;
+        const age = this.AGE_MIN +
+          jsUhash((site.id * 101 + i) >>> 0, (CFG.SEED ^ 0xA6E) >>> 0) %
+          (this.AGE_MAX - this.AGE_MIN + 1);
         out.push({
           id: out.length,
           name: Chronicle.nameFor(site.people, 700 + out.length, site.id * 13 + i),
-          role, doing,
+          role, doing, age, elder: false,
           people: site.people, peopleName: p ? p.name : '?',
           site: site.id, siteName: site.name,
           x, y, z: terrainH(x, y),
@@ -6325,9 +6372,22 @@ const NPC = {
         });
       }
     }
+    // The eldest, and there is exactly one. Ties break on the lower id so
+    // the same person holds the tales on every run of a seed.
+    let old = null;
+    for (const n of out) if (!old || n.age > old.age) old = n;
+    if (old) {
+      old.elder = true;
+      old.role = this.ELDER[0];
+      old.doing = this.ELDER[1];
+      this._elder = old;
+    }
     this._all = out;
     return out;
   },
+
+  // The one who remembers. Null in a world whose peoples have all ended.
+  elder() { this.all(); return this._elder; },
 
   // The nearest person within reach, or null.
   near(x, y, maxD) {
@@ -6366,6 +6426,11 @@ const NPC = {
     const out = [(n.name + ', ' + n.doing).toUpperCase().slice(0, this.WIDTH), ''];
     out.push('"We are ' + n.peopleName + '. My people have held this');
     out.push('ground since the ' + Lore.ord(p.rise) + ' year.');
+    if (n.elder) {
+      out.push('');
+      out.push('I have ' + n.age + ' years on me, and there is nobody');
+      out.push('older left to ask."');
+    }
     // one real event from their own record, so nobody says anything that
     // did not happen
     const mine = [];
@@ -6390,34 +6455,23 @@ const NPC = {
 // What somebody wants from you.
 //
 // Nothing here is written down as a quest. A person's want is a function of
-// who they are and what the sim already did: a smith at a mine has no
-// timber and asks for some; somebody at a hold knows a place their own
-// record names and cannot go there themselves. Two runs of a seed ask the
-// same two things of the same two people.
+// who they are and what the sim already did: somebody knows a place their
+// own record names and cannot go there themselves. Two runs of a seed ask
+// the same thing of the same people.
 //
-// Only what the game can actually check is asked for. A quest to recover a
-// named object would be better than either of these and is not here,
+// There is exactly one kind, and it is a journey. There used to be a
+// second - fetch me five wood - and it is gone: it asked nothing of the
+// world the chronicle built, it could have been written for any game, and
+// a person who has six thousand years behind them deserves better than to
+// stand in a doorway wanting timber. What is left is the mechanic the whole
+// design rests on: a place named out loud, a bearing, a distance, and
+// nothing marked on anything.
+//
+// A quest to recover a NAMED object would be better still and is not here,
 // because relics are not carryable yet - there is no item that holds an
-// artifact and no way to dig one out of a deposit. Asking for one would be
-// a quest that cannot be finished.
+// artifact and no way to dig one out of a deposit. The elder can now tell
+// you where they lie (see js/tales.js); lifting one is the next thing.
 const Quest = {
-  // What each kind of place is short of, and what it has to spare. Both
-  // sides come from what the place does, so a mine trades metal for wood
-  // and a farm trades food for the tools it cannot make.
-  WANT: {
-    mine: ['wood', 'wood'],
-    farm: ['stone', 'wood'],
-    hold: ['iron', 'stone'],
-    fort: ['stone', 'wood'],
-  },
-  PAY: {
-    mine: ['copper', 'iron', 'tin'],
-    farm: ['fruit', 'wood', 'sap'],
-    hold: ['gem', 'copper'],
-    fort: ['iron', 'stone'],
-  },
-  BRING_MIN: 2, BRING_MAX: 5,
-  PAY_MIN: 1, PAY_MAX: 3,
   ARRIVE: 14,        // how near a place you must get for it to count
   // How far a person will send you. Walking is 4.2 units a second, so the
   // far end of this is a couple of minutes out and the same back - far
@@ -6426,38 +6480,14 @@ const Quest = {
   SEEK_MAX: 900,
 
   // ---- what one person wants, decided once and for all by the seed ----
+  //
+  // The elder is not one of them. They deal in what is remembered, not in
+  // errands, and what they have to give is in js/tales.js.
   forNpc(n) {
-    if (!n) return null;
+    if (!n || n.elder) return null;
     const S = Lore.init();
-    const site = S.sites[n.site];
-    const kind = site ? site.kind : 'farm';
-    const r = hash01(n.id * 71, 5, CFG.SEED >>> 0);
-    // A keeper is the one who knows where things are, so a keeper sends
-    // you somewhere. Everybody else works, and wants materials.
-    if (n.role === 'keeper' || r < 0.34) {
-      const place = this.aPlace(S, n);
-      if (place) return this.seek(n, place);
-    }
-    return this.bring(n, kind);
-  },
-
-  bring(n, kind) {
-    const want = this.WANT[kind] || this.WANT.farm;
-    const pay = this.PAY[kind] || this.PAY.farm;
-    const item = want[jsUhash(n.id >>> 0, 11) % want.length];
-    const give = pay[jsUhash(n.id >>> 0, 12) % pay.length];
-    const need = this.BRING_MIN +
-      jsUhash(n.id >>> 0, 13) % (this.BRING_MAX - this.BRING_MIN + 1);
-    const paid = this.PAY_MIN +
-      jsUhash(n.id >>> 0, 14) % (this.PAY_MAX - this.PAY_MIN + 1);
-    return {
-      id: 'b' + n.id, kind: 'bring', npc: n.id,
-      item, need, give, paid,
-      ask: ['"We are short of ' + ITEMS[item].name + ' here. Bring me ' + need,
-            'and I will not send you away empty."'],
-      task: ('bring ' + need + ' ' + ITEMS[item].name + ' to ' + n.name +
-             ' at ' + n.siteName).slice(0, NPC.WIDTH),
-    };
+    const place = this.aPlace(S, n);
+    return place ? this.seek(n, place) : null;
   },
 
   // Somewhere the record actually names: a place of theirs that ended, or
@@ -6519,22 +6549,273 @@ const Quest = {
   },
 
   // ---- can it be finished, and what happens when it is ----
+  // A place is found by standing in it. Nothing is marked, so arriving is
+  // the whole of the proof.
   done(q) {
     if (!q) return false;
-    if (q.kind === 'bring') return Game.count(q.item) >= q.need;
-    // a place is found by standing in it; nothing is marked, so arriving
-    // is the whole of the proof
     return Math.hypot(Player.x - q.x, Player.y - q.y) < this.ARRIVE;
   },
 
   hand(q, n) {
-    if (q.kind === 'bring') {
-      Game.take(q.item, q.need);
-      Game.give(q.give, q.paid);
-      return '"That is what we needed." (+' + q.paid + ' ' + ITEMS[q.give].name + ')';
-    }
     Game.give('gem', 1);
-    return '"So it is still standing." (+1 ' + ITEMS.gem.name + ')';
+    return '"So that is what is left of it." (+1 ' + ITEMS.gem.name + ')';
+  },
+};
+</script>
+<script>
+// ---- js/tales.js ----
+// What is remembered out loud.
+//
+// The halls carry the record cut into stone. This is the other half of it:
+// the part that got here by being told. Same chronicle - the same people,
+// the same things they made, the same fields they fought on - but spoken by
+// somebody who has it from somebody who had it, which is the only way
+// anything from before the living reaches you at all.
+//
+// Nothing here is authored. A tale is the simulation's own record of a
+// person, a thing or a battle, said the way a person would say it, and
+// every name, year and cause in it is one the run actually produced. Two
+// visits to a seed hear the same tales in the same order.
+const Tales = {
+  WIDTH: 50,        // the widest a spoken line may be
+  HOLDS: 12,        // how many one elder carries
+
+  // ---- saying it ----
+
+  // A spoken sentence starts with a capital even when it opens on a name
+  // the chronicle wrote lower case ("the nine-fold gold gauntlets of...").
+  said(str) {
+    const t = String(str);
+    const i = t.search(/[A-Za-z]/);
+    return i < 0 ? t : t.slice(0, i) + t[i].toUpperCase() + t.slice(i + 1);
+  },
+
+  // Break a sentence over lines without splitting a word. Everything here
+  // is prose of unknown length - a title can run to sixty characters on its
+  // own - so nothing is laid out by hand.
+  wrap(str, w) {
+    const width = w || this.WIDTH;
+    const out = [];
+    let line = '';
+    for (const word of String(str).split(/\s+/)) {
+      if (!word) continue;
+      if (!line) { line = word; continue; }
+      if (line.length + 1 + word.length <= width) { line += ' ' + word; continue; }
+      out.push(line);
+      line = word;
+    }
+    if (line) out.push(line);
+    return out;
+  },
+
+  // How far off a thing is, said the way the myth and the quests say it:
+  // one of eight points and a distance in leagues, and nothing marked.
+  whereFrom(n, x, y) {
+    const dx = x - n.x, dy = y - n.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 20) return 'It is here, under your feet.';
+    return 'It lies ' + Quest.bearing(dx, dy) + ' of here, ' +
+           Math.max(1, Math.round(d / 10)) + ' leagues.';
+  },
+
+  // ---- where a thing or a person ended up ----
+
+  // The cell a deposit sits in, in world units. Graves and hoards are
+  // recorded on the simulation's own grid, which is coarse - a cell is 128
+  // units - so this is where to go and dig, not where to put a pin.
+  spot(k) {
+    return [Chronicle.wx(k.i), Chronicle.wy(k.j)];
+  },
+
+  graveOf(S, figureId) {
+    for (const d of S.deposits) {
+      if (d.kind === 'grave' && d.figure === figureId) return d;
+    }
+    return null;
+  },
+
+  // ---- the three kinds of thing worth telling ----
+
+  // A person. Their people, their trade, the span of them, and the one
+  // deed the record keeps them for.
+  hero(S, id, n) {
+    const f = S.figures[id];
+    if (!f) return null;
+    const p = S.peoples[f.people];
+    const head = (f.name + (f.epithet ? ', ' + f.epithet : '')).toUpperCase();
+    const body = [];
+    body.push(...this.wrap('"' + f.name + ' was ' + p.name + ', and their ' +
+      f.role + '. Born in the ' + Lore.ord(f.born) + ' year, and gone by the ' +
+      Lore.ord(f.died) + ', of ' + (f.cause || 'age') + '.'));
+    // Their own deeds, in the record's own words. Named rather than
+    // pronouned: the chronicle does not record who anybody was, and
+    // guessing it out loud would be inventing something.
+    const deeds = (f.deeds || []).filter(d => d.what);
+    if (deeds.length) {
+      const d = deeds[jsUhash(f.id >>> 0, 41) % deeds.length];
+      body.push('');
+      body.push(...this.wrap(f.name + ' ' + d.what + ', in the ' +
+                             Lore.ord(d.t) + ' year.'));
+    }
+    // A win/loss tally was here and read as a scoreboard rather than as
+    // something a person would say out loud. The deed above it is what
+    // they are actually remembered for, which is the better line anyway.
+    if (f.wins > 1 && f.losses === 0) {
+      body.push('');
+      body.push(...this.wrap('Never beaten on a field, and there were ' +
+                             f.wins + ' of them.'));
+    }
+    const g = this.graveOf(S, f.id);
+    let x = null, y = null;
+    if (g) {
+      [x, y] = this.spot(g);
+      body.push('');
+      body.push(...this.wrap(f.name + ' was laid in the ground in the ' +
+                             Lore.ord(g.t) + ' year. ' + this.whereFrom(n, x, y) + '"'));
+    } else {
+      body[body.length - 1] += '"';
+    }
+    return { id: 'h' + f.id, kind: 'hero', head, body, x, y,
+             place: f.name + "'s grave" };
+  },
+
+  // A thing. The chronicle already reckons why each of these is worth
+  // remembering and writes it as one line, so that line is the tale.
+  thing(S, id, n) {
+    const a = S.artifacts[id];
+    if (!a) return null;
+    const head = a.name.toUpperCase();
+    const body = [];
+    const maker = a.madeBy !== null && S.figures[a.madeBy]
+      ? S.figures[a.madeBy].name : null;
+    body.push(...this.wrap(this.said('"' + a.name + ', made in the ' +
+      Lore.ord(a.made) + ' year' + (maker ? ' by ' + maker : '') +
+      ', of ' + a.mat + '.')));
+    if (a.title) {
+      body.push('');
+      body.push(...this.wrap('It is the one ' + a.title + '.'));
+    }
+    let x = null, y = null;
+    if (a.rest) {
+      [x, y] = this.spot(a.rest);
+      const how = a.rest.how === 'grave' ? 'It went into the ground with the dead'
+                : a.rest.how === 'hoard' ? 'It was hidden away'
+                : a.rest.how === 'battle' ? 'It was dropped on the field'
+                : a.rest.how === 'votive' ? 'It was given to the water'
+                : 'It was lost';
+      body.push('');
+      body.push(...this.wrap(how + ' in the ' + Lore.ord(a.rest.t) +
+                             ' year, and nobody has lifted it since. ' +
+                             this.whereFrom(n, x, y) + '"'));
+    } else {
+      body[body.length - 1] += '"';
+    }
+    return { id: 'a' + a.id, kind: 'thing', head, body, x, y, place: a.name };
+  },
+
+  // A field. Who met on it, who had the day, and who did not come off it.
+  field(S, id, n) {
+    const b = S.battles[id];
+    if (!b) return null;
+    const A = S.peoples[b.a], B = S.peoples[b.b];
+    if (!A || !B) return null;
+    const won = S.peoples[b.winner];
+    const body = [];
+    body.push(...this.wrap(this.said('"' + A.name + ' and ' + B.name +
+      ' met at ' + b.name + ' in the ' + Lore.ord(b.t) + ' year.')));
+    body.push('');
+    body.push(...this.wrap('The day went to ' + (won ? won.name : 'neither') + '.'));
+    const lost = b.cmdLose !== null && S.figures[b.cmdLose] ? S.figures[b.cmdLose] : null;
+    const win = b.cmdWin !== null && S.figures[b.cmdWin] ? S.figures[b.cmdWin] : null;
+    if (win) body.push(...this.wrap(win.name + ' led the side that held it.'));
+    if (lost) body.push(...this.wrap(lost.name + ' led the side that did not.'));
+    body.push('');
+    body.push(...this.wrap(this.whereFrom(n, b.x, b.y) + '"'));
+    return { id: 'b' + b.id, kind: 'field', head: b.name.toUpperCase(),
+             body, x: b.x, y: b.y, place: b.name };
+  },
+
+  // The first thing anybody tells you, and the only one that is about the
+  // ground rather than about the past: there is a record down there, and
+  // here is which way the nearest way down lies. Everything else in this
+  // game is found by walking, and this is what makes walking worth it.
+  HALLS_SCAN: 6,      // shaft cells searched either way; 48 units to a cell
+
+  halls(S, n) {
+    const body = [];
+    const cut = S.peoples.filter(p => p.founded).map(p => p.name);
+    body.push(...this.wrap('"The peoples before us cut halls under this ' +
+      'country and wrote on the walls as they went. ' +
+      (cut.length ? cut.join(', ') + ' - all of them.' : '')));
+    body.push('');
+    body.push(...this.wrap('The deeper you go the later it gets, so the ' +
+      'end of a people is in the lowest gallery they cut.'));
+    const way = this.nearestWayDown(n.x, n.y);
+    body.push('');
+    if (way) {
+      body.push(...this.wrap('There is a way down ' +
+        Quest.bearing(way.ax - n.x, way.ay - n.y) + ' of here, ' +
+        Math.max(1, Math.round(Math.hypot(way.ax - n.x, way.ay - n.y) / 10)) +
+        ' leagues. Find it, and read what they cut."'));
+    } else {
+      body.push(...this.wrap('Find a way down, and read what they cut."'));
+    }
+    return { id: 'halls', kind: 'halls', head: 'WHAT IS UNDER THE GROUND',
+             body, x: way ? way.ax : null, y: way ? way.ay : null,
+             place: 'the way down' };
+  },
+
+  nearestWayDown(x, y) {
+    const E = CAVES.SHAFT_E;
+    const cx = Math.floor(x / E), cy = Math.floor(y / E);
+    let best = null, bd = Infinity;
+    for (let j = -this.HALLS_SCAN; j <= this.HALLS_SCAN; j++) {
+      for (let i = -this.HALLS_SCAN; i <= this.HALLS_SCAN; i++) {
+        const a = shaftAt(cx + i, cy + j, 0);
+        if (!a) continue;
+        const d = (a.ax - x) ** 2 + (a.ay - y) ** 2;
+        if (d < bd) { bd = d; best = a; }
+      }
+    }
+    return best;
+  },
+
+  // ---- who knows what ----
+
+  // An elder's memory, best first and the three kinds interleaved so it is
+  // not eight lords and then eight brooches. The famous are remembered by
+  // everybody, which is what the chronicle's own ranking already means, so
+  // this walks down the top of each list rather than picking at random.
+  forNpc(n) {
+    if (!n || !n.elder) return [];
+    const S = Lore.init();
+    const out = [this.halls(S, n)];
+    const heroes = S.heroes || [], legends = S.legends || [];
+    // battles by how much turned on them: a war's first field is its story
+    const fields = (S.battles || []).map(b => b.id);
+    for (let i = 0; out.length < this.HOLDS; i++) {
+      const before = out.length;
+      if (i < legends.length) { const t = this.thing(S, legends[i], n); if (t) out.push(t); }
+      if (out.length < this.HOLDS && i < heroes.length) {
+        const t = this.hero(S, heroes[i], n); if (t) out.push(t);
+      }
+      if (out.length < this.HOLDS && i < fields.length) {
+        const t = this.field(S, fields[i], n); if (t) out.push(t);
+      }
+      if (out.length === before) break;      // all three lists are spent
+    }
+    return out;
+  },
+
+  byId(n, id) {
+    for (const t of this.forNpc(n)) if (t.id === id) return t;
+    return null;
+  },
+
+  // The next one you have not heard, or null when there is no more of it.
+  next(n, heard) {
+    for (const t of this.forNpc(n)) if (heard.indexOf(t.id) < 0) return t;
+    return null;
   },
 };
 </script>
@@ -6895,7 +7176,8 @@ const Game = {
         this.cmdHistory.length = 0;
         break;
       case 'wipe':
-        this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+        this.inv.clear(); this.read = []; this.told = [];
+      this.done = false; this.used.clear();
         if (typeof localStorage !== 'undefined') {
           // this world only: another seed's digs are none of its business
           localStorage.removeItem(saveKey('ascii-save-v1'));
@@ -7099,13 +7381,29 @@ const Game = {
 
   // ---- people, and what they want ----
 
-  talking: null, talkQ: null, talkSay: '',
+  talking: null, talkQ: null, talkSay: '', talkTale: null,
+  told: [],            // tales heard, in the order they were heard
 
   talkTo(who) {
     this.talking = who;
     this.talkQ = Quest.forNpc(who);
     this.talkSay = '';
+    // The elder holds the tales. What they say next is the first one you
+    // have not heard, and it is picked when the conversation opens rather
+    // than when you press the key, so the panel can show it before you
+    // commit to listening.
+    this.talkTale = (typeof Tales === 'undefined') ? null
+                                                   : Tales.next(who, this.told);
     this.open('talk');
+  },
+
+  // Hearing something is the whole of it. There is nothing to carry back
+  // and nothing to hand over: you know it now, and it is in the record.
+  hear(t) {
+    if (!t || this.told.indexOf(t.id) >= 0) return;
+    this.told.push(t.id);
+    this.needSave = true;
+    this.uiDirty = true;
   },
 
   questState(q) { return q ? (this.quests[q.id] || 'none') : 'none'; },
@@ -7113,6 +7411,14 @@ const Game = {
   // One button does the whole conversation, because there is only ever one
   // thing to do next: take the work, hand it in, or nothing.
   talkAct() {
+    // an elder with something left to say says it, and then has the next
+    if (this.talkTale) {
+      this.hear(this.talkTale);
+      this.talkTale = Tales.next(this.talking, this.told);
+      this.talkSay = this.talkTale ? '' : '"That is the whole of what I have."';
+      this.uiDirty = true;
+      return;
+    }
     const q = this.talkQ;
     if (!q) { this.close(); return; }
     const st = this.questState(q);
@@ -7137,6 +7443,30 @@ const Game = {
     const who = this.talking;
     if (!who) return;
     const lines = NPC.greet(who);
+    // The elder's panel is the tale itself, not a summary of one: you are
+    // being told something, and being told it is the thing that happens.
+    if (this.talkTale) {
+      const t = this.talkTale;
+      lines.push('');
+      lines.push(t.head);
+      lines.push('');
+      for (const l of t.body) lines.push(l);
+      lines.push('');
+      lines.push('[E] hear the next   [Q] enough for now');
+      if (this.talkSay) { lines.push(''); lines.push(this.talkSay); }
+      this.panel(lines);
+      return;
+    }
+    if (who.elder) {
+      lines.push('');
+      lines.push(this.told.length
+        ? '"You have had all of it out of me."'
+        : '"There is nothing I can tell you."');
+      lines.push('');
+      lines.push('[Q] leave');
+      this.panel(lines);
+      return;
+    }
     const q = this.talkQ;
     const st = this.questState(q);
     lines.push('');
@@ -7421,7 +7751,8 @@ const Game = {
     }
     if (act === 'restart') {
       if (!this.menuAsk) { this.menuAsk = true; this.uiDirty = true; return; }
-      this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+      this.inv.clear(); this.read = []; this.told = [];
+      this.done = false; this.used.clear();
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem(saveKey('ascii-save-v1'));
         localStorage.removeItem(saveKey('ascii-caves-v1'));
@@ -7857,8 +8188,11 @@ const Game = {
   drawJournal() {
     const lines = ['THE RECORD', ''];
     if (this.read.length === 0) {
-      lines.push('Nothing yet. Somewhere below, someone');
-      lines.push('cut their history into the stone.');
+      // "Nothing yet" used to sit above a list of twelve things you had
+      // been told, which reads as a contradiction. This page is about what
+      // was cut in stone; what was said aloud has its own below.
+      lines.push('Nothing cut in stone yet. Somewhere below,');
+      lines.push('someone carved their history into it.');
     } else {
       // Deepest last, so the panel reads the way the descent did. Different
       // halls can belong to different peoples now, so each entry carries
@@ -7875,6 +8209,18 @@ const Game = {
       lines.push(this.done
         ? 'That is as deep as anyone cut. Nobody came back up.'
         : this.objective());
+    }
+    // What got to you by being told rather than by being cut. Heads only:
+    // the whole of a tale is a panel of its own, and a record that reprints
+    // twelve of them is not a record, it is the conversation again.
+    if (this.told.length) {
+      lines.push('');
+      lines.push('WHAT YOU HAVE BEEN TOLD');
+      const e = typeof NPC === 'undefined' ? null : NPC.elder();
+      for (const id of this.told) {
+        const t = e && typeof Tales !== 'undefined' ? Tales.byId(e, id) : null;
+        if (t) lines.push('  ' + t.head.toLowerCase());
+      }
     }
     const owed = this.questLines();
     if (owed.length) {
@@ -7970,6 +8316,7 @@ const Game = {
     for (const [k, v] of this.inv) inv[k] = v;
     return {
       inv, read: this.read, done: this.done, quests: this.quests,
+      told: this.told,
       at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
                                            Player.pitch, Player.z] : null,
       t: typeof Sky !== 'undefined' ? Sky.t : null,
@@ -7981,6 +8328,7 @@ const Game = {
     this.inv.clear();
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
+    this.told = Array.isArray(s.told) ? s.told : [];
     this.quests = (s.quests && typeof s.quests === 'object') ? s.quests : {};
     this.done = !!s.done;
     this.used = new Set((s.used || []).slice(-this.USED_MAX));

@@ -12,14 +12,14 @@ const root = path.join(__dirname, '..');
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
              'removed', 'chronicle', 'assets', 'steading', 'entities',
-             'lore', 'npc', 'quest', 'items', 'game', 'player']
+             'lore', 'npc', 'quest', 'tales', 'items', 'game', 'player']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
    'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt', 'Player',
-   'Steading', 'Entities', 'NPC', 'Quest']
+   'Steading', 'Entities', 'NPC', 'Quest', 'Tales']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -1875,10 +1875,11 @@ if (c.Player && c.Lore && c.Steading) {
 if (c.NPC && c.Quest) {
   const G = c.Game, P = c.Player, NPC = c.NPC, Quest = c.Quest;
   const S = c.Lore.init();
-  const who = NPC.all().find(n => Quest.forNpc(n) && Quest.forNpc(n).kind === 'bring');
   const seeker = NPC.all().find(n => Quest.forNpc(n) && Quest.forNpc(n).kind === 'seek');
-  (who && seeker) ? ok('the world has somebody who wants a thing and somebody who wants a place')
-                  : fail('missing one of the two quest kinds');
+  const elder = NPC.elder();
+  (seeker && elder)
+    ? ok('the world has somebody who wants a place and somebody who remembers')
+    : fail('missing the seeker or the elder');
 
   const text = () => {
     let t = '';
@@ -1890,54 +1891,88 @@ if (c.NPC && c.Quest) {
   };
   c.Overlay.resize(120, 44);
 
-  if (who) {
-    const q = Quest.forNpc(who);
-    G.quests = {}; G.inv.clear(); G.close();
-
-    // examine finds a person standing there
-    P.x = who.x - 1.2; P.y = who.y; P.z = who.z;
-    P.angle = 0; P.pitch = 0;
-    const t = c.World.examineRay(P.x, P.y, P.z + c.CFG.EYE, 1, 0, 0);
-    (t && t.kind === 'npc' && t.npc === who.id)
+  // examine has to find a person before the ground they are standing on,
+  // whoever they are - checked on the seeker, since there is only one kind
+  // of ask left and the elder's panel is a different shape.
+  if (seeker) {
+    // Walk round them until nothing is in the way. A trunk between you and
+    // a person IS what you are looking at, so the test has to stand
+    // somewhere with a clear line rather than assume the first angle is.
+    let t = null;
+    for (let a = 0; a < Math.PI * 2 - 0.01 && !(t && t.kind === 'npc'); a += Math.PI / 8) {
+      const dx = Math.cos(a), dy = Math.sin(a);
+      P.x = seeker.x - dx * 1.2; P.y = seeker.y - dy * 1.2; P.z = seeker.z;
+      P.angle = a; P.pitch = 0;
+      t = c.World.examineRay(P.x, P.y, P.z + c.CFG.EYE, dx, dy, 0);
+    }
+    (t && t.kind === 'npc' && t.npc === seeker.id)
       ? ok('examine finds a person before the ground they stand on')
-      : fail('examine missed the person: ' + JSON.stringify(t && t.kind));
-
-    G.talkTo(who);
+      : fail('examine never found the person: ' + JSON.stringify(t && t.kind));
+    G.talkTo(seeker);
     (G.mode === 'talk') ? ok('and speaking to them opens the conversation')
                         : fail('talk did not open');
     c.Overlay.clear(); G.drawUI();
-    (text().includes(who.name.toUpperCase().slice(0, 4)))
+    (text().includes(seeker.name.toUpperCase().slice(0, 4)))
       ? ok('who they are is on the screen') : fail('the talk panel is empty');
+    G.close();
+  }
 
-    // taking it on
-    G.confirm();
-    (G.quests[q.id] === 'open') ? ok('taking work on records it as owed')
-                                : fail('quest was not accepted');
-    (G.questLines().length === 1) ? ok('and the journal says what is owed')
-                                  : fail('journal does not list the task');
+  // ---- the elder: what got here by being told ----
+  if (elder && c.Tales) {
+    const Tales = c.Tales;
+    G.told = []; G.quests = {}; G.close();
+    G.talkTo(elder);
+    (G.mode === 'talk' && G.talkTale && G.talkTale.id === 'halls')
+      ? ok('the elder opens on what is under the ground')
+      : fail('elder opened on ' + (G.talkTale && G.talkTale.id));
+    c.Overlay.clear(); G.drawUI();
+    const first = text();
+    (first.includes('UNDERTHEGROUND') || first.includes('WHATISUNDER'))
+      ? ok('and the tale itself is on the screen, not a summary of it')
+      : fail('the tale is not in the panel');
+    (Quest.forNpc(elder) === null)
+      ? ok('and the elder asks nothing in return') : fail('the elder wants something');
 
-    // handing in without the goods does nothing
+    // listening records it and moves to the next
     G.confirm();
-    (G.quests[q.id] === 'open' && G.count(q.give) === 0)
-      ? ok('and nothing is paid for work not done')
-      : fail('paid out early');
+    (G.told.length === 1 && G.told[0] === 'halls')
+      ? ok('hearing one keeps it') : fail('told: ' + JSON.stringify(G.told));
+    (G.talkTale && G.talkTale.id !== 'halls')
+      ? ok('and the next one is ready') : fail('no second tale');
 
-    // with the goods, it completes and pays
-    G.talkTo(who);
-    G.give(q.item, q.need);
-    (Quest.done(q)) ? ok('having the goods finishes it') : fail('quest not satisfied');
-    G.confirm();
-    (G.quests[q.id] === 'done') ? ok('handing over closes it') : fail('did not close');
-    (G.count(q.item) === 0) ? ok('the goods change hands') : fail('goods not taken');
-    (G.count(q.give) === q.paid) ? ok(`and you are paid ${q.paid} ${q.give}`)
-                                 : fail(`paid ${G.count(q.give)}, wanted ${q.paid}`);
-    (G.questLines().length === 0) ? ok('and it leaves the journal')
-                                  : fail('finished work still listed');
-    // and it cannot be handed in twice
-    const had = G.count(q.give);
-    G.talkTo(who); G.confirm();
-    (G.count(q.give) === had) ? ok('and cannot be claimed a second time')
-                              : fail('quest paid out twice');
+    // hearing the same one twice does not double it
+    const t2 = G.talkTale;
+    G.hear(t2); G.hear(t2);
+    (G.told.filter(x => x === t2.id).length === 1)
+      ? ok('and nothing is remembered twice') : fail('a tale was recorded twice');
+
+    // all the way to the end of their memory
+    const held = Tales.forNpc(elder).length;
+    let guard = 0;
+    while (G.talkTale && guard++ < 100) G.confirm();
+    (G.told.length === held)
+      ? ok(`all ${held} of them can be heard, and then they run out`)
+      : fail(`heard ${G.told.length} of ${held}`);
+    c.Overlay.clear(); G.drawUI();
+    (text().includes('allofit') || text().includes('wholeofwhat'))
+      ? ok('and the elder says so rather than repeating')
+      : fail('the elder does not say they are done');
+    G.close();
+
+    // the record keeps them, and a save carries them
+    c.Overlay.clear(); G.open('journal'); G.drawUI();
+    (text().includes('WHATYOUHAVEBEENTOLD'))
+      ? ok('the record has a page for what you were told')
+      : fail('the journal does not list the tales');
+    G.close();
+    const snap = JSON.parse(JSON.stringify(G.snapshot()));
+    const keep = G.told.slice();
+    G.told = [];
+    G.restore(snap);
+    (JSON.stringify(G.told) === JSON.stringify(keep))
+      ? ok('and what you were told survives a save')
+      : fail('told list lost on reload');
+    G.told = [];
   }
 
   if (seeker) {

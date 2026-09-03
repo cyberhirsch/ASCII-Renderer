@@ -296,7 +296,8 @@ const Game = {
         this.cmdHistory.length = 0;
         break;
       case 'wipe':
-        this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+        this.inv.clear(); this.read = []; this.told = [];
+      this.done = false; this.used.clear();
         if (typeof localStorage !== 'undefined') {
           // this world only: another seed's digs are none of its business
           localStorage.removeItem(saveKey('ascii-save-v1'));
@@ -500,13 +501,29 @@ const Game = {
 
   // ---- people, and what they want ----
 
-  talking: null, talkQ: null, talkSay: '',
+  talking: null, talkQ: null, talkSay: '', talkTale: null,
+  told: [],            // tales heard, in the order they were heard
 
   talkTo(who) {
     this.talking = who;
     this.talkQ = Quest.forNpc(who);
     this.talkSay = '';
+    // The elder holds the tales. What they say next is the first one you
+    // have not heard, and it is picked when the conversation opens rather
+    // than when you press the key, so the panel can show it before you
+    // commit to listening.
+    this.talkTale = (typeof Tales === 'undefined') ? null
+                                                   : Tales.next(who, this.told);
     this.open('talk');
+  },
+
+  // Hearing something is the whole of it. There is nothing to carry back
+  // and nothing to hand over: you know it now, and it is in the record.
+  hear(t) {
+    if (!t || this.told.indexOf(t.id) >= 0) return;
+    this.told.push(t.id);
+    this.needSave = true;
+    this.uiDirty = true;
   },
 
   questState(q) { return q ? (this.quests[q.id] || 'none') : 'none'; },
@@ -514,6 +531,14 @@ const Game = {
   // One button does the whole conversation, because there is only ever one
   // thing to do next: take the work, hand it in, or nothing.
   talkAct() {
+    // an elder with something left to say says it, and then has the next
+    if (this.talkTale) {
+      this.hear(this.talkTale);
+      this.talkTale = Tales.next(this.talking, this.told);
+      this.talkSay = this.talkTale ? '' : '"That is the whole of what I have."';
+      this.uiDirty = true;
+      return;
+    }
     const q = this.talkQ;
     if (!q) { this.close(); return; }
     const st = this.questState(q);
@@ -538,6 +563,30 @@ const Game = {
     const who = this.talking;
     if (!who) return;
     const lines = NPC.greet(who);
+    // The elder's panel is the tale itself, not a summary of one: you are
+    // being told something, and being told it is the thing that happens.
+    if (this.talkTale) {
+      const t = this.talkTale;
+      lines.push('');
+      lines.push(t.head);
+      lines.push('');
+      for (const l of t.body) lines.push(l);
+      lines.push('');
+      lines.push('[E] hear the next   [Q] enough for now');
+      if (this.talkSay) { lines.push(''); lines.push(this.talkSay); }
+      this.panel(lines);
+      return;
+    }
+    if (who.elder) {
+      lines.push('');
+      lines.push(this.told.length
+        ? '"You have had all of it out of me."'
+        : '"There is nothing I can tell you."');
+      lines.push('');
+      lines.push('[Q] leave');
+      this.panel(lines);
+      return;
+    }
     const q = this.talkQ;
     const st = this.questState(q);
     lines.push('');
@@ -822,7 +871,8 @@ const Game = {
     }
     if (act === 'restart') {
       if (!this.menuAsk) { this.menuAsk = true; this.uiDirty = true; return; }
-      this.inv.clear(); this.read = []; this.done = false; this.used.clear();
+      this.inv.clear(); this.read = []; this.told = [];
+      this.done = false; this.used.clear();
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem(saveKey('ascii-save-v1'));
         localStorage.removeItem(saveKey('ascii-caves-v1'));
@@ -1258,8 +1308,11 @@ const Game = {
   drawJournal() {
     const lines = ['THE RECORD', ''];
     if (this.read.length === 0) {
-      lines.push('Nothing yet. Somewhere below, someone');
-      lines.push('cut their history into the stone.');
+      // "Nothing yet" used to sit above a list of twelve things you had
+      // been told, which reads as a contradiction. This page is about what
+      // was cut in stone; what was said aloud has its own below.
+      lines.push('Nothing cut in stone yet. Somewhere below,');
+      lines.push('someone carved their history into it.');
     } else {
       // Deepest last, so the panel reads the way the descent did. Different
       // halls can belong to different peoples now, so each entry carries
@@ -1276,6 +1329,18 @@ const Game = {
       lines.push(this.done
         ? 'That is as deep as anyone cut. Nobody came back up.'
         : this.objective());
+    }
+    // What got to you by being told rather than by being cut. Heads only:
+    // the whole of a tale is a panel of its own, and a record that reprints
+    // twelve of them is not a record, it is the conversation again.
+    if (this.told.length) {
+      lines.push('');
+      lines.push('WHAT YOU HAVE BEEN TOLD');
+      const e = typeof NPC === 'undefined' ? null : NPC.elder();
+      for (const id of this.told) {
+        const t = e && typeof Tales !== 'undefined' ? Tales.byId(e, id) : null;
+        if (t) lines.push('  ' + t.head.toLowerCase());
+      }
     }
     const owed = this.questLines();
     if (owed.length) {
@@ -1371,6 +1436,7 @@ const Game = {
     for (const [k, v] of this.inv) inv[k] = v;
     return {
       inv, read: this.read, done: this.done, quests: this.quests,
+      told: this.told,
       at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
                                            Player.pitch, Player.z] : null,
       t: typeof Sky !== 'undefined' ? Sky.t : null,
@@ -1382,6 +1448,7 @@ const Game = {
     this.inv.clear();
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
+    this.told = Array.isArray(s.told) ? s.told : [];
     this.quests = (s.quests && typeof s.quests === 'object') ? s.quests : {};
     this.done = !!s.done;
     this.used = new Set((s.used || []).slice(-this.USED_MAX));

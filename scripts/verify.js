@@ -245,7 +245,7 @@ cmp('render', rendDecl, rendEnt);
 const vm = require('vm');
 const modules = ['config', 'quality', 'util', 'world', 'sky', 'overlay',
   'entities', 'edits', 'removed', 'chronicle', 'assets', 'steading', 'lore',
-  'npc', 'quest', 'items', 'game', 'player',
+  'npc', 'quest', 'tales', 'items', 'game', 'player',
   'webgpu/atlas', 'webgpu/shaders', 'webgpu/gpu-renderer', 'main'];
 for (const f of modules) {
   const p = path.join(root, 'js', f + '.js');

@@ -181,7 +181,42 @@ const World = {
   // Spawn beside a cave entrance when one exists nearby: scan shaft
   // placement cells ring by ring from the origin, then stand on dry, gentle
   // ground at the rim of the first entrance found.
+  // Where a new game starts.
+  //
+  // Beside the one person in the world who remembers anything. Standing
+  // alone at a hole in the ground told you nothing and asked nothing; an
+  // elder three paces away is the whole of the introduction, and it is an
+  // introduction the chronicle wrote rather than one anybody typed.
   findSpawn() {
+    const e = (typeof NPC === 'undefined') ? null : NPC.elder();
+    if (e) {
+      const at = this.standNear(e.x, e.y, 2.2, 9);
+      if (at) return at;
+    }
+    return this.findShaftSpawn();
+  },
+
+  // Dry, gentle, walkable ground in a ring around a point - near enough to
+  // speak across, far enough not to be standing inside anybody.
+  standNear(x, y, from, to) {
+    for (let r = from; r <= to; r += 0.5) {
+      for (let a = 0; a < Math.PI * 2 - 0.01; a += Math.PI / 12) {
+        const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+        const h = terrainH(px, py);
+        if (h < CFG.SEA_LEVEL + 0.6) continue;
+        if (this.walkZ(px, py, h) === null) continue;
+        const sl = Math.abs(terrainH(px + 1, py) - h) +
+                   Math.abs(terrainH(px, py + 1) - h);
+        if (sl < 1.2) return [px, py];
+      }
+    }
+    return null;
+  },
+
+  // The old spawn, kept as the fallback: a world whose peoples have all
+  // ended has nobody to stand next to, and then a cave mouth is the best
+  // place to be put down.
+  findShaftSpawn() {
     for (let ring = 0; ring < 40; ring++) {
       for (let cy = -ring; cy <= ring; cy++) {
         for (let cx = -ring; cx <= ring; cx++) {

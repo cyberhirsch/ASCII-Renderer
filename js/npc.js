@@ -26,7 +26,16 @@ const NPC = {
     fort: ['warden', 'who watches the road'],
   },
 
-  _all: null,
+  // How old they are. This is the one thing about a living person that is
+  // invented rather than remembered - the chronicle only tracks figures,
+  // and every figure it names is dead - and it is invented for a reason.
+  // The oldest person in a world is the one who was told things by people
+  // who were told them, and word of mouth is the only way anything from
+  // before the living gets to you out loud.
+  AGE_MIN: 23, AGE_MAX: 79,
+  ELDER: ['elder', 'who remembers what nobody wrote down'],
+
+  _all: null, _elder: null,
 
   // Everybody alive in the world, in one list. Small - a dozen settlements
   // and at most three to a settlement - so it is built once and kept.
@@ -49,10 +58,13 @@ const NPC = {
         const x = site.x + Math.cos(a) * r;
         const y = site.y + Math.sin(a) * r;
         const [role, doing] = this.ROLE[site.kind] || this.ROLE.farm;
+        const age = this.AGE_MIN +
+          jsUhash((site.id * 101 + i) >>> 0, (CFG.SEED ^ 0xA6E) >>> 0) %
+          (this.AGE_MAX - this.AGE_MIN + 1);
         out.push({
           id: out.length,
           name: Chronicle.nameFor(site.people, 700 + out.length, site.id * 13 + i),
-          role, doing,
+          role, doing, age, elder: false,
           people: site.people, peopleName: p ? p.name : '?',
           site: site.id, siteName: site.name,
           x, y, z: terrainH(x, y),
@@ -62,9 +74,22 @@ const NPC = {
         });
       }
     }
+    // The eldest, and there is exactly one. Ties break on the lower id so
+    // the same person holds the tales on every run of a seed.
+    let old = null;
+    for (const n of out) if (!old || n.age > old.age) old = n;
+    if (old) {
+      old.elder = true;
+      old.role = this.ELDER[0];
+      old.doing = this.ELDER[1];
+      this._elder = old;
+    }
     this._all = out;
     return out;
   },
+
+  // The one who remembers. Null in a world whose peoples have all ended.
+  elder() { this.all(); return this._elder; },
 
   // The nearest person within reach, or null.
   near(x, y, maxD) {
@@ -103,6 +128,11 @@ const NPC = {
     const out = [(n.name + ', ' + n.doing).toUpperCase().slice(0, this.WIDTH), ''];
     out.push('"We are ' + n.peopleName + '. My people have held this');
     out.push('ground since the ' + Lore.ord(p.rise) + ' year.');
+    if (n.elder) {
+      out.push('');
+      out.push('I have ' + n.age + ' years on me, and there is nobody');
+      out.push('older left to ask."');
+    }
     // one real event from their own record, so nobody says anything that
     // did not happen
     const mine = [];
