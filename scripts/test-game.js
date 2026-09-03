@@ -1840,23 +1840,32 @@ if (c.Player && c.Lore && c.Steading) {
   }
 
   // ---- npc ----
-  // There is no creature system yet, so this has to say so rather than
-  // fail quietly - and it has to start working on its own once there is.
-  c.Entities && (c.Entities.list = []);
-  run('teleport npc');
-  (last().includes('empty') || last().includes('nobody'))
-    ? ok('teleport npc says plainly that nobody is alive yet')
-    : fail('npc teleport gave: ' + last());
-
-  if (c.Entities) {
-    const gx = 900, gy = -400;
-    c.Entities.list = [{ x: gx, y: gy, heading: 0, kind: 0 }];
+  // Written a phase before there were any people and left pointing at the
+  // creature system, so it reported an empty world to somebody standing in
+  // a village. It walks to the nearest of NPC.all() now.
+  if (c.NPC && c.NPC.all().length) {
+    const folk = c.NPC.all();
     P.x = 0; P.y = 0; P.z = c.terrainH(0, 0);
     run('teleport npc');
-    const d = Math.hypot(P.x - gx, P.y - gy);
-    (d < 20) ? ok(`and takes you to one the moment there is one (${d.toFixed(1)}u)`)
-             : fail(`npc teleport landed ${d.toFixed(0)}u away`);
-    c.Entities.list = [];
+    let bd = Infinity, who = null;
+    for (const n of folk) {
+      const d = Math.hypot(n.x - P.x, n.y - P.y);
+      if (d < bd) { bd = d; who = n; }
+    }
+    (bd < 20) ? ok(`teleport npc lands ${bd.toFixed(1)}u from ${who.name}`)
+              : fail(`npc teleport landed ${bd.toFixed(0)}u from anybody`);
+    // near enough that E reaches them, far enough not to be inside them
+    (bd > 0.9) ? ok('and beside them rather than on top of them')
+               : fail(`landed ${bd.toFixed(2)}u away - inside the person`);
+    // and pointed at them, like the building teleport
+    const want = Math.atan2(who.y - P.y, who.x - P.x);
+    const off = Math.abs(((P.angle - want + Math.PI) % (Math.PI * 2) + Math.PI * 2)
+                         % (Math.PI * 2) - Math.PI);
+    (off < 0.2) ? ok('facing the person it brought you to')
+                : fail(`facing ${off.toFixed(2)} rad off the person`);
+    // it names who it took you to, so the toast is worth reading
+    (G.toastMsg.includes(who.name)) ? ok('and says who they are')
+                                    : fail('toast does not name them: ' + G.toastMsg);
   }
   G.devMode = false;
   G.close();

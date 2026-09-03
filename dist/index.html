@@ -7353,23 +7353,29 @@ const Game = {
                  ' at ' + site.name);
   },
 
+  // The nearest person. This command was written a phase before there were
+  // any, and went on pointing at Entities.list - the creature system, still
+  // unbuilt - after the settlements filled with people, so it reported an
+  // empty world to somebody standing next to twenty-one of them.
   tpNpc() {
-    const live = (typeof Entities !== 'undefined' && Entities.list) ? Entities.list : [];
+    const live = (typeof NPC === 'undefined') ? [] : NPC.all();
     if (!live.length) {
-      // Said plainly rather than failing silently: there is no creature
-      // system yet, so this is not a bug in the command.
-      this.cmdHistory.push('nobody is alive in this world yet - Entities.list is');
-      this.cmdHistory.push('empty until the creature phase lands');
+      // Not a fault in the command: a world whose last people have all
+      // ended has nobody left standing in it to walk to.
+      this.cmdHistory.push('nobody is left standing in this world - every');
+      this.cmdHistory.push('people in the record has ended');
       return;
     }
     let best = null, bd = Infinity;
-    for (const e of live) {
-      const d = (e.x - Player.x) ** 2 + (e.y - Player.y) ** 2;
-      if (d < bd) { bd = d; best = e; }
+    for (const n of live) {
+      const d = (n.x - Player.x) ** 2 + (n.y - Player.y) ** 2;
+      if (d < bd) { bd = d; best = n; }
     }
-    this.standBy(best.x, best.y, 3, true);
-    this.toast('nearest ' + (best.kind === undefined ? 'creature' : 'kind ' + best.kind) +
-               '  (' + Math.round(Math.sqrt(bd)) + 'u)');
+    // Close enough to speak to without being inside them: E reaches 4.5
+    // units, and standBy takes the first place there is room to stand.
+    this.standBy(best.x, best.y, 2, true);
+    this.toast(best.name + ', ' + best.role + '  (' +
+               Math.round(Math.sqrt(bd)) + 'u away)  -  E to speak');
   },
 
   // ---- the menu ----
