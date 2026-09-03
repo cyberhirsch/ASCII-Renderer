@@ -28,6 +28,8 @@ jobs:
         run: node scripts/test-edits.js
       - name: gameplay
         run: node scripts/test-game.js
+      - name: chronicle
+        run: node scripts/test-chronicle.js
       - name: assets
         run: node scripts/test-assets.js
       - name: steadings

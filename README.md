@@ -48,7 +48,9 @@ wade through, slowly; deeper than that your feet leave the bed and you float
 with your eyes just clear of the surface. There is no diving — below the
 water plane the renderer has nothing to show you but sky — and no drowning.
 The heightfield never goes below zero, so the sea is nowhere deeper than
-2.4 units and the bed is always in sight under you.
+2.4 units and the bed is always in sight under you. Nothing grows out of it
+either: a tree is placed only if the ground under its own anchor is dry, so
+the woods stop at the waterline instead of wading in.
 
 The last of the six peoples has not ended. You can walk into one of their
 settlements and speak to somebody — **E** on a person. What they say is
@@ -56,6 +58,18 @@ their own people's record, and what they ask of you comes out of it too:
 materials their place is short of, or a ruin or a battlefield the record
 names, given as a bearing and a distance and nothing else. **J** lists what
 is owed.
+
+A new game opens on black. First the myth — what they say came before
+anybody was counting, generated from the seed like everything else — and then
+the record itself, run as a timelapse rather than listed: the survey grid the
+simulation ran on, with settlements appearing, roads knitting them together
+and going dark again, six thousand years in about twelve seconds. The
+captions come off the peoples' own logs, and the roll of the six lands over
+the finished map at the end. Any key skips it, and a saved game never sees
+it. The map is deliberately flat, no relief: the survey samples the ground
+every 128 units and this terrain varies at about forty, so neighbouring
+samples are uncorrelated (measured at r = 0.002) and a height ramp drawn from
+them would be noise rather than hills.
 
 You spawn beside a cave entrance — a round pit with a spiral stair. Walk in.
 
