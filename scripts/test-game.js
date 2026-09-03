@@ -1930,8 +1930,9 @@ if (c.NPC && c.Quest) {
     (first.includes('UNDERTHEGROUND') || first.includes('WHATISUNDER'))
       ? ok('and the tale itself is on the screen, not a summary of it')
       : fail('the tale is not in the panel');
-    (Quest.forNpc(elder) === null)
-      ? ok('and the elder asks nothing in return') : fail('the elder wants something');
+    (Quest.chain(elder).length > 0)
+      ? ok('and he has his own chain, about his own memory')
+      : fail('the elder has nothing to ask');
 
     // listening records it and moves to the next
     G.confirm();
@@ -1946,17 +1947,33 @@ if (c.NPC && c.Quest) {
     (G.told.filter(x => x === t2.id).length === 1)
       ? ok('and nothing is remembered twice') : fail('a tale was recorded twice');
 
-    // all the way to the end of their memory
-    const held = Tales.forNpc(elder).length;
+    // Three stories and he wants something done. This is the gate: no more
+    // telling until the step he asked for is finished.
+    while (G.talkTale) G.confirm();
+    (G.told.length === Quest.ELDER_GATE)
+      ? ok(`he stops after ${Quest.ELDER_GATE} and asks for something`)
+      : fail(`told ${G.told.length} before stopping`);
+    (G.talkQ && Quest.state(G.talkQ.id) === 'none')
+      ? ok('and what he stops for is the next link of his own chain')
+      : fail('nothing was asked at the gate');
+    G.talkTo(elder);
+    (G.talkTale === null)
+      ? ok('and coming back gets the same question, not another story')
+      : fail('the gate let a story through');
+
+    // satisfy every step by fiat and the rest of his memory opens up
     let guard = 0;
-    while (G.talkTale && guard++ < 100) G.confirm();
+    while (guard++ < 40) {
+      const q = Quest.current(elder);
+      if (q) G.quests[q.id] = 'done';
+      G.talkTo(elder);
+      if (!G.talkTale) break;
+      while (G.talkTale) G.confirm();
+    }
+    const held = Tales.forNpc(elder).length;
     (G.told.length === held)
-      ? ok(`all ${held} of them can be heard, and then they run out`)
+      ? ok(`all ${held} come out once his chain is satisfied`)
       : fail(`heard ${G.told.length} of ${held}`);
-    c.Overlay.clear(); G.drawUI();
-    (text().includes('allofit') || text().includes('wholeofwhat'))
-      ? ok('and the elder says so rather than repeating')
-      : fail('the elder does not say they are done');
     G.close();
 
     // the record keeps them, and a save carries them

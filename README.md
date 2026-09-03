@@ -56,16 +56,33 @@ the woods stop at the waterline instead of wading in.
 The last of the six peoples has not ended, and **you start beside the oldest
 of them**. One person in the world remembers what nobody wrote down: talk to
 the elder — **E** on a person — and they tell you one thing at a time, out of
-the same chronicle the walls carry. Where the record is cut and which way the
-nearest way down lies. A thing somebody made four thousand years ago, who
-made it, who carried it, and the ground it is lying under now. A person, what
-they did, and where they were buried. A field, who met on it and who had the
-day. Twelve of them, and **J** keeps every one you have heard.
+the same chronicle the walls carry.
 
-Everybody else works, and what they ask is a journey: a ruin or a battlefield
-their own record names, given as a bearing and a distance and nothing else.
+**And they have it wrong.** What an elder says is graded by how far back it
+goes. Inside living memory it is right. A few centuries back it is right in
+the main. Past that it is myth: the years have rounded to the century, the
+count of fields won has grown sevenfold, a death of old age has become a
+wound taken on a field, and a thing has been handed to whichever maker the
+teller has heard of. Some of it is simply lost — a name with nothing hanging
+off it. He tells you which of the four he is giving you, and where a myth is
+concerned he has a direction and no distance.
+
+The walls have the other version. That gap is the game: you are told a story,
+you go down and read what was cut at the time, and the two do not agree.
+
+**Everybody has a chain of two to four things to ask, and hands over one link
+at a time** — the next is not offered until the one in front of it is done,
+so a person you spoke to in the first hour has something else to say in the
+fourth. Three kinds of step, all of them things the game can actually check:
+stand in a place the record names, read what was cut at a given depth, or go
+and hear a particular story out of the elder. That last one is what makes the
+chains interlock — one person sends you to another for the half they do not
+have. The elder's own chain is about his own memory: three stories, then
+something to go and check, and no more stories until it is checked.
+
 Nobody asks you to fetch materials — there was a fetch-quest kind and it is
-gone, because it asked nothing of the history the world is made of.
+gone, because it asked nothing of the history the world is made of. **J**
+lists what is owed, whose chain it belongs to, and how far along it is.
 
 Nothing tells you what to do. The top line is empty until you have read
 something off a wall or somebody has asked you for something, and there is

@@ -103,32 +103,94 @@ const all = NPC.all();
                 : fail(`${years} lines quote a year outside their people's life`);
 }
 
-// ---- 5. what they want ----
-// One kind, and it is a journey. The fetch-me-five-wood quest is gone on
-// purpose: it asked nothing of the history the chronicle built, and this
-// checks it has not crept back.
+// ---- 5. the chains ----
+// Everybody has one, nobody hands over more than one link of it at a time,
+// and the fetch-me-five-wood step is gone for good.
 {
-  let none = 0, wide = 0, wrongKind = 0;
-  const kinds = {};
+  let wide = 0, empty = 0, badKind = 0, tooFar = 0, dupIds = 0;
+  const kinds = {}, lens = {};
+  const ids = new Set();
   for (const n of all) {
-    const q = Quest.forNpc(n);
-    if (!q) { none++; continue; }
-    kinds[q.kind] = (kinds[q.kind] || 0) + 1;
-    if (q.kind !== 'seek') wrongKind++;
-    for (const l of q.ask.concat([q.task])) if (l.length > NPC.WIDTH) wide++;
+    const ch = Quest.chain(n);
+    if (!ch.length) empty++;
+    lens[ch.length] = (lens[ch.length] || 0) + 1;
+    for (const q of ch) {
+      kinds[q.kind] = (kinds[q.kind] || 0) + 1;
+      if (['seek', 'read', 'ask'].indexOf(q.kind) < 0) badKind++;
+      if (ids.has(q.id)) dupIds++;
+      ids.add(q.id);
+      for (const l of q.ask.concat([q.task])) if (l.length > NPC.WIDTH) wide++;
+      if (q.kind === 'seek') {
+        const d = Math.hypot(q.x - n.x, q.y - n.y);
+        if (d > Quest.SEEK_MAX || d < Quest.SEEK_MIN) tooFar++;
+      }
+    }
   }
-  (wrongKind === 0) ? ok(`every ask is a journey (${JSON.stringify(kinds)})`)
-                    : fail(`${wrongKind} asks are not 'seek'`);
+  (empty === 0) ? ok(`everybody has a chain (lengths ${JSON.stringify(lens)})`)
+                : fail(`${empty} people have nothing to ask`);
+  (badKind === 0) ? ok(`and every step is one the game can check (${JSON.stringify(kinds)})`)
+                  : fail(`${badKind} steps are of an unknown kind`);
   (typeof Quest.bring === 'undefined' && typeof Quest.WANT === 'undefined')
-    ? ok('and there is no fetch-quest machinery left to fall back on')
+    ? ok('and no fetch-quest machinery is left to fall back on')
     : fail('Quest still carries bring/WANT');
-  (wide === 0) ? ok('and every word of it fits the panel')
+  (wide === 0) ? ok('and every word of every step fits the panel')
                : fail(`${wide} quest lines are too wide`);
-  // The elder is the one who asks nothing: they deal in what is remembered.
-  const askless = all.filter(n => !Quest.forNpc(n));
-  (askless.length >= 1 && askless.every(n => n.elder || !Quest.aPlace(S, n)))
-    ? ok(`${askless.length} ask nothing, and each has a reason to`)
-    : fail(`${none} people want nothing and should`);
+  (dupIds === 0) ? ok('and no two steps anywhere share an id')
+                 : fail(`${dupIds} duplicate step ids`);
+  (tooFar === 0) ? ok('and every journey asked for is a journey, not a march')
+                 : fail(`${tooFar} seek steps are out of range`);
+  // more than one kind, or it is not a chain, it is a repeat
+  (Object.keys(kinds).length >= 3)
+    ? ok('the chains mix going, reading and asking')
+    : fail(`only ${Object.keys(kinds).length} kinds across every chain`);
+}
+
+// ---- 5a. one link at a time ----
+{
+  const n = all.find(x => Quest.chain(x).length >= 3);
+  if (!n) { fail('nobody has a chain long enough to test'); }
+  else {
+    const ch = Quest.chain(n);
+    // Quest reads a step's state through Quest.state, which goes to Game
+    // when there is a game. There is not one in this suite, so the reader
+    // is swapped for a plain map and the chain can be walked by hand.
+    const marks = {};
+    const realState = Quest.state;
+    Quest.state = id => marks[id] || 'none';
+    (Quest.at(n) === 0 && Quest.current(n).id === ch[0].id)
+      ? ok('a chain starts on its first link') : fail('chain does not start at 0');
+    marks[ch[0].id] = 'open';
+    (Quest.current(n).id === ch[0].id)
+      ? ok('and taking one on does not advance it')
+      : fail('an open step advanced the chain');
+    marks[ch[0].id] = 'done';
+    (Quest.current(n).id === ch[1].id)
+      ? ok('finishing one hands over the next')
+      : fail('the chain did not advance');
+    for (const q of ch) marks[q.id] = 'done';
+    (Quest.current(n) === null && Quest.at(n) === ch.length)
+      ? ok('and the chain runs out rather than looping')
+      : fail('the chain did not end');
+    Quest.state = realState;
+  }
+}
+
+// ---- 5b. the chains interlock ----
+{
+  const e = NPC.elder();
+  let asks = 0, atElder = 0;
+  for (const n of all) {
+    for (const q of Quest.chain(n)) {
+      if (q.kind !== 'ask') continue;
+      asks++;
+      if (e && q.who === e.id) atElder++;
+      if (!Tales.byId(e, q.tale)) fail(`an ask step points at a tale ${q.tale} nobody holds`);
+    }
+  }
+  (asks > 0) ? ok(`${asks} steps send you to somebody else for the answer`)
+             : fail('no chain refers to another person');
+  (asks === atElder) ? ok('and every one of them names the person who has it')
+                     : fail(`${asks - atElder} ask steps point at nobody`);
 }
 
 // ---- 5b. the elder, and what they remember ----
@@ -141,8 +203,13 @@ const all = NPC.all();
       ? ok('and nobody living is older') : fail('somebody is older than the elder');
     (NPC.all().filter(n => n.elder).length === 1)
       ? ok('and there is exactly one of them') : fail('more than one elder');
-    (Quest.forNpc(e) === null)
-      ? ok('the elder asks nothing of you') : fail('the elder is handing out errands');
+    (Quest.chain(e).length > 0)
+      ? ok('the elder asks things too, and they are about his own memory')
+      : fail('the elder has no chain');
+    const doubts = Quest.chain(e).filter(q => String(q.key).startsWith('doubt'));
+    (doubts.length > 0)
+      ? ok(`${doubts.length} of them send you to check a story he is unsure of`)
+      : fail('the elder never doubts himself');
 
     const tales = Tales.forNpc(e);
     (tales.length >= 6) ? ok(`and holds ${tales.length} tales`)

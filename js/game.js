@@ -504,16 +504,20 @@ const Game = {
   talking: null, talkQ: null, talkSay: '', talkTale: null,
   told: [],            // tales heard, in the order they were heard
 
+  // What this person has for you right now. Everybody carries a chain and
+  // is only ever holding one link of it out; the elder also has stories,
+  // and the two interleave - he stops telling until you have gone and done
+  // the thing he last asked.
   talkTo(who) {
     this.talking = who;
-    this.talkQ = Quest.forNpc(who);
     this.talkSay = '';
-    // The elder holds the tales. What they say next is the first one you
-    // have not heard, and it is picked when the conversation opens rather
-    // than when you press the key, so the panel can show it before you
-    // commit to listening.
-    this.talkTale = (typeof Tales === 'undefined') ? null
-                                                   : Tales.next(who, this.told);
+    if (who.elder && typeof Tales !== 'undefined') {
+      this.talkQ = Quest.elderStep(who, this.told);
+      this.talkTale = this.talkQ ? null : Tales.next(who, this.told);
+    } else {
+      this.talkQ = Quest.current(who);
+      this.talkTale = null;
+    }
     this.open('talk');
   },
 
@@ -531,11 +535,16 @@ const Game = {
   // One button does the whole conversation, because there is only ever one
   // thing to do next: take the work, hand it in, or nothing.
   talkAct() {
-    // an elder with something left to say says it, and then has the next
+    // Hearing something out of the elder. Working out what comes next goes
+    // back through talkTo, because what comes next may not be another
+    // story - three of them and he wants something done.
     if (this.talkTale) {
-      this.hear(this.talkTale);
-      this.talkTale = Tales.next(this.talking, this.told);
-      this.talkSay = this.talkTale ? '' : '"That is the whole of what I have."';
+      const heard = this.talkTale;
+      this.hear(heard);
+      this.talkTo(this.talking);
+      if (!this.talkTale && !this.talkQ) {
+        this.talkSay = '"That is the whole of what I have."';
+      }
       this.uiDirty = true;
       return;
     }
@@ -552,7 +561,11 @@ const Game = {
     if (st === 'open' && Quest.done(q)) {
       this.quests[q.id] = 'done';
       this.needSave = true;
-      this.talkSay = Quest.hand(q, this.talking);
+      const paid = Quest.hand(q, this.talking);
+      // the chain moves on, so the same conversation now holds the next
+      // link rather than ending
+      this.talkTo(this.talking);
+      this.talkSay = paid;
       this.uiDirty = true;
       return;
     }
@@ -577,7 +590,10 @@ const Game = {
       this.panel(lines);
       return;
     }
-    if (who.elder) {
+    // Out of stories AND out of asks. This has to test both: with only the
+    // tale checked, the elder announced he had told you everything the
+    // moment he stopped to ask for something, and the question never showed.
+    if (who.elder && !this.talkQ) {
       lines.push('');
       lines.push(this.told.length
         ? '"You have had all of it out of me."'
@@ -595,8 +611,12 @@ const Game = {
       lines.push('');
       lines.push('[E] take it on   [Q] walk away');
     } else if (q && st === 'open') {
-      lines.push(Quest.done(q) ? '"You have it. Give it here."'
-                               : '"' + q.task + '."');
+      // The reminder is not the task string in quotation marks - that reads
+      // as a to-do list wearing a voice. He says a sentence; the task sits
+      // under it as the note it is.
+      lines.push(Quest.done(q) ? '"That is done. Tell me."'
+                               : '"Not yet, then."');
+      if (!Quest.done(q)) lines.push('  ' + q.task);
       lines.push('');
       lines.push(Quest.done(q) ? '[E] hand it over   [Q] not yet'
                                : '[Q] leave');
@@ -612,14 +632,18 @@ const Game = {
   },
 
   // What is owed and to whom, on the journal's back page.
+  // What is owed, read off the people rather than off the saved ids: a
+  // chain's state is which link you are on, and the person is the only
+  // thing that knows how long their chain is.
   questLines() {
     const out = [];
     if (typeof NPC === 'undefined' || typeof Quest === 'undefined') return out;
-    for (const id of Object.keys(this.quests)) {
-      if (this.quests[id] !== 'open') continue;
-      const n = NPC.byId(Number(id.slice(1)));
-      const q = n ? Quest.forNpc(n) : null;
-      if (q) out.push('  ' + q.task + (Quest.done(q) ? '   - go back' : ''));
+    for (const n of NPC.all()) {
+      const q = Quest.current(n);
+      if (!q || this.quests[q.id] !== 'open') continue;
+      const c = Quest.chain(n);
+      out.push('  ' + q.task + (Quest.done(q) ? '   - go back' : ''));
+      out.push('      ' + n.name + ', ' + (Quest.at(n) + 1) + ' of ' + c.length);
     }
     return out;
   },
