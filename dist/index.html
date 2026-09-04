@@ -6507,8 +6507,8 @@ const Quest = {
     // was cut under it, go and ask the old one what is said about it, then
     // go and stand where the two of them disagree.
     const builders = n.elder
-      ? [this.stepDoubt, this.stepRead, this.stepPlace, this.stepDeep]
-      : [this.stepPlace, this.stepRead, this.stepAsk, this.stepDeep];
+      ? [this.stepDoubt, this.stepRead, this.stepLift, this.stepDeep]
+      : [this.stepPlace, this.stepRead, this.stepAsk, this.stepLift, this.stepDeep];
     for (const make of builders) {
       if (steps.length >= want) break;
       const st = make.call(this, S, n, steps.length, used);
@@ -6537,11 +6537,15 @@ const Quest = {
     return Game.quests[id] || 'none';
   },
 
-  // How far along you are: the first step that is not marked done.
+  // How far along you are: the first step that is not marked done. A step
+  // you finished by keeping the thing instead of handing it over closes the
+  // chain where it stands - they asked you for one thing and you said no.
   at(n) {
     const c = this.chain(n);
     for (let i = 0; i < c.length; i++) {
-      if (this.state(c[i].id) !== 'done') return i;
+      const st = this.state(c[i].id);
+      if (st === 'kept') return c.length;
+      if (st !== 'done') return i;
     }
     return c.length;
   },
@@ -6688,6 +6692,42 @@ const Quest = {
     };
   },
 
+  // Go and get a named thing out of the ground. This is the step the whole
+  // apparatus was building towards: the chronicle made the object, gave it
+  // a maker and a chain of owners, and put it in a grave four thousand
+  // years ago, and now somebody wants it in their hands. Bounded like every
+  // other journey, and only ever pointed at something still down there.
+  stepLift(S, n, i, used) {
+    if (typeof Relic === 'undefined') return null;
+    const opts = [];
+    for (const r of Relic.all()) {
+      if (used && used.has('relic' + r.art)) continue;
+      const d = Math.hypot(r.x - n.x, r.y - n.y);
+      if (d < this.SEEK_MIN || d > this.SEEK_MAX) continue;
+      if (r.name.length > 44) continue;      // it has to fit on a wall of text
+      opts.push(r);
+    }
+    if (!opts.length) return null;
+    const r = opts[jsUhash((n.id * 67 + i) >>> 0, 88) % opts.length];
+    const way = this.bearing(r.x - n.x, r.y - n.y);
+    const how = r.how === 'battle' ? 'It went down on a field'
+                                   : 'It went into the ground with the dead';
+    return {
+      kind: 'lift', npc: n.id, key: 'relic' + r.art, art: r.art,
+      x: r.x, y: r.y, name: r.name,
+      ask: this.wrap('"' + this.upper(r.name) + '. ' + how + ' in the ' +
+        Lore.ord(r.t) + ' year, and it is still there. It lies ' + way +
+        ' of here, ' + Math.round(Math.hypot(r.x - n.x, r.y - n.y) / 10) +
+        ' leagues. Take a shovel. It will not be deep."'),
+      task: ('dig up ' + r.name + ', ' + way + ' of ' + n.siteName)
+              .slice(0, NPC.WIDTH),
+      pay: ['"You actually went and got it."'],
+      keep: ['"Then it is yours. I would have liked to hold it."'],
+    };
+  },
+
+  upper(s) { return s.charAt(0).toUpperCase() + s.slice(1); },
+
   // The last step of an elder's own chain, and the point of the whole
   // apparatus: he knows one of his own stories has drifted, and sends you
   // to the ground it happened on to see for yourself.
@@ -6782,12 +6822,27 @@ const Quest = {
       return false;
     }
     if (q.kind === 'ask') return (Game.told || []).indexOf(q.tale) >= 0;
+    if (q.kind === 'lift') return Game.count(Relic.itemId(q.art)) > 0;
     return false;
   },
 
   hand(q, n) {
+    if (q.kind === 'lift') {
+      // it changes hands, and they are the ones holding it now
+      Game.take(Relic.itemId(q.art), 1);
+      Game.give('gem', 2);
+      return (q.pay ? q.pay[0] : '"Good."') + ' (+2 ' + ITEMS.gem.name + ')';
+    }
     Game.give('gem', 1);
     return (q.pay ? q.pay[0] : '"Good."') + ' (+1 ' + ITEMS.gem.name + ')';
+  },
+
+  // The other answer. You dug it up; nobody can make you give it over. The
+  // thing stays in your hands and that person stops asking you for things -
+  // which is the cost, and it is a real one, because a chain is the only
+  // way anybody in this world tells you anything.
+  keep(q, n) {
+    return q.keep ? q.keep[0] : '"Keep it, then."';
   },
 };
 </script>
@@ -7213,6 +7268,144 @@ const Tales = {
 };
 </script>
 <script>
+// ---- js/relic.js ----
+// The named things, and getting them out of the ground.
+//
+// The chronicle makes two hundred objects over six thousand years, gives
+// each one a maker, a chain of owners and a reason to be remembered, and
+// then puts it somewhere: into a grave with whoever owned it, or face down
+// on the field it was dropped on. Until now that was a fact you could only
+// be told. This is the part where you go and dig it up.
+//
+// They are shallow. Whoever buried them buried them by hand, and the ground
+// has come up over them since rather than swallowed them - so a shovel and
+// the right patch of soil is the whole of the tooling. No excavation, no
+// depth to guess at: stand on it and dig.
+//
+// Nothing here is stored either. Where a thing lies is its own record's
+// `rest` field, which the tales already read to tell you about it, so the
+// story you were told and the hole you dig are reading the same number.
+const Relic = {
+  REACH: 14,     // dig this near a resting place and it comes up. The same
+                 // radius a quest counts as having arrived somewhere, so
+                 // "you are there" means one thing everywhere in the game.
+  SENSE: 40,     // and examine this near it, and the ground says so
+
+  _sites: null, _of: null,
+
+  // Every resting place in the world, in world units. Graves cluster - a
+  // people buries its dead together - so several things share a spot and
+  // one hole gives them up one at a time.
+  all() {
+    const S = Lore.init();
+    if (this._sites && this._of === S) return this._sites;
+    const out = [];
+    for (const a of S.artifacts) {
+      if (!a.rest) continue;
+      out.push({
+        art: a.id,
+        x: Chronicle.wx(a.rest.i), y: Chronicle.wy(a.rest.j),
+        how: a.rest.how, t: a.rest.t, name: a.name,
+        cls: a.cls, mat: a.mat,
+      });
+    }
+    this._sites = out;
+    this._of = S;
+    return out;
+  },
+
+  byArt(id) {
+    for (const r of this.all()) if (r.art === id) return r;
+    return null;
+  },
+
+  // What is still in the ground within `r` of a point, nearest first. What
+  // has been lifted is gone: the world does not put it back.
+  near(x, y, r) {
+    const reach = r === undefined ? this.REACH : r;
+    const lifted = (typeof Game === 'undefined') ? [] : (Game.lifted || []);
+    let best = null, bd = reach * reach;
+    for (const s of this.all()) {
+      if (lifted.indexOf(s.art) >= 0) continue;
+      const d = (s.x - x) ** 2 + (s.y - y) ** 2;
+      if (d < bd) { bd = d; best = s; }
+    }
+    return best;
+  },
+
+  // How many are left in one spot, so a hole can say there is more in it.
+  countAt(x, y, r) {
+    const reach = r === undefined ? this.REACH : r;
+    const lifted = (typeof Game === 'undefined') ? [] : (Game.lifted || []);
+    let n = 0;
+    for (const s of this.all()) {
+      if (lifted.indexOf(s.art) >= 0) continue;
+      if ((s.x - x) ** 2 + (s.y - y) ** 2 < reach * reach) n++;
+    }
+    return n;
+  },
+
+  // ---- carrying one ----
+
+  // A relic is not a stack of stone, it is one object with a history, so it
+  // needs an identity in an inventory that otherwise counts things. The id
+  // carries the artifact number and everything else is looked up from the
+  // record - nothing about a thing you are holding is copied anywhere.
+  itemId(art) { return 'relic:' + art; },
+  artOf(itemId) {
+    const m = /^relic:(\d+)$/.exec(String(itemId));
+    return m ? Number(m[1]) : -1;
+  },
+  isRelic(itemId) { return this.artOf(itemId) >= 0; },
+
+  art(itemId) {
+    const S = Lore.init();
+    const i = this.artOf(itemId);
+    return i >= 0 && S.artifacts[i] ? S.artifacts[i] : null;
+  },
+
+  name(itemId) {
+    const a = this.art(itemId);
+    return a ? a.name : String(itemId);
+  },
+
+  // What examining one in your own hands says. Everything on these lines is
+  // the record's: what it is, who made it, and why it is remembered.
+  describe(itemId) {
+    const a = this.art(itemId);
+    if (!a) return ['', ''];
+    const S = Lore.S;
+    const maker = a.madeBy !== null && S.figures[a.madeBy] ? S.figures[a.madeBy].name : null;
+    const line = a.mat + ' ' + a.kind + ', made in the ' + Lore.ord(a.made) +
+                 ' year' + (maker ? ' by ' + maker : '') + '.';
+    return [a.name, line, a.title ? 'The one ' + a.title + '.' : ''];
+  },
+
+  // ---- what the ground says ----
+
+  // Examining the soil over one. Not a marker and not a glow: the ground
+  // reads wrong, the way it does over anything anybody ever dug.
+  ground(x, y) {
+    const s = this.near(x, y, this.SENSE);
+    if (!s) return null;
+    const d = Math.hypot(s.x - x, s.y - y);
+    const close = d < this.REACH;
+    return {
+      site: s, dist: d, close,
+      lines: close
+        ? ['DISTURBED SOIL',
+           'Turned over once, a long time ago, and',
+           'never packed back down. Something is',
+           'under this.']
+        : ['OLD GROUND',
+           'The soil here lies in the wrong order.',
+           'Somebody worked it, and not recently.',
+           'It reads strongest ' + Quest.bearing(s.x - x, s.y - y) + ' of here.'],
+    };
+  },
+};
+</script>
+<script>
 // ---- js/items.js ----
 // Item, recipe, and tree-species definitions. Data only - the logic that
 // gives, takes, crafts, and examines lives in js/game.js.
@@ -7333,6 +7526,14 @@ const Game = {
 
   count(id) { return this.inv.get(id) || 0; },
 
+  // What to call something you are carrying. Everything in ITEMS is a kind
+  // of thing and has a name in the table; a relic is ONE thing out of two
+  // hundred and gets its name off the record instead.
+  itemName(id) {
+    if (typeof Relic !== 'undefined' && Relic.isRelic(id)) return Relic.name(id);
+    return (ITEMS[id] || { name: id }).name;
+  },
+
   give(id, n) {
     this.inv.set(id, this.count(id) + n);
     this.needSave = true;
@@ -7377,10 +7578,28 @@ const Game = {
   // Returns the scoop radius to carve, or 0 when the right tool is missing
   // (a toast explaining why is already queued). Pays out whatever the
   // material yields. Soil moves in bigger bites than rock does.
+  // Anything the ground gives up that is not the ground. Checked before the
+  // material is, because what is buried here is the reason to be digging.
+  // Shallow on purpose: whoever put it here put it here by hand.
+  liftFromGround(x, y) {
+    if (typeof Relic === 'undefined') return false;
+    const s = Relic.near(x, y, Relic.REACH);
+    if (!s) return false;
+    if (!this.count('shovel')) { this.toast('there is something here - you need a shovel'); return true; }
+    this.lifted.push(s.art);
+    this.give(Relic.itemId(s.art), 1);
+    this.needSave = true;
+    const left = Relic.countAt(x, y, Relic.REACH);
+    this.toast(s.name + ' comes up out of the soil' +
+               (left ? '  (something else is down there)' : ''));
+    return true;
+  },
+
   digAt(x, y, z) {
     const mat = matAt(x, y, z, terrainH(x, y));
     if (mat === MATS.DIRT) {
       if (!this.count('shovel')) { this.toast('soil - you need a shovel'); return 0; }
+      if (this.liftFromGround(x, y)) return 0;   // the hole gave up something
       return CFG.DIG_R * 1.4;
     }
     const need = this.needFor(mat, x, y, z);
@@ -7397,7 +7616,7 @@ const Game = {
     } else if (mat === MATS.ORE) {
       const id = oreItem(x, y, z);
       this.give(id, 1);
-      this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
+      this.toast('+1 ' + this.itemName(id) + ' (' + this.count(id) + ')');
     } else {
       this.give('stone', 1);
       this.toast('+1 stone (' + this.count('stone') + ')');
@@ -7569,8 +7788,8 @@ const Game = {
         this.cmdHistory.length = 0;
         break;
       case 'wipe':
-        this.inv.clear(); this.read = []; this.told = [];
-      this.done = false; this.used.clear();
+        this.inv.clear(); this.read = []; this.told = []; this.lifted = [];
+        this.done = false; this.used.clear();
         if (typeof localStorage !== 'undefined') {
           // this world only: another seed's digs are none of its business
           localStorage.removeItem(saveKey('ascii-save-v1'));
@@ -7624,6 +7843,9 @@ const Game = {
       this.cursor++; this.uiDirty = true; return true;
     }
     if (code === 'KeyE' || code === 'Enter') { this.confirm(); return true; }
+    // Keeping what you dug up is a different answer, not a different
+    // cursor position, so it gets a key rather than a menu row.
+    if (code === 'KeyK' && this.mode === 'talk') { this.talkKeep(); return true; }
     return true;   // swallow everything else while a panel is open
   },
 
@@ -7728,7 +7950,7 @@ const Game = {
         (has ? '' : '  (needs ' + this.PICK_NAME[need] + ')'), () => {
           if (!has) { this.toast('you need ' + this.PICK_NAME[need] + ' for that'); return; }
           this.give(id, 1);
-          this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
+          this.toast('+1 ' + this.itemName(id) + ' (' + this.count(id) + ')');
         });
     } else if (t.kind === 'stone') {
       acts.push({ label: 'pick up  (+1 stone)', fn: () => {
@@ -7769,6 +7991,21 @@ const Game = {
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
+    // Anything the ground is hiding, whatever the ground is made of. The
+    // spade is the only tool involved: these were buried by hand and the
+    // country has come up over them rather than swallowed them.
+    if (t.point && typeof Relic !== 'undefined') {
+      const g = Relic.ground(t.point[0], t.point[1]);
+      if (g && g.close) {
+        const has = this.count('shovel');
+        acts.push({ label: 'dig it out' + (has ? '' : '  (needs a shovel)'),
+          fn: () => {
+            if (!has) { this.toast('you need a shovel for that'); return; }
+            this.liftFromGround(t.point[0], t.point[1]);
+            this.close();
+          } });
+      }
+    }
     return acts;
   },
 
@@ -7776,6 +8013,7 @@ const Game = {
 
   talking: null, talkQ: null, talkSay: '', talkTale: null,
   told: [],            // tales heard, in the order they were heard
+  lifted: [],          // named things taken out of the ground, by artifact id
 
   // What this person has for you right now. Everybody carries a chain and
   // is only ever holding one link of it out; the elder also has stories,
@@ -7845,6 +8083,21 @@ const Game = {
     this.close();
   },
 
+  // You dug it up. Nobody can make you hand it over - but the person who
+  // asked stops asking you for things, and a chain is the only way anybody
+  // in this world tells you anything.
+  talkKeep() {
+    const q = this.talkQ;
+    if (!q || q.kind !== 'lift') return;
+    if (this.questState(q) !== 'open' || !Quest.done(q)) return;
+    this.quests[q.id] = 'kept';
+    this.needSave = true;
+    const said = Quest.keep(q, this.talking);
+    this.talkTo(this.talking);
+    this.talkSay = said;
+    this.uiDirty = true;
+  },
+
   drawTalk() {
     const who = this.talking;
     if (!who) return;
@@ -7887,12 +8140,13 @@ const Game = {
       // The reminder is not the task string in quotation marks - that reads
       // as a to-do list wearing a voice. He says a sentence; the task sits
       // under it as the note it is.
-      lines.push(Quest.done(q) ? '"That is done. Tell me."'
-                               : '"Not yet, then."');
-      if (!Quest.done(q)) lines.push('  ' + q.task);
+      const ready = Quest.done(q);
+      lines.push(ready ? '"That is done. Tell me."' : '"Not yet, then."');
+      if (!ready) lines.push('  ' + q.task);
       lines.push('');
-      lines.push(Quest.done(q) ? '[E] hand it over   [Q] not yet'
-                               : '[Q] leave');
+      lines.push(!ready ? '[Q] leave'
+        : q.kind === 'lift' ? '[E] hand it over   [K] keep it   [Q] not yet'
+        : '[E] tell them   [Q] not yet');
     } else if (q) {
       lines.push('"That is settled between us."');
       lines.push('');
@@ -7970,6 +8224,16 @@ const Game = {
   },
 
   describe(t) {
+    // Over a resting place the soil is the story, not the soil. Checked
+    // first so it beats "MEADOW" on ground with a grave under it.
+    if (t.point && typeof Relic !== 'undefined') {
+      const g = Relic.ground(t.point[0], t.point[1]);
+      if (g) return g.lines;
+    }
+    return this.describeGround(t);
+  },
+
+  describeGround(t) {
     switch (t.kind) {
       case 'tree': {
         const sp = SPECIES[treeSpecies(t.ix, t.iy)];
@@ -8168,7 +8432,7 @@ const Game = {
     }
     if (act === 'restart') {
       if (!this.menuAsk) { this.menuAsk = true; this.uiDirty = true; return; }
-      this.inv.clear(); this.read = []; this.told = [];
+      this.inv.clear(); this.read = []; this.told = []; this.lifted = [];
       this.done = false; this.used.clear();
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem(saveKey('ascii-save-v1'));
@@ -8715,8 +8979,17 @@ const Game = {
       lines.push('tree for wood');
     } else {
       for (const id of ids) {
-        const it = ITEMS[id] || { name: id };
-        lines.push(it.name.padEnd(14) + ' x ' + this.count(id));
+        // A relic is not a quantity, it is an object with a history, so it
+        // gets that history under it rather than a count beside it. This is
+        // the only place you can read what you are actually carrying.
+        if (typeof Relic !== 'undefined' && Relic.isRelic(id)) {
+          const d = Relic.describe(id);
+          lines.push(d[0]);
+          for (let i = 1; i < d.length; i++) if (d[i]) lines.push('  ' + d[i]);
+          lines.push('');
+          continue;
+        }
+        lines.push(this.itemName(id).padEnd(14) + ' x ' + this.count(id));
       }
     }
     lines.push('');
@@ -8733,7 +9006,7 @@ const Game = {
     for (const [k, v] of this.inv) inv[k] = v;
     return {
       inv, read: this.read, done: this.done, quests: this.quests,
-      told: this.told,
+      told: this.told, lifted: this.lifted,
       at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
                                            Player.pitch, Player.z] : null,
       t: typeof Sky !== 'undefined' ? Sky.t : null,
@@ -8746,6 +9019,7 @@ const Game = {
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
     this.told = Array.isArray(s.told) ? s.told : [];
+    this.lifted = Array.isArray(s.lifted) ? s.lifted : [];
     this.quests = (s.quests && typeof s.quests === 'object') ? s.quests : {};
     this.done = !!s.done;
     this.used = new Set((s.used || []).slice(-this.USED_MAX));

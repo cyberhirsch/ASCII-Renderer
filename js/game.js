@@ -60,6 +60,14 @@ const Game = {
 
   count(id) { return this.inv.get(id) || 0; },
 
+  // What to call something you are carrying. Everything in ITEMS is a kind
+  // of thing and has a name in the table; a relic is ONE thing out of two
+  // hundred and gets its name off the record instead.
+  itemName(id) {
+    if (typeof Relic !== 'undefined' && Relic.isRelic(id)) return Relic.name(id);
+    return (ITEMS[id] || { name: id }).name;
+  },
+
   give(id, n) {
     this.inv.set(id, this.count(id) + n);
     this.needSave = true;
@@ -104,10 +112,28 @@ const Game = {
   // Returns the scoop radius to carve, or 0 when the right tool is missing
   // (a toast explaining why is already queued). Pays out whatever the
   // material yields. Soil moves in bigger bites than rock does.
+  // Anything the ground gives up that is not the ground. Checked before the
+  // material is, because what is buried here is the reason to be digging.
+  // Shallow on purpose: whoever put it here put it here by hand.
+  liftFromGround(x, y) {
+    if (typeof Relic === 'undefined') return false;
+    const s = Relic.near(x, y, Relic.REACH);
+    if (!s) return false;
+    if (!this.count('shovel')) { this.toast('there is something here - you need a shovel'); return true; }
+    this.lifted.push(s.art);
+    this.give(Relic.itemId(s.art), 1);
+    this.needSave = true;
+    const left = Relic.countAt(x, y, Relic.REACH);
+    this.toast(s.name + ' comes up out of the soil' +
+               (left ? '  (something else is down there)' : ''));
+    return true;
+  },
+
   digAt(x, y, z) {
     const mat = matAt(x, y, z, terrainH(x, y));
     if (mat === MATS.DIRT) {
       if (!this.count('shovel')) { this.toast('soil - you need a shovel'); return 0; }
+      if (this.liftFromGround(x, y)) return 0;   // the hole gave up something
       return CFG.DIG_R * 1.4;
     }
     const need = this.needFor(mat, x, y, z);
@@ -124,7 +150,7 @@ const Game = {
     } else if (mat === MATS.ORE) {
       const id = oreItem(x, y, z);
       this.give(id, 1);
-      this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
+      this.toast('+1 ' + this.itemName(id) + ' (' + this.count(id) + ')');
     } else {
       this.give('stone', 1);
       this.toast('+1 stone (' + this.count('stone') + ')');
@@ -296,8 +322,8 @@ const Game = {
         this.cmdHistory.length = 0;
         break;
       case 'wipe':
-        this.inv.clear(); this.read = []; this.told = [];
-      this.done = false; this.used.clear();
+        this.inv.clear(); this.read = []; this.told = []; this.lifted = [];
+        this.done = false; this.used.clear();
         if (typeof localStorage !== 'undefined') {
           // this world only: another seed's digs are none of its business
           localStorage.removeItem(saveKey('ascii-save-v1'));
@@ -351,6 +377,9 @@ const Game = {
       this.cursor++; this.uiDirty = true; return true;
     }
     if (code === 'KeyE' || code === 'Enter') { this.confirm(); return true; }
+    // Keeping what you dug up is a different answer, not a different
+    // cursor position, so it gets a key rather than a menu row.
+    if (code === 'KeyK' && this.mode === 'talk') { this.talkKeep(); return true; }
     return true;   // swallow everything else while a panel is open
   },
 
@@ -455,7 +484,7 @@ const Game = {
         (has ? '' : '  (needs ' + this.PICK_NAME[need] + ')'), () => {
           if (!has) { this.toast('you need ' + this.PICK_NAME[need] + ' for that'); return; }
           this.give(id, 1);
-          this.toast('+1 ' + ITEMS[id].name + ' (' + this.count(id) + ')');
+          this.toast('+1 ' + this.itemName(id) + ' (' + this.count(id) + ')');
         });
     } else if (t.kind === 'stone') {
       acts.push({ label: 'pick up  (+1 stone)', fn: () => {
@@ -496,6 +525,21 @@ const Game = {
     } else if (t.kind === 'water') {
       acts.push({ label: 'drink', fn: () => this.toast('Cold and clean.') });
     }
+    // Anything the ground is hiding, whatever the ground is made of. The
+    // spade is the only tool involved: these were buried by hand and the
+    // country has come up over them rather than swallowed them.
+    if (t.point && typeof Relic !== 'undefined') {
+      const g = Relic.ground(t.point[0], t.point[1]);
+      if (g && g.close) {
+        const has = this.count('shovel');
+        acts.push({ label: 'dig it out' + (has ? '' : '  (needs a shovel)'),
+          fn: () => {
+            if (!has) { this.toast('you need a shovel for that'); return; }
+            this.liftFromGround(t.point[0], t.point[1]);
+            this.close();
+          } });
+      }
+    }
     return acts;
   },
 
@@ -503,6 +547,7 @@ const Game = {
 
   talking: null, talkQ: null, talkSay: '', talkTale: null,
   told: [],            // tales heard, in the order they were heard
+  lifted: [],          // named things taken out of the ground, by artifact id
 
   // What this person has for you right now. Everybody carries a chain and
   // is only ever holding one link of it out; the elder also has stories,
@@ -572,6 +617,21 @@ const Game = {
     this.close();
   },
 
+  // You dug it up. Nobody can make you hand it over - but the person who
+  // asked stops asking you for things, and a chain is the only way anybody
+  // in this world tells you anything.
+  talkKeep() {
+    const q = this.talkQ;
+    if (!q || q.kind !== 'lift') return;
+    if (this.questState(q) !== 'open' || !Quest.done(q)) return;
+    this.quests[q.id] = 'kept';
+    this.needSave = true;
+    const said = Quest.keep(q, this.talking);
+    this.talkTo(this.talking);
+    this.talkSay = said;
+    this.uiDirty = true;
+  },
+
   drawTalk() {
     const who = this.talking;
     if (!who) return;
@@ -614,12 +674,13 @@ const Game = {
       // The reminder is not the task string in quotation marks - that reads
       // as a to-do list wearing a voice. He says a sentence; the task sits
       // under it as the note it is.
-      lines.push(Quest.done(q) ? '"That is done. Tell me."'
-                               : '"Not yet, then."');
-      if (!Quest.done(q)) lines.push('  ' + q.task);
+      const ready = Quest.done(q);
+      lines.push(ready ? '"That is done. Tell me."' : '"Not yet, then."');
+      if (!ready) lines.push('  ' + q.task);
       lines.push('');
-      lines.push(Quest.done(q) ? '[E] hand it over   [Q] not yet'
-                               : '[Q] leave');
+      lines.push(!ready ? '[Q] leave'
+        : q.kind === 'lift' ? '[E] hand it over   [K] keep it   [Q] not yet'
+        : '[E] tell them   [Q] not yet');
     } else if (q) {
       lines.push('"That is settled between us."');
       lines.push('');
@@ -697,6 +758,16 @@ const Game = {
   },
 
   describe(t) {
+    // Over a resting place the soil is the story, not the soil. Checked
+    // first so it beats "MEADOW" on ground with a grave under it.
+    if (t.point && typeof Relic !== 'undefined') {
+      const g = Relic.ground(t.point[0], t.point[1]);
+      if (g) return g.lines;
+    }
+    return this.describeGround(t);
+  },
+
+  describeGround(t) {
     switch (t.kind) {
       case 'tree': {
         const sp = SPECIES[treeSpecies(t.ix, t.iy)];
@@ -895,7 +966,7 @@ const Game = {
     }
     if (act === 'restart') {
       if (!this.menuAsk) { this.menuAsk = true; this.uiDirty = true; return; }
-      this.inv.clear(); this.read = []; this.told = [];
+      this.inv.clear(); this.read = []; this.told = []; this.lifted = [];
       this.done = false; this.used.clear();
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem(saveKey('ascii-save-v1'));
@@ -1442,8 +1513,17 @@ const Game = {
       lines.push('tree for wood');
     } else {
       for (const id of ids) {
-        const it = ITEMS[id] || { name: id };
-        lines.push(it.name.padEnd(14) + ' x ' + this.count(id));
+        // A relic is not a quantity, it is an object with a history, so it
+        // gets that history under it rather than a count beside it. This is
+        // the only place you can read what you are actually carrying.
+        if (typeof Relic !== 'undefined' && Relic.isRelic(id)) {
+          const d = Relic.describe(id);
+          lines.push(d[0]);
+          for (let i = 1; i < d.length; i++) if (d[i]) lines.push('  ' + d[i]);
+          lines.push('');
+          continue;
+        }
+        lines.push(this.itemName(id).padEnd(14) + ' x ' + this.count(id));
       }
     }
     lines.push('');
@@ -1460,7 +1540,7 @@ const Game = {
     for (const [k, v] of this.inv) inv[k] = v;
     return {
       inv, read: this.read, done: this.done, quests: this.quests,
-      told: this.told,
+      told: this.told, lifted: this.lifted,
       at: typeof Player !== 'undefined' ? [Player.x, Player.y, Player.angle,
                                            Player.pitch, Player.z] : null,
       t: typeof Sky !== 'undefined' ? Sky.t : null,
@@ -1473,6 +1553,7 @@ const Game = {
     for (const k of Object.keys(s.inv || {})) this.inv.set(k, s.inv[k]);
     this.read = Array.isArray(s.read) ? s.read : [];
     this.told = Array.isArray(s.told) ? s.told : [];
+    this.lifted = Array.isArray(s.lifted) ? s.lifted : [];
     this.quests = (s.quests && typeof s.quests === 'object') ? s.quests : {};
     this.done = !!s.done;
     this.used = new Set((s.used || []).slice(-this.USED_MAX));

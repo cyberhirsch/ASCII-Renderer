@@ -13,13 +13,13 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 
 const src = ['config', 'util', 'world', 'items', 'chronicle', 'assets', 'lore',
-             'npc', 'quest', 'tales']
+             'npc', 'quest', 'tales', 'relic']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') +
-  '\n({ CFG, CAVES, HIST, Chronicle, Lore, NPC, Quest, Tales, World, ITEMS, ' +
+  '\n({ CFG, CAVES, HIST, Chronicle, Lore, NPC, Quest, Tales, Relic, World, ITEMS, ' +
   'terrainH, shaftAt });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
-const { CFG, NPC, Quest, Tales, Lore, ITEMS } = c;
+const { CFG, NPC, Quest, Tales, Relic, Lore, ITEMS } = c;
 
 let failures = 0;
 const fail = m => { failures++; console.error('FAIL  ' + m); };
@@ -116,11 +116,11 @@ const all = NPC.all();
     lens[ch.length] = (lens[ch.length] || 0) + 1;
     for (const q of ch) {
       kinds[q.kind] = (kinds[q.kind] || 0) + 1;
-      if (['seek', 'read', 'ask'].indexOf(q.kind) < 0) badKind++;
+      if (['seek', 'read', 'ask', 'lift'].indexOf(q.kind) < 0) badKind++;
       if (ids.has(q.id)) dupIds++;
       ids.add(q.id);
       for (const l of q.ask.concat([q.task])) if (l.length > NPC.WIDTH) wide++;
-      if (q.kind === 'seek') {
+      if (q.kind === 'seek' || q.kind === 'lift') {
         const d = Math.hypot(q.x - n.x, q.y - n.y);
         if (d > Quest.SEEK_MAX || d < Quest.SEEK_MIN) tooFar++;
       }
@@ -143,6 +143,53 @@ const all = NPC.all();
   (Object.keys(kinds).length >= 3)
     ? ok('the chains mix going, reading and asking')
     : fail(`only ${Object.keys(kinds).length} kinds across every chain`);
+}
+
+// ---- 5z. the named things, and getting them up ----
+{
+  const rel = Relic.all();
+  (rel.length > 50) ? ok(`${rel.length} named things are lying in the ground`)
+                    : fail(`only ${rel.length} relics have a resting place`);
+  // every one is where its own record says it is, which is the same number
+  // the elder reads out when he tells you about it
+  let wrong = 0, outside = 0;
+  const half = c.HIST.N * c.HIST.CELL / 2 + c.HIST.CELL;
+  for (const r of rel) {
+    const a = S.artifacts[r.art];
+    if (!a || !a.rest) { wrong++; continue; }
+    if (r.x !== c.Chronicle.wx(a.rest.i) || r.y !== c.Chronicle.wy(a.rest.j)) wrong++;
+    if (Math.abs(r.x) > half || Math.abs(r.y) > half) outside++;
+  }
+  (wrong === 0) ? ok('and each lies where its own record puts it')
+                : fail(`${wrong} relics are not where the chronicle says`);
+  (outside === 0) ? ok('and all of them inside the region')
+                  : fail(`${outside} relics lie outside the world`);
+
+  // an item id round-trips, and a relic is told apart from a stack of stone
+  const id = Relic.itemId(rel[0].art);
+  (Relic.artOf(id) === rel[0].art && Relic.isRelic(id) && !Relic.isRelic('stone'))
+    ? ok('a relic carries its identity in its item id')
+    : fail('relic item ids do not round-trip');
+  (Relic.name(id) === S.artifacts[rel[0].art].name)
+    ? ok('and is called what the record calls it')
+    : fail('relic name does not match the record');
+
+  // the ground says so before you are on top of it, and louder when you are
+  const r0 = rel[0];
+  const far = Relic.ground(r0.x + Relic.SENSE - 2, r0.y);
+  const on = Relic.ground(r0.x, r0.y);
+  (far && !far.close) ? ok('the ground reads wrong before you are standing on it')
+                      : fail('no distant read over a resting place');
+  (on && on.close) ? ok('and says something is under you when you are')
+                   : fail('no close read on top of a resting place');
+  (Relic.ground(r0.x + 4000, r0.y) === null)
+    ? ok('and says nothing at all over ordinary country')
+    : fail('the ground reads disturbed everywhere');
+
+  // graves cluster, so one hole can hold more than one thing
+  const most = Math.max(...rel.map(r => Relic.countAt(r.x, r.y)));
+  (most > 1) ? ok(`the biggest single spot holds ${most} of them`)
+             : fail('no resting place holds more than one thing');
 }
 
 // ---- 5a. one link at a time ----

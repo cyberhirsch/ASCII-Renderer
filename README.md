@@ -84,6 +84,26 @@ Nobody asks you to fetch materials — there was a fetch-quest kind and it is
 gone, because it asked nothing of the history the world is made of. **J**
 lists what is owed, whose chain it belongs to, and how far along it is.
 
+**And the named things are down there.** The chronicle makes two hundred
+objects over six thousand years — a maker, a chain of owners, a reason to be
+remembered — and puts each one in a grave or face down on the field it was
+dropped on. They are shallow: whoever buried them buried them by hand and the
+country has come up over them since, so a **shovel** is the whole of the
+tooling. Examine the ground near one and the soil reads wrong (*"the soil here
+lies in the wrong order… it reads strongest west of here"*); stand on it and
+it says something is under you; dig, and it comes up by name. Graves cluster,
+so one hole can give up several, one at a time. Your inventory then carries
+the object itself, with its own history under it:
+
+    the quiet gold flask of Anuaya
+      gold flask, made in the 520th year by Enaim.
+      The one put in the ground by Anuaya, and taken out of it by Breorn.
+
+When somebody asked you for it, you get a choice at the end of the walk:
+**hand it over** and be paid, or **keep it**. Keeping it is allowed and it
+costs you — that person stops asking you for things, and a chain is the only
+way anybody in this world tells you anything.
+
 Nothing tells you what to do. The top line is empty until you have read
 something off a wall or somebody has asked you for something, and there is
 no screen between the opening and the world that sets you a goal.

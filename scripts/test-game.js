@@ -12,14 +12,14 @@ const root = path.join(__dirname, '..');
 const grab = n => `${n}: (typeof ${n} === 'undefined' ? null : ${n})`;
 const src = ['config', 'quality', 'util', 'world', 'sky', 'overlay', 'edits',
              'removed', 'chronicle', 'assets', 'steading', 'entities',
-             'lore', 'npc', 'quest', 'tales', 'items', 'game', 'player']
+             'lore', 'npc', 'quest', 'tales', 'relic', 'items', 'game', 'player']
   .map(f => fs.readFileSync(path.join(root, 'js', f + '.js'), 'utf8'))
   .join('\n') + '\n({ CFG, CAVES, World, Overlay, Edits, Game, ITEMS, RECIPES, SPECIES, ' +
   'terrainH, solidD, treeAt, hallAt, caveFloor, ' +
   ['vnoise', 'Removed', 'treeSpecies', 'MATS', 'matAt', 'soilDepth', 'rockMat',
    'oreItem', 'Sky', 'PROPS', 'stoneAt', 'rockAt', 'Lore', 'hallIdAt',
    'Quality', 'saveKey', 'tinCountry', 'Chronicle', 'hallAt', 'Player',
-   'Steading', 'Entities', 'NPC', 'Quest', 'Tales']
+   'Steading', 'Entities', 'NPC', 'Quest', 'Tales', 'Relic']
     .map(grab).join(', ') + ' });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
 
@@ -1915,6 +1915,104 @@ if (c.NPC && c.Quest) {
     (text().includes(seeker.name.toUpperCase().slice(0, 4)))
       ? ok('who they are is on the screen') : fail('the talk panel is empty');
     G.close();
+  }
+
+  // ---- lifting a named thing, and what you do with it ----
+  if (c.Relic) {
+    const Relic = c.Relic;
+    G.lifted = []; G.inv.clear(); G.quests = {}; G.close();
+    const site = Relic.all()[0];
+    const item = Relic.itemId(site.art);
+
+    // standing on it with nothing to dig with
+    P.x = site.x; P.y = site.y; P.z = c.terrainH(site.x, site.y);
+    (G.liftFromGround(site.x, site.y) === true && G.count(item) === 0)
+      ? ok('the ground says there is something here, and refuses bare hands')
+      : fail('lifted a relic without a shovel');
+
+    // and with one
+    G.give('shovel', 1);
+    G.liftFromGround(site.x, site.y);
+    (G.count(item) === 1) ? ok(`${site.name} comes up with a shovel`)
+                          : fail('the relic did not come up');
+    (G.lifted.indexOf(site.art) >= 0) ? ok('and the world records it as gone')
+                                      : fail('lifted list not updated');
+    (Relic.near(site.x, site.y, Relic.REACH) === null ||
+     Relic.near(site.x, site.y, Relic.REACH).art !== site.art)
+      ? ok('and digging the same hole does not give it again')
+      : fail('the same relic can be lifted twice');
+
+    // it is called what the record calls it, not "relic:0"
+    (G.itemName(item) === site.name) ? ok('the inventory calls it by its name')
+                                     : fail('inventory shows ' + G.itemName(item));
+    const d = Relic.describe(item);
+    (d[0] === site.name && d[1].length > 8)
+      ? ok('and it can be examined for its own history')
+      : fail('relic description is empty');
+
+    // and a save carries it
+    const snap = JSON.parse(JSON.stringify(G.snapshot()));
+    G.lifted = []; G.inv.clear();
+    G.restore(snap);
+    (G.count(item) === 1 && G.lifted.indexOf(site.art) >= 0)
+      ? ok('what you dug up survives a reload')
+      : fail('the relic was lost on reload');
+  }
+
+  // ---- bring it, or keep it ----
+  if (c.Relic) {
+    const Relic = c.Relic;
+    const lifter = NPC.all().find(x => Quest.chain(x).some(q => q.kind === 'lift'));
+    if (!lifter) { fail('nobody in the world asks for a named thing'); }
+    else {
+      const step = Quest.chain(lifter).find(q => q.kind === 'lift');
+      const item = Relic.itemId(step.art);
+      // walk the chain up to that step
+      G.quests = {}; G.lifted = []; G.inv.clear();
+      for (const q of Quest.chain(lifter)) {
+        if (q.id === step.id) break;
+        G.quests[q.id] = 'done';
+      }
+      (Quest.current(lifter).id === step.id)
+        ? ok('a chain reaches the step that wants a named thing')
+        : fail('could not reach the lift step');
+      G.talkTo(lifter); G.confirm();
+      (G.quests[step.id] === 'open' && !Quest.done(step))
+        ? ok('and it cannot be handed in empty-handed')
+        : fail('the lift step completed without the thing');
+
+      // dig it up
+      G.give('shovel', 1);
+      G.liftFromGround(step.x, step.y);
+      (Quest.done(step)) ? ok('holding it satisfies the step')
+                         : fail('holding the relic did not satisfy it');
+
+      // hand it over: it changes hands
+      G.talkTo(lifter); G.confirm();
+      (G.quests[step.id] === 'done' && G.count(item) === 0 && G.count('gem') === 2)
+        ? ok('handing it over gives it up and is paid for')
+        : fail(`hand-over left item=${G.count(item)} gem=${G.count('gem')}`);
+      (Quest.at(lifter) > Quest.chain(lifter).indexOf(step))
+        ? ok('and the chain moves on') : fail('the chain stalled after handing over');
+
+      // or keep it: it stays, nothing is paid, and they stop asking
+      G.quests = {}; G.lifted = []; G.inv.clear(); G.give('shovel', 1);
+      for (const q of Quest.chain(lifter)) {
+        if (q.id === step.id) break;
+        G.quests[q.id] = 'done';
+      }
+      G.talkTo(lifter); G.confirm();
+      G.liftFromGround(step.x, step.y);
+      G.talkTo(lifter);
+      G.talkKeep();
+      (G.quests[step.id] === 'kept' && G.count(item) === 1 && G.count('gem') === 0)
+        ? ok('keeping it keeps it, and nothing is paid')
+        : fail(`keep left state=${G.quests[step.id]} item=${G.count(item)}`);
+      (Quest.current(lifter) === null)
+        ? ok('and that person stops asking you for things')
+        : fail('the chain carried on after being refused');
+      G.quests = {}; G.lifted = []; G.inv.clear(); G.close();
+    }
   }
 
   // ---- the elder: what got here by being told ----

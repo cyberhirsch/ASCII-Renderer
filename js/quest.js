@@ -53,8 +53,8 @@ const Quest = {
     // was cut under it, go and ask the old one what is said about it, then
     // go and stand where the two of them disagree.
     const builders = n.elder
-      ? [this.stepDoubt, this.stepRead, this.stepPlace, this.stepDeep]
-      : [this.stepPlace, this.stepRead, this.stepAsk, this.stepDeep];
+      ? [this.stepDoubt, this.stepRead, this.stepLift, this.stepDeep]
+      : [this.stepPlace, this.stepRead, this.stepAsk, this.stepLift, this.stepDeep];
     for (const make of builders) {
       if (steps.length >= want) break;
       const st = make.call(this, S, n, steps.length, used);
@@ -83,11 +83,15 @@ const Quest = {
     return Game.quests[id] || 'none';
   },
 
-  // How far along you are: the first step that is not marked done.
+  // How far along you are: the first step that is not marked done. A step
+  // you finished by keeping the thing instead of handing it over closes the
+  // chain where it stands - they asked you for one thing and you said no.
   at(n) {
     const c = this.chain(n);
     for (let i = 0; i < c.length; i++) {
-      if (this.state(c[i].id) !== 'done') return i;
+      const st = this.state(c[i].id);
+      if (st === 'kept') return c.length;
+      if (st !== 'done') return i;
     }
     return c.length;
   },
@@ -234,6 +238,42 @@ const Quest = {
     };
   },
 
+  // Go and get a named thing out of the ground. This is the step the whole
+  // apparatus was building towards: the chronicle made the object, gave it
+  // a maker and a chain of owners, and put it in a grave four thousand
+  // years ago, and now somebody wants it in their hands. Bounded like every
+  // other journey, and only ever pointed at something still down there.
+  stepLift(S, n, i, used) {
+    if (typeof Relic === 'undefined') return null;
+    const opts = [];
+    for (const r of Relic.all()) {
+      if (used && used.has('relic' + r.art)) continue;
+      const d = Math.hypot(r.x - n.x, r.y - n.y);
+      if (d < this.SEEK_MIN || d > this.SEEK_MAX) continue;
+      if (r.name.length > 44) continue;      // it has to fit on a wall of text
+      opts.push(r);
+    }
+    if (!opts.length) return null;
+    const r = opts[jsUhash((n.id * 67 + i) >>> 0, 88) % opts.length];
+    const way = this.bearing(r.x - n.x, r.y - n.y);
+    const how = r.how === 'battle' ? 'It went down on a field'
+                                   : 'It went into the ground with the dead';
+    return {
+      kind: 'lift', npc: n.id, key: 'relic' + r.art, art: r.art,
+      x: r.x, y: r.y, name: r.name,
+      ask: this.wrap('"' + this.upper(r.name) + '. ' + how + ' in the ' +
+        Lore.ord(r.t) + ' year, and it is still there. It lies ' + way +
+        ' of here, ' + Math.round(Math.hypot(r.x - n.x, r.y - n.y) / 10) +
+        ' leagues. Take a shovel. It will not be deep."'),
+      task: ('dig up ' + r.name + ', ' + way + ' of ' + n.siteName)
+              .slice(0, NPC.WIDTH),
+      pay: ['"You actually went and got it."'],
+      keep: ['"Then it is yours. I would have liked to hold it."'],
+    };
+  },
+
+  upper(s) { return s.charAt(0).toUpperCase() + s.slice(1); },
+
   // The last step of an elder's own chain, and the point of the whole
   // apparatus: he knows one of his own stories has drifted, and sends you
   // to the ground it happened on to see for yourself.
@@ -328,11 +368,26 @@ const Quest = {
       return false;
     }
     if (q.kind === 'ask') return (Game.told || []).indexOf(q.tale) >= 0;
+    if (q.kind === 'lift') return Game.count(Relic.itemId(q.art)) > 0;
     return false;
   },
 
   hand(q, n) {
+    if (q.kind === 'lift') {
+      // it changes hands, and they are the ones holding it now
+      Game.take(Relic.itemId(q.art), 1);
+      Game.give('gem', 2);
+      return (q.pay ? q.pay[0] : '"Good."') + ' (+2 ' + ITEMS.gem.name + ')';
+    }
     Game.give('gem', 1);
     return (q.pay ? q.pay[0] : '"Good."') + ' (+1 ' + ITEMS.gem.name + ')';
+  },
+
+  // The other answer. You dug it up; nobody can make you give it over. The
+  // thing stays in your hands and that person stops asking you for things -
+  // which is the cost, and it is a real one, because a chain is the only
+  // way anybody in this world tells you anything.
+  keep(q, n) {
+    return q.keep ? q.keep[0] : '"Keep it, then."';
   },
 };
