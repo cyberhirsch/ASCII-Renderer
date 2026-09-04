@@ -180,6 +180,9 @@ const Steading = {
     const near = S.sites.slice().sort((a, b) =>
       ((a.x - px) ** 2 + (a.y - py) ** 2) - ((b.x - px) ** 2 + (b.y - py) ** 2));
     let nh = 0, np = 0;
+    // where each person's geometry landed, so they can be moved without
+    // laying the village out again
+    this.folk = [];
     // one sphere around everything resident, so an occlusion ray far from
     // any village pays a single test rather than one per building
     const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
@@ -225,12 +228,47 @@ const Steading = {
             if (B.c[d] - B.r < lo[d]) lo[d] = B.c[d] - B.r;
             if (B.c[d] + B.r > hi[d]) hi[d] = B.c[d] + B.r;
           }
+          this.folk.push({ who, head: nh, prim: np, count: fig.length });
           nh++;
           for (const q of fig) np = this.writePrim(prim, np, q, who);
         }
       }
     }
+    // The people move inside the set without it being repacked, so the
+    // sphere that holds everything has to already cover wherever any of
+    // them can get to. Cheaper than growing it every frame, and it can
+    // only ever be too big, which costs one wasted sphere test.
+    if (this.folk.length && typeof NPC !== 'undefined') {
+      for (let d = 0; d < 3; d++) { lo[d] -= NPC.ROAM_MAX; hi[d] += NPC.ROAM_MAX; }
+    }
     return { heads: nh, prims: np, all: this.overall(lo, hi) };
+  },
+
+  // Move the people who are already resident, and leave the village alone.
+  // Nine people is sixty-three primitives; laying out the buildings around
+  // them is thousands, and none of it has changed. Returns the blocks that
+  // were touched so the renderer uploads those and nothing else.
+  repose(head, prim) {
+    if (!this.folk || !this.folk.length || typeof NPC === 'undefined') return null;
+    let hLo = 1e9, hHi = -1, pLo = 1e9, pHi = -1;
+    for (const f of this.folk) {
+      const fig = NPC.parts(f.who);
+      // the figure is a fixed seven parts; if that ever stops being true,
+      // leave the slot alone rather than writing over the next person
+      if (fig.length !== f.count) continue;
+      const B = partsBounds(fig);
+      const h = f.head * this.HEAD_F;
+      head[h] = B.c[0]; head[h + 1] = B.c[1]; head[h + 2] = B.c[2];
+      head[h + 3] = B.r;
+      let np = f.prim;
+      for (const q of fig) np = this.writePrim(prim, np, q, f.who);
+      if (f.head < hLo) hLo = f.head;
+      if (f.head > hHi) hHi = f.head;
+      if (f.prim < pLo) pLo = f.prim;
+      if (np > pHi) pHi = np;
+    }
+    if (hHi < 0) return null;
+    return { headFrom: hLo, headTo: hHi + 1, primFrom: pLo, primTo: pHi };
   },
 
   // the sphere that holds everything resident, or null when nothing is

@@ -35,7 +35,31 @@ const NPC = {
   AGE_MIN: 23, AGE_MAX: 79,
   ELDER: ['elder', 'who remembers what nobody wrote down'],
 
-  _all: null, _elder: null,
+  // Standing still is the one thing nobody does. What each of them does
+  // instead comes off the same thing their words do - the ground they are
+  // standing on and what it is for. A grower walks a row up and back, a
+  // smith stays at the fire and turns, a warden walks a beat, and the
+  // elder does not go far and does not go fast.
+  //
+  // No state is kept. Where somebody is at a given moment is a function of
+  // the clock, their id and the seed, the same way everything else in this
+  // world is a function of something rather than a thing that was saved.
+  ROAM: {
+    keeper: { r: 2.2, rate: 0.14 },
+    grower: { r: 3.4, rate: 0.22 },
+    smith:  { r: 0.0, rate: 0.30 },
+    warden: { r: 4.6, rate: 0.13 },
+    elder:  { r: 1.2, rate: 0.08 },
+  },
+  // The furthest any of them gets from their own spot. The path is r wide
+  // and 0.62r deep, so the corner of it is r * hypot(1, 0.62) = 1.18r away
+  // - not r, which is the number this was first set to and which the
+  // warden was already outside. The resident bounding sphere is grown by
+  // this, so it has to be the real maximum and not the radius.
+  ROAM_MAX: 5.5,
+  LOOK: 6.5,         // come this close and they turn and look at you
+
+  _all: null, _elder: null, _t: 0,
 
   // Everybody alive in the world, in one list. Small - a dozen settlements
   // and at most three to a settlement - so it is built once and kept.
@@ -65,9 +89,15 @@ const NPC = {
           id: out.length,
           name: Chronicle.nameFor(site.people, 700 + out.length, site.id * 13 + i),
           role, doing, age, elder: false,
+          // where they walk about, out of step with each other
+          phase: hash01(site.id * 17 + i, 3, (CFG.SEED ^ 0x9A1C) >>> 0) * Math.PI * 2,
           people: site.people, peopleName: p ? p.name : '?',
           site: site.id, siteName: site.name,
+          // x,y is the spot they belong to, and it never moves: every
+          // bearing and distance anybody quotes is measured from it. Where
+          // they actually ARE right now is px,py, which wanders.
           x, y, z: terrainH(x, y),
+          px: x, py: y, pz: terrainH(x, y),
           // facing the middle of their own settlement, which is where
           // anyone standing in a village stands looking
           facing: Math.atan2(site.y - y, site.x - x),
@@ -91,12 +121,50 @@ const NPC = {
   // The one who remembers. Null in a world whose peoples have all ended.
   elder() { this.all(); return this._elder; },
 
-  // The nearest person within reach, or null.
+  // Where somebody is at time t. A closed path around their own spot, and
+  // slow: the point is that the village is not a photograph, not that
+  // anybody is going anywhere. Two frequencies rather than one so it does
+  // not read as a circle being traced.
+  walk(n, t) {
+    const w = this.ROAM[n.role] || this.ROAM.grower;
+    const a = t * w.rate + n.phase;
+    return [n.x + Math.cos(a) * w.r,
+            n.y + Math.sin(a * 0.7 + n.phase) * w.r * 0.62];
+  },
+
+  // Move everybody. Called once a frame with the wall clock; nothing is
+  // stored, so a frame that never happens costs nothing and a reload puts
+  // everybody exactly where the clock says they should be.
+  tick(t, px, py) {
+    this._t = t;
+    for (const n of this.all()) {
+      const w = this.ROAM[n.role] || this.ROAM.grower;
+      const here = this.walk(n, t);
+      n.px = here[0]; n.py = here[1];
+      n.pz = terrainH(n.px, n.py);
+      if (px !== undefined &&
+          (n.px - px) ** 2 + (n.py - py) ** 2 < this.LOOK * this.LOOK) {
+        // somebody standing this close to you gets looked at
+        n.facing = Math.atan2(py - n.py, px - n.px);
+      } else if (w.r > 0.01) {
+        // otherwise they face the way they are going, taken off the path
+        // itself rather than tracked, so it is right on the first frame
+        const ahead = this.walk(n, t + 0.35);
+        n.facing = Math.atan2(ahead[1] - n.py, ahead[0] - n.px);
+      } else {
+        // nowhere to go: turning at the fire
+        n.facing = n.phase + t * w.rate;
+      }
+    }
+  },
+
+  // The nearest person within reach, or null. Measured against where they
+  // ARE, not where they belong: you speak to the person, not to the spot.
   near(x, y, maxD) {
     const r = maxD === undefined ? this.REACH : maxD;
     let best = null, bd = r * r;
     for (const n of this.all()) {
-      const d = (n.x - x) ** 2 + (n.y - y) ** 2;
+      const d = (n.px - x) ** 2 + (n.py - y) ** 2;
       if (d < bd) { bd = d; best = n; }
     }
     return best;
@@ -111,7 +179,7 @@ const NPC = {
   // scale; this is that same body with materials that read as somebody
   // rather than as an instrument left in the scene.
   parts(n) {
-    const P = transformParts(figureParts(0, 0, n.facing), { pos: [n.x, n.y, n.z] });
+    const P = transformParts(figureParts(0, 0, n.facing), { pos: [n.px, n.py, n.pz] });
     // Pale, deliberately. The first try dressed them in timber, and a
     // timber-brown figure standing in tree shade against dark ground is
     // invisible at five paces - the shape was right and could not be seen.

@@ -58,6 +58,8 @@
 
     Player.update(dt);
     Entities.update(dt, now / 1000);
+    // the people in the settlements are where the clock says they are
+    if (typeof NPC !== 'undefined') NPC.tick(now / 1000, Player.x, Player.y);
     Sky.update(dt);
     Edits.tick(dt);
     Removed.tick(dt);

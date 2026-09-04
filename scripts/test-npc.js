@@ -103,6 +103,71 @@ const all = NPC.all();
                 : fail(`${years} lines quote a year outside their people's life`);
 }
 
+// ---- 4b. nobody stands still ----
+{
+  let over = 0, fast = 0, drift = 0, still = 0;
+  let worst = 0, quickest = 0;
+  // the live list: section 2 rebuilds it to check determinism, so `all`
+  // holds equal-but-different objects and tick() would be moving the others
+  const folk = NPC.all();
+  for (const n of folk) {
+    let prev = null, moved = 0;
+    for (let t = 0; t < 300; t += 0.25) {
+      NPC.tick(t);
+      const d = Math.hypot(n.px - n.x, n.py - n.y);
+      if (d > worst) worst = d;
+      if (d > NPC.ROAM_MAX) over++;
+      if (prev) {
+        const spd = Math.hypot(n.px - prev[0], n.py - prev[1]) / 0.25;
+        if (spd > quickest) quickest = spd;
+        if (spd > 4.2) fast++;            // nobody outpaces the player
+        moved += spd;
+      }
+      prev = [n.px, n.py];
+    }
+    // a smith stays at the fire on purpose; everybody else goes somewhere
+    if (moved < 1e-6 && (NPC.ROAM[n.role] || {}).r > 0) still++;
+    if (n.pz !== c.terrainH(n.px, n.py)) drift++;
+  }
+  (over === 0) ? ok(`nobody leaves their own ground (furthest ${worst.toFixed(2)}u of ${NPC.ROAM_MAX})`)
+               : fail(`${over} times somebody went past ROAM_MAX`);
+  (fast === 0) ? ok(`and nobody outwalks you (fastest ${quickest.toFixed(2)}u/s against 4.2)`)
+               : fail(`${fast} times somebody moved faster than a run`);
+  (still === 0) ? ok('and everybody who has somewhere to go, goes')
+                : fail(`${still} people never moved`);
+  (drift === 0) ? ok('and stays on the ground while doing it')
+                : fail(`${drift} people floated`);
+
+  // the clock is the only state: the same moment is the same village
+  NPC.tick(511.25, 1e9, 1e9);
+  const a = folk.map(n => [n.px, n.py, n.facing]);
+  NPC.tick(0); NPC.tick(90); NPC.tick(511.25, 1e9, 1e9);
+  (JSON.stringify(a) === JSON.stringify(folk.map(n => [n.px, n.py, n.facing])))
+    ? ok('and the same clock puts everybody back where they were')
+    : fail('where people stand is not a function of the clock');
+
+  // they look at you when you come up to them
+  const e = NPC.elder();
+  NPC.tick(40, e.x + 3, e.y);
+  const want = Math.atan2(e.y - e.py, (e.x + 3) - e.px);
+  (Math.abs(e.facing - want) < 1e-9)
+    ? ok('and turns to face you when you are near enough to speak')
+    : fail('nobody looked up');
+
+  // and you speak to where they are, not to the spot they belong to
+  NPC.tick(77, 1e9, 1e9);
+  const someone = folk.find(n => Math.hypot(n.px - n.x, n.py - n.y) > 1.5);
+  if (someone) {
+    (NPC.near(someone.px, someone.py, 1.0) === someone)
+      ? ok('and answers from where they are standing')
+      : fail('a person cannot be reached where they are');
+    (NPC.near(someone.x, someone.y, 0.4) !== someone)
+      ? ok('and not from the empty ground they left')
+      : fail('a person answers from where they are not');
+  }
+  NPC.tick(0);
+}
+
 // ---- 5. the chains ----
 // Everybody has one, nobody hands over more than one link of it at a time,
 // and the fetch-me-five-wood step is gone for good.
@@ -391,10 +456,11 @@ const all = NPC.all();
   // by id, not by identity: the list is rebuilt above and these are fresh
   // objects describing the same people
   const n = NPC.all()[0];
-  const found = NPC.near(n.x, n.y, 1);
+  NPC.tick(0);                       // people move; ask about a moment
+  const found = NPC.near(n.px, n.py, 1);
   (found && found.id === n.id) ? ok('somebody underfoot is found')
                                : fail('near() missed a person at their own feet');
-  (NPC.near(n.x + 500, n.y + 500, NPC.REACH) === null)
+  (NPC.near(n.px + 500, n.py + 500, NPC.REACH) === null)
     ? ok('and nobody is found across the map')
     : fail('near() reached across the world');
   const fig = NPC.parts(n);

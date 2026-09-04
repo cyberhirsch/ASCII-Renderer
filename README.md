@@ -53,6 +53,14 @@ The heightfield never goes below zero, so the sea is nowhere deeper than
 either: a tree is placed only if the ground under its own anchor is dry, so
 the woods stop at the waterline instead of wading in.
 
+**Nobody in a settlement stands still.** What each of them does comes off the
+same thing their words do — the ground they are on and what it is for. A
+grower walks a row up and back, a smith stays at the fire and turns, a warden
+walks a beat, the elder does not go far and does not go fast. Come within
+speaking distance and they turn and look at you. None of it is stored: where
+somebody is at a given moment is a function of the clock, their id and the
+seed, like everything else here.
+
 The last of the six peoples has not ended, and **you start beside the oldest
 of them**. One person in the world remembers what nobody wrote down: talk to
 the elder — **E** on a person — and they tell you one thing at a time, out of

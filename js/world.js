@@ -126,7 +126,10 @@ const World = {
       // to a person beats examining the dirt they are stood on.
       if (typeof NPC !== 'undefined') {
         const who = NPC.near(px, py, 0.75);
-        if (who && pz > who.z - 0.2 && pz < who.z + 2.0) {
+        // against where they are standing now, not the spot they belong
+        // to: they move, and looking at the empty ground beside somebody
+        // and being told it is them is worse than not finding them at all
+        if (who && pz > who.pz - 0.2 && pz < who.pz + 2.0) {
           return { kind: 'npc', npc: who.id, point: [px, py, pz] };
         }
       }
@@ -190,6 +193,8 @@ const World = {
   findSpawn() {
     const e = (typeof NPC === 'undefined') ? null : NPC.elder();
     if (e) {
+      // their own spot, not wherever the clock has them: the spawn has to
+      // be the same place on every load of the same save
       const at = this.standNear(e.x, e.y, 2.2, 9);
       if (at) return at;
     }

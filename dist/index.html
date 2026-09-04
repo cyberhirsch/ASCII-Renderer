@@ -1041,7 +1041,10 @@ const World = {
       // to a person beats examining the dirt they are stood on.
       if (typeof NPC !== 'undefined') {
         const who = NPC.near(px, py, 0.75);
-        if (who && pz > who.z - 0.2 && pz < who.z + 2.0) {
+        // against where they are standing now, not the spot they belong
+        // to: they move, and looking at the empty ground beside somebody
+        // and being told it is them is worse than not finding them at all
+        if (who && pz > who.pz - 0.2 && pz < who.pz + 2.0) {
           return { kind: 'npc', npc: who.id, point: [px, py, pz] };
         }
       }
@@ -1105,6 +1108,8 @@ const World = {
   findSpawn() {
     const e = (typeof NPC === 'undefined') ? null : NPC.elder();
     if (e) {
+      // their own spot, not wherever the clock has them: the spawn has to
+      // be the same place on every load of the same save
       const at = this.standNear(e.x, e.y, 2.2, 9);
       if (at) return at;
     }
@@ -5926,6 +5931,9 @@ const Steading = {
     const near = S.sites.slice().sort((a, b) =>
       ((a.x - px) ** 2 + (a.y - py) ** 2) - ((b.x - px) ** 2 + (b.y - py) ** 2));
     let nh = 0, np = 0;
+    // where each person's geometry landed, so they can be moved without
+    // laying the village out again
+    this.folk = [];
     // one sphere around everything resident, so an occlusion ray far from
     // any village pays a single test rather than one per building
     const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
@@ -5971,12 +5979,47 @@ const Steading = {
             if (B.c[d] - B.r < lo[d]) lo[d] = B.c[d] - B.r;
             if (B.c[d] + B.r > hi[d]) hi[d] = B.c[d] + B.r;
           }
+          this.folk.push({ who, head: nh, prim: np, count: fig.length });
           nh++;
           for (const q of fig) np = this.writePrim(prim, np, q, who);
         }
       }
     }
+    // The people move inside the set without it being repacked, so the
+    // sphere that holds everything has to already cover wherever any of
+    // them can get to. Cheaper than growing it every frame, and it can
+    // only ever be too big, which costs one wasted sphere test.
+    if (this.folk.length && typeof NPC !== 'undefined') {
+      for (let d = 0; d < 3; d++) { lo[d] -= NPC.ROAM_MAX; hi[d] += NPC.ROAM_MAX; }
+    }
     return { heads: nh, prims: np, all: this.overall(lo, hi) };
+  },
+
+  // Move the people who are already resident, and leave the village alone.
+  // Nine people is sixty-three primitives; laying out the buildings around
+  // them is thousands, and none of it has changed. Returns the blocks that
+  // were touched so the renderer uploads those and nothing else.
+  repose(head, prim) {
+    if (!this.folk || !this.folk.length || typeof NPC === 'undefined') return null;
+    let hLo = 1e9, hHi = -1, pLo = 1e9, pHi = -1;
+    for (const f of this.folk) {
+      const fig = NPC.parts(f.who);
+      // the figure is a fixed seven parts; if that ever stops being true,
+      // leave the slot alone rather than writing over the next person
+      if (fig.length !== f.count) continue;
+      const B = partsBounds(fig);
+      const h = f.head * this.HEAD_F;
+      head[h] = B.c[0]; head[h + 1] = B.c[1]; head[h + 2] = B.c[2];
+      head[h + 3] = B.r;
+      let np = f.prim;
+      for (const q of fig) np = this.writePrim(prim, np, q, f.who);
+      if (f.head < hLo) hLo = f.head;
+      if (f.head > hHi) hHi = f.head;
+      if (f.prim < pLo) pLo = f.prim;
+      if (np > pHi) pHi = np;
+    }
+    if (hHi < 0) return null;
+    return { headFrom: hLo, headTo: hHi + 1, primFrom: pLo, primTo: pHi };
   },
 
   // the sphere that holds everything resident, or null when nothing is
@@ -6333,7 +6376,31 @@ const NPC = {
   AGE_MIN: 23, AGE_MAX: 79,
   ELDER: ['elder', 'who remembers what nobody wrote down'],
 
-  _all: null, _elder: null,
+  // Standing still is the one thing nobody does. What each of them does
+  // instead comes off the same thing their words do - the ground they are
+  // standing on and what it is for. A grower walks a row up and back, a
+  // smith stays at the fire and turns, a warden walks a beat, and the
+  // elder does not go far and does not go fast.
+  //
+  // No state is kept. Where somebody is at a given moment is a function of
+  // the clock, their id and the seed, the same way everything else in this
+  // world is a function of something rather than a thing that was saved.
+  ROAM: {
+    keeper: { r: 2.2, rate: 0.14 },
+    grower: { r: 3.4, rate: 0.22 },
+    smith:  { r: 0.0, rate: 0.30 },
+    warden: { r: 4.6, rate: 0.13 },
+    elder:  { r: 1.2, rate: 0.08 },
+  },
+  // The furthest any of them gets from their own spot. The path is r wide
+  // and 0.62r deep, so the corner of it is r * hypot(1, 0.62) = 1.18r away
+  // - not r, which is the number this was first set to and which the
+  // warden was already outside. The resident bounding sphere is grown by
+  // this, so it has to be the real maximum and not the radius.
+  ROAM_MAX: 5.5,
+  LOOK: 6.5,         // come this close and they turn and look at you
+
+  _all: null, _elder: null, _t: 0,
 
   // Everybody alive in the world, in one list. Small - a dozen settlements
   // and at most three to a settlement - so it is built once and kept.
@@ -6363,9 +6430,15 @@ const NPC = {
           id: out.length,
           name: Chronicle.nameFor(site.people, 700 + out.length, site.id * 13 + i),
           role, doing, age, elder: false,
+          // where they walk about, out of step with each other
+          phase: hash01(site.id * 17 + i, 3, (CFG.SEED ^ 0x9A1C) >>> 0) * Math.PI * 2,
           people: site.people, peopleName: p ? p.name : '?',
           site: site.id, siteName: site.name,
+          // x,y is the spot they belong to, and it never moves: every
+          // bearing and distance anybody quotes is measured from it. Where
+          // they actually ARE right now is px,py, which wanders.
           x, y, z: terrainH(x, y),
+          px: x, py: y, pz: terrainH(x, y),
           // facing the middle of their own settlement, which is where
           // anyone standing in a village stands looking
           facing: Math.atan2(site.y - y, site.x - x),
@@ -6389,12 +6462,50 @@ const NPC = {
   // The one who remembers. Null in a world whose peoples have all ended.
   elder() { this.all(); return this._elder; },
 
-  // The nearest person within reach, or null.
+  // Where somebody is at time t. A closed path around their own spot, and
+  // slow: the point is that the village is not a photograph, not that
+  // anybody is going anywhere. Two frequencies rather than one so it does
+  // not read as a circle being traced.
+  walk(n, t) {
+    const w = this.ROAM[n.role] || this.ROAM.grower;
+    const a = t * w.rate + n.phase;
+    return [n.x + Math.cos(a) * w.r,
+            n.y + Math.sin(a * 0.7 + n.phase) * w.r * 0.62];
+  },
+
+  // Move everybody. Called once a frame with the wall clock; nothing is
+  // stored, so a frame that never happens costs nothing and a reload puts
+  // everybody exactly where the clock says they should be.
+  tick(t, px, py) {
+    this._t = t;
+    for (const n of this.all()) {
+      const w = this.ROAM[n.role] || this.ROAM.grower;
+      const here = this.walk(n, t);
+      n.px = here[0]; n.py = here[1];
+      n.pz = terrainH(n.px, n.py);
+      if (px !== undefined &&
+          (n.px - px) ** 2 + (n.py - py) ** 2 < this.LOOK * this.LOOK) {
+        // somebody standing this close to you gets looked at
+        n.facing = Math.atan2(py - n.py, px - n.px);
+      } else if (w.r > 0.01) {
+        // otherwise they face the way they are going, taken off the path
+        // itself rather than tracked, so it is right on the first frame
+        const ahead = this.walk(n, t + 0.35);
+        n.facing = Math.atan2(ahead[1] - n.py, ahead[0] - n.px);
+      } else {
+        // nowhere to go: turning at the fire
+        n.facing = n.phase + t * w.rate;
+      }
+    }
+  },
+
+  // The nearest person within reach, or null. Measured against where they
+  // ARE, not where they belong: you speak to the person, not to the spot.
   near(x, y, maxD) {
     const r = maxD === undefined ? this.REACH : maxD;
     let best = null, bd = r * r;
     for (const n of this.all()) {
-      const d = (n.x - x) ** 2 + (n.y - y) ** 2;
+      const d = (n.px - x) ** 2 + (n.py - y) ** 2;
       if (d < bd) { bd = d; best = n; }
     }
     return best;
@@ -6409,7 +6520,7 @@ const NPC = {
   // scale; this is that same body with materials that read as somebody
   // rather than as an instrument left in the scene.
   parts(n) {
-    const P = transformParts(figureParts(0, 0, n.facing), { pos: [n.x, n.y, n.z] });
+    const P = transformParts(figureParts(0, 0, n.facing), { pos: [n.px, n.py, n.pz] });
     // Pale, deliberately. The first try dressed them in timber, and a
     // timber-brown figure standing in tree shade against dark ground is
     // invisible at five paces - the shape was right and could not be seen.
@@ -11633,6 +11744,19 @@ const GPURenderer = {
           dev.queue.writeBuffer(this.steadHeadBuf, 0, this.steadHead, 0, r.heads * 8);
           dev.queue.writeBuffer(this.steadPrimBuf, 0, this.steadPrim, 0, r.prims * 20);
         }
+      } else if (this.steadCount > 0) {
+        // The village has not changed but the people in it have moved, so
+        // only their spheres and their limbs go back up - one band of
+        // headers and one of primitives, both a few kilobytes. Repacking
+        // the whole set for this would be laying out every wall in range,
+        // sixty times a second, to move nine people two metres.
+        const m = Steading.repose(this.steadHead, this.steadPrim);
+        if (m) {
+          dev.queue.writeBuffer(this.steadHeadBuf, m.headFrom * 32,
+            this.steadHead, m.headFrom * 8, (m.headTo - m.headFrom) * 8);
+          dev.queue.writeBuffer(this.steadPrimBuf, m.primFrom * 80,
+            this.steadPrim, m.primFrom * 20, (m.primTo - m.primFrom) * 20);
+        }
       }
     }
 
@@ -11889,6 +12013,8 @@ const GPURenderer = {
 
     Player.update(dt);
     Entities.update(dt, now / 1000);
+    // the people in the settlements are where the clock says they are
+    if (typeof NPC !== 'undefined') NPC.tick(now / 1000, Player.x, Player.y);
     Sky.update(dt);
     Edits.tick(dt);
     Removed.tick(dt);

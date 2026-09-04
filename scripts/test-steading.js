@@ -14,12 +14,12 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 
 const src = ['js/config.js', 'js/util.js', 'js/items.js', 'js/chronicle.js',
-             'js/assets.js', 'js/steading.js']
+             'js/assets.js', 'js/steading.js', 'js/lore.js', 'js/npc.js']
   .map(f => fs.readFileSync(path.join(root, f), 'utf8'))
   .join('\n') + '\n({ CFG, HIST, ASSET, Chronicle, Steading, Build, terrainH, ' +
-  'partsBounds });';
+  'partsBounds, Lore, NPC });';
 const c = vm.runInNewContext(src, { console, Math, JSON }, { filename: 'under-test' });
-const { CFG, HIST, Chronicle, Steading, Build } = c;
+const { CFG, HIST, Chronicle, Steading, Build, NPC } = c;
 
 let failures = 0;
 const fail = m => { failures++; console.error('FAIL  ' + m); };
@@ -198,6 +198,58 @@ const S = runs[8151623];
   (far.heads === 0 && far.all === null)
     ? ok('nothing resident means no sphere, not a sphere around nothing')
     : fail(`empty pack returned ${JSON.stringify(far.all)}`);
+}
+
+// ---- moving the people without laying the village out again ----
+// A village is thousands of primitives and none of them change when
+// somebody takes a step, so the people are rewritten in place. This is the
+// promise that makes that safe: the rewrite touches their slots and nothing
+// else, and what it writes is what a full repack would have written.
+{
+  const S = c.Lore.init();
+  const MH = CFG.STEAD_HEAD, MP = CFG.STEAD_PRIM;
+  const head = new Float32Array(MH * 8), prim = new Float32Array(MP * 20);
+  const e = NPC.elder();
+  NPC.tick(0);
+  const r = Steading.pack(S, e.x, e.y, S.now, head, prim, MH, MP);
+  (Steading.folk && Steading.folk.length > 0)
+    ? ok(`packing a village records where its ${Steading.folk.length} people landed`)
+    : fail('nobody was recorded during the pack');
+
+  // a full repack at a later moment is the reference
+  const h2 = new Float32Array(MH * 8), p2 = new Float32Array(MP * 20);
+  NPC.tick(83.5);
+  const r2 = Steading.pack(S, e.x, e.y, S.now, h2, p2, MH, MP);
+  // and the cheap path has to land in exactly the same place
+  NPC.tick(0);
+  Steading.pack(S, e.x, e.y, S.now, head, prim, MH, MP);
+  NPC.tick(83.5);
+  const m = Steading.repose(head, prim);
+  m ? ok(`reposing touches ${m.headTo - m.headFrom} headers and ${m.primTo - m.primFrom} primitives`)
+    : fail('repose reported nothing moved');
+  let dp = 0, dh = 0;
+  for (let i = 0; i < r.prims * 20; i++) if (prim[i] !== p2[i]) dp++;
+  for (let i = 0; i < r.heads * 8; i++) if (head[i] !== h2[i]) dh++;
+  (dp === 0 && dh === 0)
+    ? ok('and lands on exactly what a full repack would have written')
+    : fail(`${dp} primitive floats and ${dh} header floats differ from a repack`);
+  (r2.heads === r.heads && r2.prims === r.prims)
+    ? ok('and the set is the same size either way')
+    : fail('a repack after moving produced a different set');
+
+  // the resident sphere already covers everywhere anybody can get to
+  let outside = 0;
+  for (let t = 0; t < 400; t += 6.5) {
+    NPC.tick(t);
+    for (const f of Steading.folk) {
+      const B = c.partsBounds(NPC.parts(f.who));
+      const d = Math.hypot(B.c[0] - r.all[0], B.c[1] - r.all[1], B.c[2] - r.all[2]);
+      if (d + B.r > r.all[3] + 1e-6) outside++;
+    }
+  }
+  (outside === 0) ? ok('and nobody ever walks out of the sphere that holds them')
+                  : fail(`${outside} times somebody left the resident sphere`);
+  NPC.tick(0);
 }
 
 if (failures) { console.error(`\n${failures} failed`); process.exit(1); }

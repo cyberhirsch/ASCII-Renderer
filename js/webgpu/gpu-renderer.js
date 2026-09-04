@@ -306,6 +306,19 @@ const GPURenderer = {
           dev.queue.writeBuffer(this.steadHeadBuf, 0, this.steadHead, 0, r.heads * 8);
           dev.queue.writeBuffer(this.steadPrimBuf, 0, this.steadPrim, 0, r.prims * 20);
         }
+      } else if (this.steadCount > 0) {
+        // The village has not changed but the people in it have moved, so
+        // only their spheres and their limbs go back up - one band of
+        // headers and one of primitives, both a few kilobytes. Repacking
+        // the whole set for this would be laying out every wall in range,
+        // sixty times a second, to move nine people two metres.
+        const m = Steading.repose(this.steadHead, this.steadPrim);
+        if (m) {
+          dev.queue.writeBuffer(this.steadHeadBuf, m.headFrom * 32,
+            this.steadHead, m.headFrom * 8, (m.headTo - m.headFrom) * 8);
+          dev.queue.writeBuffer(this.steadPrimBuf, m.primFrom * 80,
+            this.steadPrim, m.primFrom * 20, (m.primTo - m.primFrom) * 20);
+        }
       }
     }
 
